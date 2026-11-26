@@ -271,7 +271,7 @@ fn tell_a_stale_entry_is_an_error() {
         id: stale_id.to_string(),
         name: "stale-tell-target".to_string(),
         root: d.path().join("ghost"),
-        branch: "main".to_string(),
+        branch: Some("main".to_string()),
         pid: 999_999,
         port: dead_port,
         started_at: 1_700_000_000,

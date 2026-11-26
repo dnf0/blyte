@@ -2781,16 +2781,19 @@ pub fn clean_surfaces(
         }
     }
 
-    let records = crate::surface_dir::list_records(main_checkout)?;
+    let records = crate::surface_dir::list_records_for_root(
+        main_checkout,
+        crate::registry::state_dir().as_deref(),
+    )?;
     let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(now_secs);
     let max_age = std::time::Duration::from_secs(older_than_days.saturating_mul(86_400));
 
-    for record in records {
-        if crate::surface_dir::is_running(&record) {
+    for located in records {
+        if crate::surface_dir::is_running(&located.record) {
             continue;
         }
-        let dir = crate::surface_dir::surface_dir(main_checkout, &record.id);
-        let newest = newest_file_mtime(&dir)?;
+        let dir = &located.dir;
+        let newest = newest_file_mtime(dir)?;
         let is_older = match now.duration_since(newest) {
             Ok(age) => age > max_age,
             Err(_) => false,
@@ -2798,10 +2801,14 @@ pub fn clean_surfaces(
         if !is_older {
             continue;
         }
-        let token_path = blyte_agent::sandbox::surface_token_path_for_id(&record.id)?;
-        let dir_label = format!(".wt/surfaces/{}", record.id);
+        let token_path = blyte_agent::sandbox::surface_token_path_for_id(&located.record.id)?;
+        let dir_label = if dir.starts_with(main_checkout) {
+            format!(".wt/surfaces/{}", located.record.id)
+        } else {
+            dir.display().to_string()
+        };
         let token_label = token_path.display().to_string();
-        remove_dir_if_present(&dir, &dir_label, dry_run, &mut lines)?;
+        remove_dir_if_present(dir, &dir_label, dry_run, &mut lines)?;
         remove_file_if_present(&token_path, &token_label, dry_run, &mut lines)?;
     }
 

@@ -119,7 +119,7 @@ fn make_entry(
         id: id.to_string(),
         name: name.to_string(),
         root: PathBuf::from(root),
-        branch: branch.to_string(),
+        branch: Some(branch.to_string()),
         pid: std::process::id(),
         port,
         started_at,

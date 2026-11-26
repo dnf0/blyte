@@ -173,6 +173,30 @@ pub fn configure_converse_policy_with_paths(
             private_tmpdir: None,
         });
     }
+    if !crate::serve::is_repository(root) {
+        let root_canon = root
+            .canonicalize()
+            .map_err(|e| format!("cannot canonicalize {}: {e}", root.display()))?;
+        blyte_agent::tools::set_write_scope(Some(blyte_agent::tools::WriteScope {
+            allowed: vec![root_canon],
+            edit_worktrees: None,
+        }));
+        let rules = crate::approval_file::load()?;
+        let allowed_count = rules.len();
+        let approver: Arc<dyn blyte_agent::approval::Approver> = match approver {
+            Some(a) => a,
+            None if has_conversation => Arc::new(crate::tty_approver::TtyApprover),
+            None => Arc::new(blyte_agent::approval::NoApprover),
+        };
+        blyte_agent::tools::set_approval(Some(blyte_agent::approval::ApprovalConfig {
+            rules,
+            approver,
+        }));
+        return Ok(ConversePolicy {
+            allowed_count,
+            private_tmpdir: None,
+        });
+    }
     let paths = blyte_agent::sandbox::conversation_paths(root)?;
     let mut tmp_cleanup = TempDirGuard(if paths.created_tmpdir {
         paths.tmpdir.clone()

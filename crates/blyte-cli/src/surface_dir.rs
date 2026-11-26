@@ -62,6 +62,144 @@ pub fn validate_surface_name(name: &str) -> Result<(), String> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocatedRecord {
+    pub record: SurfaceRecord,
+    pub dir: PathBuf,
+}
+
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
+fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        std::borrow::Cow::Borrowed(path.as_os_str().as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        std::borrow::Cow::Owned(path.to_string_lossy().into_owned().into_bytes())
+    }
+}
+
+fn folder_store_key(canonical: &Path) -> String {
+    format!("{:016x}", fnv1a_64(&path_bytes(canonical)))
+}
+
+fn ensure_dir_0700(dir: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+        }
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        match builder.create(dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                let meta = std::fs::metadata(dir)
+                    .map_err(|me| format!("failed to inspect {}: {me}", dir.display()))?;
+                if !meta.is_dir() {
+                    return Err(format!(
+                        "folder store {} exists and is not a directory",
+                        dir.display()
+                    ));
+                }
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(
+                    |pe| format!("failed to set permissions on {}: {pe}", dir.display()),
+                )?;
+            }
+            Err(e) => return Err(format!("failed to create {}: {e}", dir.display())),
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))
+    }
+}
+
+fn verify_root_file(store_dir: &Path, canonical: &Path) -> Result<bool, String> {
+    let root_file = store_dir.join("root");
+    let raw = match std::fs::read(&root_file) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("failed to read {}: {e}", root_file.display())),
+    };
+    let stored = raw.strip_suffix(b"\n").unwrap_or(&raw);
+    let stored = stored.strip_suffix(b"\r").unwrap_or(stored);
+    let expected = path_bytes(canonical);
+    if stored != expected.as_ref() {
+        let stored_display = String::from_utf8_lossy(stored);
+        return Err(format!(
+            "folder store collision in {}: recorded root {} differs from {}",
+            store_dir.display(),
+            stored_display,
+            canonical.display()
+        ));
+    }
+    Ok(true)
+}
+
+pub fn folder_store(state_dir: &Path, root: &Path) -> Result<PathBuf, String> {
+    let canonical = root
+        .canonicalize()
+        .map_err(|e| format!("failed to canonicalize {}: {e}", root.display()))?;
+    let key = folder_store_key(&canonical);
+    let store_dir = state_dir.join("folders").join(key);
+    ensure_dir_0700(&store_dir)?;
+    if !verify_root_file(&store_dir, &canonical)? {
+        let root_file = store_dir.join("root");
+        let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = store_dir.join(format!(".root.tmp.{}.{seq}", std::process::id()));
+        let content = path_bytes(&canonical);
+        if let Err(e) = std::fs::write(&tmp, content.as_ref()) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("failed to write {}: {e}", tmp.display()));
+        }
+        if let Err(e) = std::fs::rename(&tmp, &root_file) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!(
+                "failed to rename {} to {}: {e}",
+                tmp.display(),
+                root_file.display()
+            ));
+        }
+    }
+    Ok(store_dir)
+}
+
+fn existing_folder_store(state_dir: &Path, root: &Path) -> Result<Option<PathBuf>, String> {
+    let canonical = match root.canonicalize() {
+        Ok(c) => c,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("failed to canonicalize {}: {e}", root.display())),
+    };
+    let key = folder_store_key(&canonical);
+    let store_dir = state_dir.join("folders").join(key);
+    match std::fs::metadata(&store_dir) {
+        Ok(meta) if meta.is_dir() => {
+            let _ = verify_root_file(&store_dir, &canonical)?;
+            Ok(Some(store_dir))
+        }
+        Ok(_) => Err(format!(
+            "folder store {} exists and is not a directory",
+            store_dir.display()
+        )),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("failed to inspect {}: {e}", store_dir.display())),
+    }
+}
+
 pub fn surfaces_dir(main_checkout: &Path) -> PathBuf {
     main_checkout.join(".wt").join("surfaces")
 }
@@ -78,18 +216,16 @@ pub fn entries_path(main_checkout: &Path, id: &str) -> PathBuf {
     surface_dir(main_checkout, id).join("entries.jsonl")
 }
 
-pub fn write_record(main_checkout: &Path, record: &SurfaceRecord) -> Result<(), String> {
+pub fn write_record_in(dir: &Path, record: &SurfaceRecord) -> Result<(), String> {
     validate_surface_id(&record.id)?;
     validate_surface_name(&record.name)?;
-    let dir = surface_dir(main_checkout, &record.id);
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
     let mut json = serde_json::to_string_pretty(record)
         .map_err(|e| format!("failed to serialize surface record {}: {e}", record.id))?;
     json.push('\n');
     let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = dir.join(format!("surface.json.tmp.{}.{seq}", std::process::id()));
-    let dest = record_path(main_checkout, &record.id);
+    let dest = dir.join("surface.json");
     if let Err(e) = std::fs::write(&tmp, json.as_bytes()) {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("failed to write {}: {e}", tmp.display()));
@@ -105,9 +241,13 @@ pub fn write_record(main_checkout: &Path, record: &SurfaceRecord) -> Result<(), 
     Ok(())
 }
 
-pub fn read_record(main_checkout: &Path, id: &str) -> Result<SurfaceRecord, String> {
+pub fn write_record(main_checkout: &Path, record: &SurfaceRecord) -> Result<(), String> {
+    write_record_in(&surface_dir(main_checkout, &record.id), record)
+}
+
+pub fn read_record_in(dir: &Path, id: &str) -> Result<SurfaceRecord, String> {
     validate_surface_id(id)?;
-    let path = record_path(main_checkout, id);
+    let path = dir.join("surface.json");
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     let record: SurfaceRecord = serde_json::from_str(&text)
@@ -125,11 +265,14 @@ pub fn read_record(main_checkout: &Path, id: &str) -> Result<SurfaceRecord, Stri
     Ok(record)
 }
 
-pub fn list_records(main_checkout: &Path) -> Result<Vec<SurfaceRecord>, String> {
-    let root = surfaces_dir(main_checkout);
-    let entries = match std::fs::read_dir(&root) {
+pub fn read_record(main_checkout: &Path, id: &str) -> Result<SurfaceRecord, String> {
+    read_record_in(&surface_dir(main_checkout, id), id)
+}
+
+pub fn list_records_in(root: &Path) -> Result<Vec<LocatedRecord>, String> {
+    let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(format!("failed to read {}: {e}", root.display())),
     };
     let mut records = Vec::new();
@@ -149,13 +292,40 @@ pub fn list_records(main_checkout: &Path) -> Result<Vec<SurfaceRecord>, String> 
         if let Err(e) = validate_surface_id(id) {
             return Err(format!("invalid surface directory {}: {e}", path.display()));
         }
-        let record = read_record(main_checkout, id)?;
-        records.push(record);
+        let record = read_record_in(&path, id)?;
+        records.push(LocatedRecord { record, dir: path });
     }
     records.sort_by(|a, b| {
-        a.started_at
-            .cmp(&b.started_at)
-            .then_with(|| a.id.cmp(&b.id))
+        a.record
+            .started_at
+            .cmp(&b.record.started_at)
+            .then_with(|| a.record.id.cmp(&b.record.id))
+    });
+    Ok(records)
+}
+
+pub fn list_records(main_checkout: &Path) -> Result<Vec<SurfaceRecord>, String> {
+    Ok(list_records_in(&surfaces_dir(main_checkout))?
+        .into_iter()
+        .map(|located| located.record)
+        .collect())
+}
+
+pub fn list_records_for_root(
+    root: &Path,
+    state_dir: Option<&Path>,
+) -> Result<Vec<LocatedRecord>, String> {
+    let mut records = list_records_in(&surfaces_dir(root))?;
+    if let Some(sd) = state_dir {
+        if let Some(store) = existing_folder_store(sd, root)? {
+            records.extend(list_records_in(&store.join("surfaces"))?);
+        }
+    }
+    records.sort_by(|a, b| {
+        a.record
+            .started_at
+            .cmp(&b.record.started_at)
+            .then_with(|| a.record.id.cmp(&b.record.id))
     });
     Ok(records)
 }

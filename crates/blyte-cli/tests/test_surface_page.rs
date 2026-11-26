@@ -2228,3 +2228,55 @@ assert.ok(!plainHtml.includes("Publish request"), plainHtml);
 "#;
     run_surface_script(harness);
 }
+
+#[test]
+fn header_shows_not_a_git_repository_when_session_repository_is_false() {
+    let html = load_surface_html();
+    assert!(
+        html.contains("id=\"no-repo-badge\""),
+        "surface page must include the no-repo badge element next to repo-name"
+    );
+    let harness = format!(
+        "{}\n{}",
+        review_queue_test_prelude(),
+        r#"
+assert.strictEqual(renderNoRepoNotice(false), "not a git repository");
+assert.strictEqual(renderNoRepoNotice(true), "");
+assert.strictEqual(renderNoRepoNotice(undefined), "");
+
+applySessionState({
+  session_id: "surface-1",
+  surface_name: "notes",
+  repo: "notes",
+  repository: false,
+  started_at: 1700000000,
+  model: "gemini-4-neon",
+  effort: null,
+  effort_supported: false,
+  busy: false,
+  queued: 0,
+  last_seq: 0,
+}, true);
+assert.strictEqual(elements["repo-name"].textContent, "notes");
+assert.strictEqual(elements["no-repo-badge"].innerHTML, "not a git repository");
+assert.strictEqual(elements["no-repo-badge"].hidden, false);
+
+applySessionState({
+  session_id: "surface-1",
+  surface_name: "notes",
+  repo: "notes",
+  repository: true,
+  started_at: 1700000000,
+  model: "gemini-4-neon",
+  effort: null,
+  effort_supported: false,
+  busy: false,
+  queued: 0,
+  last_seq: 0,
+}, true);
+assert.strictEqual(elements["no-repo-badge"].innerHTML, "");
+assert.strictEqual(elements["no-repo-badge"].hidden, true);
+"#
+    );
+    run_surface_script(&harness);
+}

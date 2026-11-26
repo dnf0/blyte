@@ -329,6 +329,20 @@
       background: var(--color-page);
     }
 
+    .no-repo-badge {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+      padding: 2px 7px;
+      border-radius: 4px;
+      border: 1px dashed var(--color-line);
+      background: var(--color-page);
+    }
+
+    .no-repo-badge[hidden] {
+      display: none;
+    }
+
     .working-pill {
       font-family: var(--font-mono);
       font-size: 11px;
@@ -2640,6 +2654,7 @@
             <span class="brand-word">blyte</span>
           </span>
           <span id="repo-name" class="repo-name"></span>
+          <span id="no-repo-badge" class="no-repo-badge" hidden></span>
           <span id="working-indicator" class="working-pill" hidden>working</span>
         </div>
 
@@ -3254,6 +3269,13 @@
       }
     }
 
+    function renderNoRepoNotice(repository) {
+      if (repository === false) {
+        return escapeHtml("not a git repository");
+      }
+      return "";
+    }
+
     function applySessionState(data, syncBusy) {
       sessionState = data;
       if (syncBusy) {
@@ -3262,6 +3284,12 @@
       if (typeof document === "undefined") return;
       const repoEl = document.getElementById("repo-name");
       if (repoEl) repoEl.textContent = data.repo;
+      const noRepoEl = document.getElementById("no-repo-badge");
+      if (noRepoEl) {
+        const notice = renderNoRepoNotice(data.repository);
+        noRepoEl.innerHTML = notice;
+        noRepoEl.hidden = !notice;
+      }
       if (typeof data.surface_name === "string" && data.surface_name) {
         document.title = data.surface_name + " - blyte";
       }
