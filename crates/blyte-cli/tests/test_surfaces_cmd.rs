@@ -120,7 +120,7 @@ fn make_entry(
         name: name.to_string(),
         root: PathBuf::from(root),
         branch: branch.to_string(),
-        pid: 4242,
+        pid: std::process::id(),
         port,
         started_at,
         doing: doing.to_string(),

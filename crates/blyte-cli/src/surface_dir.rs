@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -8,8 +8,16 @@ use blyte_agent::sandbox::validate_surface_id;
 use serde::{Deserialize, Serialize};
 
 const PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+const PROBE_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Liveness {
+    Running,
+    NotRunning,
+    Unknown,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SurfaceRecord {
@@ -152,51 +160,84 @@ pub fn list_records(main_checkout: &Path) -> Result<Vec<SurfaceRecord>, String> 
     Ok(records)
 }
 
-pub fn health_matches(port: u16, id: &str) -> bool {
-    if port == 0 {
+fn pid_exists(pid: u32) -> bool {
+    let Ok(raw_pid) = libc::pid_t::try_from(pid) else {
         return false;
-    }
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = match TcpStream::connect_timeout(&addr, PROBE_TIMEOUT) {
-        Ok(s) => s,
-        Err(_) => return false,
     };
-    if stream.set_read_timeout(Some(PROBE_TIMEOUT)).is_err() {
+    if raw_pid <= 0 {
         return false;
     }
-    if stream.set_write_timeout(Some(PROBE_TIMEOUT)).is_err() {
-        return false;
+    let ret = unsafe { libc::kill(raw_pid, 0) };
+    if ret == 0 {
+        return true;
+    }
+    !matches!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    )
+}
+
+fn probe_once(port: u16, id: &str, timeout: Duration) -> Liveness {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = match TcpStream::connect_timeout(&addr, timeout) {
+        Ok(s) => s,
+        Err(e) if e.kind() == ErrorKind::ConnectionRefused => return Liveness::NotRunning,
+        Err(_) => return Liveness::Unknown,
+    };
+    if stream.set_read_timeout(Some(timeout)).is_err() {
+        return Liveness::Unknown;
+    }
+    if stream.set_write_timeout(Some(timeout)).is_err() {
+        return Liveness::Unknown;
     }
     let req =
         format!("GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
     if stream.write_all(req.as_bytes()).is_err() {
-        return false;
+        return Liveness::Unknown;
     }
     let mut raw = Vec::new();
     if stream.read_to_end(&mut raw).is_err() {
-        return false;
+        return Liveness::Unknown;
     }
-    let text = match std::str::from_utf8(&raw) {
-        Ok(s) => s,
-        Err(_) => return false,
+    let Ok(text) = std::str::from_utf8(&raw) else {
+        return Liveness::NotRunning;
     };
-    let (head, body) = match text.split_once("\r\n\r\n") {
-        Some(parts) => parts,
-        None => return false,
+    let Some((head, body)) = text.split_once("\r\n\r\n") else {
+        return Liveness::NotRunning;
     };
     let status_line = head.lines().next().unwrap_or("");
     if !(status_line.starts_with("HTTP/1.1 200") || status_line.starts_with("HTTP/1.0 200")) {
-        return false;
+        return Liveness::NotRunning;
     }
-    let val: serde_json::Value = match serde_json::from_str(body) {
-        Ok(v) => v,
-        Err(_) => return false,
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Liveness::NotRunning;
     };
-    val.get("surface_id").and_then(|v| v.as_str()) == Some(id)
+    if val.get("surface_id").and_then(|v| v.as_str()) == Some(id) {
+        Liveness::Running
+    } else {
+        Liveness::NotRunning
+    }
 }
 
+pub fn probe(pid: u32, port: u16, id: &str) -> Liveness {
+    if port == 0 || !pid_exists(pid) {
+        return Liveness::NotRunning;
+    }
+    match probe_once(port, id, PROBE_TIMEOUT) {
+        Liveness::Unknown => probe_once(port, id, PROBE_RETRY_TIMEOUT),
+        other => other,
+    }
+}
+
+/// Returns true when the surface is running or its liveness cannot be determined.
+///
+/// An `Unknown` probe result is treated as running so a busy surface keeps its
+/// name and `blyte clean` leaves it alone.
 pub fn is_running(record: &SurfaceRecord) -> bool {
-    health_matches(record.port, &record.id)
+    matches!(
+        probe(record.pid, record.port, &record.id),
+        Liveness::Running | Liveness::Unknown
+    )
 }
 
 pub fn pick_name(

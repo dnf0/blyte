@@ -3961,6 +3961,19 @@ fn resume_fails_when_name_is_running_in_another_repository() {
     let mut err = Vec::new();
     let mut opener = |_: &str| {};
     let stop = Arc::new(AtomicBool::new(false));
+    let watchdog_done = Arc::new((Mutex::new(false), Condvar::new()));
+    let watchdog_stop = Arc::clone(&stop);
+    let watchdog_signal = Arc::clone(&watchdog_done);
+    let watchdog = std::thread::spawn(move || {
+        let (lock, cv) = &*watchdog_signal;
+        let guard = lock.lock().unwrap();
+        let (guard, _) = cv
+            .wait_timeout_while(guard, Duration::from_secs(60), |done| !*done)
+            .unwrap();
+        if !*guard {
+            watchdog_stop.store(true, Ordering::Relaxed);
+        }
+    });
     let code = run_with_hooks(
         &SurfaceArgs {
             port: 0,
@@ -3975,6 +3988,12 @@ fn resume_fails_when_name_is_running_in_another_repository() {
         &mut opener,
         stop,
     );
+    {
+        let (lock, cv) = &*watchdog_done;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
+    }
+    watchdog.join().unwrap();
 
     assert_eq!(code, 1);
     let err_text = String::from_utf8(err).unwrap();

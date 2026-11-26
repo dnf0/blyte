@@ -2,6 +2,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{Duration, Instant};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -307,5 +308,79 @@ fn an_empty_list_is_an_error() {
         out.status.code(),
         Some(2),
         "stdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[test]
+fn a_binary_past_the_timeout_is_killed_and_reported_failed() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let sleeper = write_sh(root, "sleeper.sh", "echo started\nsleep 60");
+    let passing = write_sh(root, "passing.sh", "echo 'test result: ok. 1 passed'");
+    let list = write_list(root, &[(&sleeper, root), (&passing, root)]);
+
+    let start = Instant::now();
+    let out = run_parallel(&[
+        "--timeout",
+        "2",
+        "--root",
+        root.to_str().unwrap(),
+        "--executables-from",
+        list.to_str().unwrap(),
+    ]);
+    let elapsed = start.elapsed();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("started"),
+        "expected started in stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("FAILED (timed out after 2s)"),
+        "expected timeout failure line in stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line.starts_with("ok ")
+            && line.contains("passing.sh")
+            && line.contains("test result: ok. 1 passed")),
+        "missing ok line for passing.sh in:\n{stdout}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(20),
+        "expected run to finish within 20s, took {elapsed:?}"
+    );
+}
+
+#[test]
+fn a_timeout_below_one_is_an_error() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let dummy = write_sh(root, "dummy.sh", "exit 0");
+    let list = write_list(root, &[(&dummy, root)]);
+
+    let out = run_parallel(&[
+        "--timeout",
+        "0",
+        "--root",
+        root.to_str().unwrap(),
+        "--executables-from",
+        list.to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("--timeout") || stdout.contains("--timeout"),
+        "expected error naming --timeout\nstdout: {stdout}\nstderr: {stderr}"
     );
 }

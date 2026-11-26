@@ -79,7 +79,7 @@ fn sample_entry(id: &str, name: &str, port: u16, started_at: u64) -> RegistryEnt
         name: name.to_string(),
         root: PathBuf::from("/tmp/example-repo"),
         branch: "main".to_string(),
-        pid: 4242,
+        pid: std::process::id(),
         port,
         started_at,
         doing: "idle".to_string(),
