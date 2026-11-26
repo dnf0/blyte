@@ -318,7 +318,7 @@ mod macos {
         std::fs::create_dir_all(env_path.parent().unwrap()).unwrap();
         std::fs::write(&env_path, "ANTHROPIC_API_KEY=blyte-env-conv-secret\n").unwrap();
 
-        let sh = LocalShell::sandboxed(conversation_profile_net(ws.path(), &[], false));
+        let sh = LocalShell::sandboxed(conversation_profile_net(ws.path(), &[], false).unwrap());
         if !assert_benign_read(&sh, &benign, ws.path()) {
             return;
         }
@@ -380,7 +380,7 @@ mod macos {
         std::fs::write(&token_path, "surface-token-grant-secret\n").unwrap();
 
         for profile in [
-            conversation_profile_net(ws.path(), std::slice::from_ref(&token_dir), false),
+            conversation_profile_net(ws.path(), std::slice::from_ref(&token_dir), false).unwrap(),
             default_profile_net(ws.path(), std::slice::from_ref(&token_dir), true),
         ] {
             let sh = LocalShell::sandboxed(profile);
@@ -410,7 +410,7 @@ mod macos {
 
         for grant in [&config_dir, &env_path] {
             for profile in [
-                conversation_profile_net(ws.path(), std::slice::from_ref(grant), false),
+                conversation_profile_net(ws.path(), std::slice::from_ref(grant), false).unwrap(),
                 default_profile_net(ws.path(), std::slice::from_ref(grant), true),
             ] {
                 let sh = LocalShell::sandboxed(profile);

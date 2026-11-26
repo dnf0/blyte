@@ -113,8 +113,8 @@ fn pass_env_ssh_auth_sock_keeps_var_and_lifts_deny_for_that_path_only() {
         let profiles = [
             default_profile_net(ws.path(), &[], true),
             default_profile_net(ws.path(), &[], false),
-            conversation_profile_net(ws.path(), &[], true),
-            conversation_profile_net(ws.path(), &[], false),
+            conversation_profile_net(ws.path(), &[], true).unwrap(),
+            conversation_profile_net(ws.path(), &[], false).unwrap(),
         ];
 
         for profile in &profiles {

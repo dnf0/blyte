@@ -116,37 +116,65 @@ impl From<&crate::cli::Cli> for TaskConfig {
     }
 }
 
-pub fn build_sandbox_profile(config: &TaskConfig) -> blyte_agent::sandbox::Profile {
-    build_sandbox_profile_for_root(config, &config.root)
-}
+struct TempDirGuard(Option<PathBuf>);
 
-fn build_sandbox_profile_for_root(
-    config: &TaskConfig,
-    root: &Path,
-) -> blyte_agent::sandbox::Profile {
-    if config.converse {
-        blyte_agent::sandbox::conversation_profile_net(
-            root,
-            &config.allow_read,
-            config.network == "on",
-        )
-    } else {
-        blyte_agent::sandbox::default_profile_net(root, &config.allow_read, config.network == "on")
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        if let Some(ref path) = self.0 {
+            let _ = std::fs::remove_dir_all(path);
+        }
     }
 }
 
-pub fn configure_converse_policy(
+pub fn build_sandbox_profile(config: &TaskConfig) -> Result<blyte_agent::sandbox::Profile, String> {
+    Ok(build_sandbox_for_root(config, &config.root)?.0)
+}
+
+fn build_sandbox_for_root(
+    config: &TaskConfig,
+    root: &Path,
+) -> Result<(blyte_agent::sandbox::Profile, Option<PathBuf>), String> {
+    if config.converse {
+        let sandbox = blyte_agent::sandbox::conversation_sandbox_net(
+            root,
+            &config.allow_read,
+            config.network == "on",
+        )?;
+        Ok((sandbox.profile, sandbox.tmpdir))
+    } else {
+        Ok((
+            blyte_agent::sandbox::default_profile_net(
+                root,
+                &config.allow_read,
+                config.network == "on",
+            ),
+            None,
+        ))
+    }
+}
+
+pub struct ConversePolicy {
+    pub allowed_count: usize,
+    pub private_tmpdir: Option<PathBuf>,
+}
+
+pub fn configure_converse_policy_with_paths(
     converse: bool,
     sandbox_on: bool,
     root: &Path,
     approver: Option<Arc<dyn blyte_agent::approval::Approver>>,
     has_conversation: bool,
-) -> Result<usize, String> {
+) -> Result<ConversePolicy, String> {
     if !converse || !sandbox_on {
         blyte_agent::tools::set_write_scope(None);
         blyte_agent::tools::set_approval(None);
-        return Ok(0);
+        return Ok(ConversePolicy {
+            allowed_count: 0,
+            private_tmpdir: None,
+        });
     }
+    let paths = blyte_agent::sandbox::conversation_paths(root)?;
+    let mut tmp_cleanup = TempDirGuard(paths.tmpdir.clone());
     let tasks_dir = blyte_agent::sandbox::conversation_tasks_dir(root);
     std::fs::create_dir_all(&tasks_dir)
         .map_err(|e| format!("cannot create {}: {e}", tasks_dir.display()))?;
@@ -161,11 +189,15 @@ pub fn configure_converse_policy(
         })
         .transpose()?;
     let mut allowed = vec![tasks_canon];
-    for dir in blyte_agent::sandbox::conversation_allowed(root) {
-        if let Ok(canon) = dir.canonicalize() {
-            if !allowed.contains(&canon) {
-                allowed.push(canon);
+    for dir in paths.allowed {
+        match dir.canonicalize() {
+            Ok(canon) => {
+                if !allowed.contains(&canon) {
+                    allowed.push(canon);
+                }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("cannot canonicalize {}: {e}", dir.display())),
         }
     }
     blyte_agent::tools::set_write_scope(Some(blyte_agent::tools::WriteScope {
@@ -173,7 +205,7 @@ pub fn configure_converse_policy(
         edit_worktrees,
     }));
     let rules = crate::approval_file::load()?;
-    let count = rules.len();
+    let allowed_count = rules.len();
     let approver: Arc<dyn blyte_agent::approval::Approver> = match approver {
         Some(a) => a,
         None if has_conversation => Arc::new(crate::tty_approver::TtyApprover),
@@ -183,7 +215,28 @@ pub fn configure_converse_policy(
         rules,
         approver,
     }));
-    Ok(count)
+    tmp_cleanup.0 = None;
+    Ok(ConversePolicy {
+        allowed_count,
+        private_tmpdir: paths.tmpdir,
+    })
+}
+
+pub fn configure_converse_policy(
+    converse: bool,
+    sandbox_on: bool,
+    root: &Path,
+    approver: Option<Arc<dyn blyte_agent::approval::Approver>>,
+    has_conversation: bool,
+) -> Result<usize, String> {
+    Ok(configure_converse_policy_with_paths(
+        converse,
+        sandbox_on,
+        root,
+        approver,
+        has_conversation,
+    )?
+    .allowed_count)
 }
 
 struct BackgroundBaseCheckData {
@@ -206,7 +259,7 @@ impl BackgroundBaseCheck {
         gate: String,
         base_dir: PathBuf,
         deadline: Option<std::time::Instant>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let cancel = Arc::new(blyte_agent::shell::CancelHandle::new());
         let shell: Box<dyn blyte_agent::shell::Shell + Send> = match &config.container {
             Some(cid) => Box::new(blyte_agent::shell::CancellableContainerShell {
@@ -218,9 +271,8 @@ impl BackgroundBaseCheck {
             }),
             None => {
                 let inner = if config.sandbox == "on" && blyte_agent::sandbox::available() {
-                    blyte_agent::shell::LocalShell::sandboxed(build_sandbox_profile_for_root(
-                        config, &base_dir,
-                    ))
+                    let (profile, tmpdir) = build_sandbox_for_root(config, &base_dir)?;
+                    blyte_agent::shell::LocalShell::sandboxed(profile).with_tmpdir(tmpdir)
                 } else {
                     blyte_agent::shell::LocalShell::new()
                 };
@@ -266,11 +318,11 @@ impl BackgroundBaseCheck {
             guard.elapsed_seconds = Some(elapsed);
             cvar.notify_all();
         });
-        Self {
+        Ok(Self {
             shared,
             cancel,
             handle: Mutex::new(Some(join)),
-        }
+        })
     }
 }
 
@@ -334,10 +386,12 @@ impl Drop for BackgroundBaseCheck {
     }
 }
 
-pub fn build_local_shell(config: &TaskConfig) -> blyte_agent::shell::PersistentShell {
+pub fn build_local_shell(
+    config: &TaskConfig,
+) -> Result<blyte_agent::shell::PersistentShell, String> {
     if config.sandbox == "on" {
         if blyte_agent::sandbox::available() {
-            let profile = build_sandbox_profile(config);
+            let (profile, tmpdir) = build_sandbox_for_root(config, &config.root)?;
             if matches!(profile, blyte_agent::sandbox::Profile::Landlock(_)) {
                 eprintln!(
                     "blyte: on Linux the sandbox restricts writes only; credential reads are not blocked"
@@ -359,27 +413,32 @@ pub fn build_local_shell(config: &TaskConfig) -> blyte_agent::shell::PersistentS
                 }
             }
             let shell =
-                blyte_agent::shell::PersistentShell::local_sandboxed(config.root.clone(), profile);
+                blyte_agent::shell::PersistentShell::local_sandboxed(config.root.clone(), profile)
+                    .with_tmpdir(tmpdir);
             if config.converse {
                 let root = config.root.clone();
                 let allow_read = config.allow_read.clone();
                 let network = config.network == "on";
-                shell.with_profile_builder(Arc::new(move || {
+                Ok(shell.with_profile_builder(Arc::new(move || {
                     blyte_agent::sandbox::conversation_profile_for_open_edits(
                         &root,
                         &allow_read,
                         network,
                     )
-                }))
+                })))
             } else {
-                shell
+                Ok(shell)
             }
         } else {
             eprintln!("warning: sandbox unavailable; running unsandboxed");
-            blyte_agent::shell::PersistentShell::local(config.root.clone())
+            Ok(blyte_agent::shell::PersistentShell::local(
+                config.root.clone(),
+            ))
         }
     } else {
-        blyte_agent::shell::PersistentShell::local(config.root.clone())
+        Ok(blyte_agent::shell::PersistentShell::local(
+            config.root.clone(),
+        ))
     }
 }
 
@@ -757,7 +816,7 @@ fn run_task_with_event_callback(
 ) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
     check_network_mode(config)?;
     let started = std::time::Instant::now();
-    if config.converse {
+    let _one_shot_tmp_guard = if config.converse {
         if std::env::var("BLYTE_SESSION")
             .map(|v| v.is_empty())
             .unwrap_or(true)
@@ -770,20 +829,25 @@ fn run_task_with_event_callback(
             std::env::set_var("BLYTE_SESSION", &id);
         }
         let sandbox_on = config.sandbox == "on";
-        let allowed_count = configure_converse_policy(
+        let policy = configure_converse_policy_with_paths(
             true,
             sandbox_on,
             &config.root,
             approver,
             state.runtime.conversation.is_some(),
         )?;
+        let guard = if state.runtime.conversation.is_none() {
+            policy.private_tmpdir.map(|p| TempDirGuard(Some(p)))
+        } else {
+            None
+        };
         if state.brief.instructions.is_none() {
             let lines = crate::conversation_text::set_state_instructions(
                 state,
                 config.dispatch_cmd.is_some(),
                 &config.root,
                 sandbox_on,
-                allowed_count,
+                policy.allowed_count,
             )?;
             if state.runtime.conversation.is_none() {
                 for line in &lines {
@@ -794,10 +858,12 @@ fn run_task_with_event_callback(
         let exe = std::env::current_exe()
             .map_err(|e| format!("cannot locate blyte executable for the blyte tool: {e}"))?;
         blyte_agent::tools::set_blyte_tool(Some(exe));
+        guard
     } else {
         configure_converse_policy(false, false, &config.root, None, false)?;
         blyte_agent::tools::set_blyte_tool(None);
-    }
+        None
+    };
     blyte_agent::tools::set_dispatch_cmd(config.dispatch_cmd.clone());
     // 1. Initialize LLM provider from environment credentials or model specification.
     // If credentials for the detected provider are missing, produce a clear error indicating which key to set.
@@ -865,7 +931,7 @@ fn run_task_with_event_callback(
                     withheld.join(", ")
                 );
             }
-            let shell = build_local_shell(config);
+            let shell = build_local_shell(config)?;
             (shell, None, config.root.clone())
         }
     };
@@ -910,7 +976,7 @@ fn run_task_with_event_callback(
                 state.brief.verification_cmd.clone(),
                 base_dir.clone(),
                 deadline,
-            ))
+            )?)
         }
         _ => None,
     };

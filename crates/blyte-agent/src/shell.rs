@@ -464,22 +464,44 @@ fn exec_command_cancellable(
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LocalShell {
     pub profile: Option<Profile>,
+    pub tmpdir: Option<PathBuf>,
 }
 
 #[allow(non_upper_case_globals)]
-pub const LocalShell: LocalShell = LocalShell { profile: None };
+pub const LocalShell: LocalShell = LocalShell {
+    profile: None,
+    tmpdir: None,
+};
 
 impl LocalShell {
     /// Creates an unsandboxed local shell.
     pub fn new() -> Self {
-        Self { profile: None }
+        Self {
+            profile: None,
+            tmpdir: None,
+        }
     }
 
     /// Creates a local shell sandboxed with the given profile.
     pub fn sandboxed(profile: impl Into<Profile>) -> Self {
         Self {
             profile: Some(profile.into()),
+            tmpdir: None,
         }
+    }
+
+    /// Creates a local shell sandboxed with a conversation sandbox profile and optional private `TMPDIR`.
+    pub fn conversation_sandboxed(sandbox: crate::sandbox::ConversationSandbox) -> Self {
+        Self {
+            profile: Some(sandbox.profile),
+            tmpdir: sandbox.tmpdir,
+        }
+    }
+
+    /// Overrides `TMPDIR` for commands executed by this shell when `tmpdir` is `Some`.
+    pub fn with_tmpdir(mut self, tmpdir: Option<PathBuf>) -> Self {
+        self.tmpdir = tmpdir;
+        self
     }
 
     fn build_command(&self, command: &str, cwd: &Path) -> Result<Command, String> {
@@ -560,6 +582,9 @@ impl LocalShell {
         };
         cmd.current_dir(cwd);
         scrub(&mut cmd);
+        if let Some(ref tmpdir) = self.tmpdir {
+            cmd.env("TMPDIR", tmpdir);
+        }
         Ok(cmd)
     }
 }
@@ -718,6 +743,7 @@ pub enum Launcher {
     Local {
         root: PathBuf,
         profile: Option<Profile>,
+        tmpdir: Option<PathBuf>,
     },
     /// `bash -l` inside a running container, starting in `workdir`.
     Container {
@@ -729,7 +755,11 @@ pub enum Launcher {
 impl Launcher {
     fn command(&self, model_shell: bool) -> std::io::Result<Command> {
         match self {
-            Launcher::Local { root, profile } => {
+            Launcher::Local {
+                root,
+                profile,
+                tmpdir,
+            } => {
                 let mut c = match profile {
                     Some(Profile::Seatbelt(p)) => {
                         let mut cmd = Command::new("/usr/bin/sandbox-exec");
@@ -804,6 +834,9 @@ impl Launcher {
                 };
                 c.current_dir(root);
                 scrub(&mut c);
+                if let Some(ref tmpdir) = tmpdir {
+                    c.env("TMPDIR", tmpdir);
+                }
                 if model_shell {
                     c.env(MODEL_SHELL_ENV, "1");
                 }
@@ -829,9 +862,10 @@ impl Launcher {
 
     fn with_profile(&self, profile: Profile) -> Self {
         match self {
-            Launcher::Local { root, .. } => Launcher::Local {
+            Launcher::Local { root, tmpdir, .. } => Launcher::Local {
                 root: root.clone(),
                 profile: Some(profile),
+                tmpdir: tmpdir.clone(),
             },
             Launcher::Container {
                 container_id,
@@ -847,9 +881,11 @@ impl Launcher {
     /// cannot start.
     fn fallback(&self) -> Box<dyn Shell> {
         match self {
-            Launcher::Local { profile, .. } => match profile {
-                Some(p) => Box::new(LocalShell::sandboxed(p.clone())),
-                None => Box::new(LocalShell),
+            Launcher::Local {
+                profile, tmpdir, ..
+            } => match profile {
+                Some(p) => Box::new(LocalShell::sandboxed(p.clone()).with_tmpdir(tmpdir.clone())),
+                None => Box::new(LocalShell::new().with_tmpdir(tmpdir.clone())),
             },
             Launcher::Container {
                 container_id,
@@ -1181,10 +1217,23 @@ impl PersistentShell {
         self
     }
 
+    pub fn with_tmpdir(mut self, tmpdir: Option<PathBuf>) -> Self {
+        if let Launcher::Local {
+            tmpdir: ref mut slot,
+            ..
+        } = self.launcher
+        {
+            *slot = tmpdir;
+            self.fallback = self.launcher.fallback();
+        }
+        self
+    }
+
     pub fn local(root: PathBuf) -> Self {
         Self::new(Launcher::Local {
             root,
             profile: None,
+            tmpdir: None,
         })
     }
 
@@ -1192,6 +1241,7 @@ impl PersistentShell {
         Self::new(Launcher::Local {
             root,
             profile: Some(profile.into()),
+            tmpdir: None,
         })
     }
 

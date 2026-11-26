@@ -205,15 +205,25 @@ pub struct AgentRunner {
 }
 
 impl AgentRunner {
+    pub fn try_new(
+        config: &crate::repl::ReplConfig,
+        approver: Arc<dyn blyte_agent::approval::Approver>,
+    ) -> Result<Self, String> {
+        let mut cfg = config.clone();
+        cfg.converse = true;
+        let repl = crate::repl::ReplSession::try_new_with_approver(&cfg, Some(approver.clone()))?;
+        Ok(Self { repl, approver })
+    }
+
     pub fn new(
         config: &crate::repl::ReplConfig,
         approver: Arc<dyn blyte_agent::approval::Approver>,
     ) -> Self {
-        let mut cfg = config.clone();
-        cfg.converse = true;
-        let repl = crate::repl::ReplSession::try_new_with_approver(&cfg, Some(approver.clone()))
-            .expect("failed to initialize REPL session");
-        Self { repl, approver }
+        Self::try_new(config, approver).expect("failed to initialize REPL session")
+    }
+
+    pub fn private_tmpdir(&self) -> Option<&std::path::Path> {
+        self.repl.private_tmpdir()
     }
 }
 
@@ -761,12 +771,24 @@ impl Session {
     where
         F: FnOnce(Arc<SurfaceApprover>) -> Box<dyn PromptRunner>,
     {
+        Self::try_start_with_log_io(model, log_path, err, |approver| Ok(build_runner(approver)))
+    }
+
+    pub fn try_start_with_log_io<F>(
+        model: String,
+        log_path: Option<PathBuf>,
+        err: &mut dyn Write,
+        build_runner: F,
+    ) -> Result<Session, String>
+    where
+        F: FnOnce(Arc<SurfaceApprover>) -> Result<Box<dyn PromptRunner>, String>,
+    {
         let (base_model, effort) = parse_model_and_effort(&model);
         let shared = Arc::new(Shared::new_with_log(base_model, effort, log_path, err)?);
         let approver = Arc::new(SurfaceApprover {
             shared: Arc::clone(&shared),
         });
-        let runner = build_runner(approver);
+        let runner = build_runner(approver)?;
         let worker_shared = Arc::clone(&shared);
         std::thread::spawn(move || worker_loop(runner, worker_shared));
         Ok(Session {

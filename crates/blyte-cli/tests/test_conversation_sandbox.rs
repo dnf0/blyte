@@ -153,7 +153,7 @@ fn conversation_shell_allows_wt_tasks_and_blocks_root_git_and_wt_passed() {
     let tasks_canon = canon(&tasks);
     let git_canon = canon(&root.path().join(".git"));
     let wt_canon = canon(&root.path().join(".wt"));
-    match build_sandbox_profile(&cfg) {
+    match build_sandbox_profile(&cfg).unwrap() {
         sandbox::Profile::Seatbelt(s) => {
             assert!(
                 s.contains(&format!(
@@ -198,7 +198,7 @@ fn conversation_shell_allows_wt_tasks_and_blocks_root_git_and_wt_passed() {
         return;
     }
 
-    let shell = build_local_shell(&cfg);
+    let shell = build_local_shell(&cfg).unwrap();
 
     let task_file = tasks.join("task.md");
     let probe = shell
@@ -303,7 +303,7 @@ fn conversation_shell_in_linked_worktree_allows_only_main_wt_tasks() {
     let linked_canon = canon(&linked);
     let wt_canon = canon(&wt_dir);
     let git_canon = canon(&main_repo.path().join(".git"));
-    match build_sandbox_profile(&cfg) {
+    match build_sandbox_profile(&cfg).unwrap() {
         sandbox::Profile::Seatbelt(s) => {
             assert!(
                 s.contains(&format!(
@@ -351,7 +351,7 @@ fn conversation_shell_in_linked_worktree_allows_only_main_wt_tasks() {
         return;
     }
 
-    let shell = build_local_shell(&cfg);
+    let shell = build_local_shell(&cfg).unwrap();
 
     let task_file = tasks_dir.join("from-wt.md");
     let wt_write = shell
@@ -695,7 +695,7 @@ fn sandboxed_shell_cannot_write_the_usage_ledger_directory() {
     std::env::remove_var("XDG_STATE_HOME");
 
     for profile in [
-        sandbox::conversation_profile(repo.path(), &[]),
+        sandbox::conversation_profile(repo.path(), &[]).unwrap(),
         sandbox::default_profile(repo.path(), &[]),
     ] {
         let sh = blyte_agent::shell::LocalShell::sandboxed(profile);
@@ -813,7 +813,7 @@ fn shell_writes_in_an_open_edit_worktree_and_nowhere_else_new() {
     std::fs::create_dir_all(&other).unwrap();
 
     let cfg = conversation_config(root.path());
-    let shell = build_local_shell(&cfg);
+    let shell = build_local_shell(&cfg).unwrap();
 
     let e1_file = e1.join("f.txt");
     let ok = shell
@@ -913,7 +913,7 @@ fn shell_loses_the_worktree_when_the_edit_finishes() {
     let e1 = open_edit_worktree(root.path(), "E1");
 
     let cfg = conversation_config(root.path());
-    let shell = build_local_shell(&cfg);
+    let shell = build_local_shell(&cfg).unwrap();
 
     let first_file = e1.join("a.txt");
     let first = shell
@@ -968,7 +968,7 @@ fn shell_keeps_its_directory_and_says_when_it_restarted() {
     std::fs::create_dir_all(&sub).unwrap();
 
     let cfg = conversation_config(root.path());
-    let shell = build_local_shell(&cfg);
+    let shell = build_local_shell(&cfg).unwrap();
 
     let setup = shell
         .exec_user(
@@ -1040,7 +1040,7 @@ fn shell_does_not_restart_when_open_edits_are_unchanged() {
 
     let root = init_git_repo_in_target_tmp();
     let cfg = conversation_config(root.path());
-    let shell = build_local_shell(&cfg);
+    let shell = build_local_shell(&cfg).unwrap();
 
     let first = shell
         .exec_user("echo $$", root.path(), Duration::from_secs(30))
@@ -1117,4 +1117,106 @@ fn read_tool_refuses_surface_token_and_blyte_env() {
         );
         assert!(!outcome.content.contains(secret), "{}", outcome.content);
     }
+}
+
+#[test]
+fn write_tool_under_temp_dir_asks_for_approval_and_cleans_up_private_tmpdir() {
+    use std::sync::Arc;
+
+    struct RecordingApprover {
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl blyte_agent::approval::Approver for RecordingApprover {
+        fn ask(&self, command: &str, _reason: &str) -> Approval {
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(command.to_string());
+            Approval::Denied
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(root.path())
+        .status()
+        .unwrap()
+        .success());
+    let _env = EnvGuard::set(xdg.path(), home.path());
+
+    let approver = Arc::new(RecordingApprover {
+        calls: Mutex::new(Vec::new()),
+    });
+    let session = ReplSession::try_new_with_approver(
+        &ReplConfig {
+            repo_root: root.path().to_path_buf(),
+            converse: true,
+            sandbox: "on".to_string(),
+            ..Default::default()
+        },
+        Some(approver.clone()),
+    )
+    .unwrap();
+
+    let private_tmp = root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join(".wt/tmp")
+        .join(std::process::id().to_string());
+    assert!(
+        private_tmp.is_dir(),
+        "private tmpdir {} must exist while session is active",
+        private_tmp.display()
+    );
+
+    let shell = blyte_agent::shell::LocalShell::new();
+    let fs = blyte_agent::fs::LocalFs;
+    let denied = blyte_agent::tools::execute(
+        root.path(),
+        &shell,
+        &fs,
+        "write",
+        &serde_json::json!({
+            "path": "src/x.rs",
+            "content": "fn main() {}\n",
+        }),
+    );
+    assert!(denied.is_error, "{}", denied.content);
+    assert!(!root.path().join("src/x.rs").exists());
+    assert!(
+        !approver
+            .calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty(),
+        "write to <root>/src/x.rs must ask for approval"
+    );
+
+    let allowed = blyte_agent::tools::execute(
+        root.path(),
+        &shell,
+        &fs,
+        "write",
+        &serde_json::json!({
+            "path": ".wt/tasks/allowed.md",
+            "content": "ok\n",
+        }),
+    );
+    assert!(!allowed.is_error, "{}", allowed.content);
+    assert!(root.path().join(".wt/tasks/allowed.md").exists());
+
+    drop(session);
+    assert!(
+        !private_tmp.exists(),
+        "private tmpdir {} must be removed when the session exits",
+        private_tmp.display()
+    );
+
+    blyte_agent::tools::set_write_scope(None);
+    blyte_agent::tools::set_approval(None);
 }

@@ -65,6 +65,15 @@ pub struct ReplSession {
     pub conversation_start_lines: Option<[String; 3]>,
     pub state: blyte_agent::state::State,
     pub session_id: String,
+    private_tmpdir: Option<PathBuf>,
+}
+
+impl Drop for ReplSession {
+    fn drop(&mut self) {
+        if let Some(ref dir) = self.private_tmpdir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 }
 
 /// Formats a session identifier from a Unix timestamp (in seconds) and process ID.
@@ -111,7 +120,7 @@ impl ReplSession {
         };
 
         let sandbox_on = config.sandbox == "on";
-        let allowed_count = crate::task_runner::configure_converse_policy(
+        let policy = crate::task_runner::configure_converse_policy_with_paths(
             config.converse,
             sandbox_on,
             &config.repo_root,
@@ -119,13 +128,21 @@ impl ReplSession {
             true,
         )?;
         let conversation_start_lines = if config.converse {
-            Some(crate::conversation_text::set_state_instructions(
+            match crate::conversation_text::set_state_instructions(
                 &mut state,
                 config.dispatch_cmd.is_some(),
                 &config.repo_root,
                 sandbox_on,
-                allowed_count,
-            )?)
+                policy.allowed_count,
+            ) {
+                Ok(lines) => Some(lines),
+                Err(e) => {
+                    if let Some(ref dir) = policy.private_tmpdir {
+                        let _ = std::fs::remove_dir_all(dir);
+                    }
+                    return Err(e);
+                }
+            }
         } else {
             None
         };
@@ -153,7 +170,13 @@ impl ReplSession {
             conversation_start_lines,
             state,
             session_id,
+            private_tmpdir: policy.private_tmpdir,
         })
+    }
+
+    /// Returns the private temporary directory created for this session, if any.
+    pub fn private_tmpdir(&self) -> Option<&std::path::Path> {
+        self.private_tmpdir.as_deref()
     }
 
     /// Creates a new `ReplSession` initialized with the given `ReplConfig`.
