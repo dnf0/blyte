@@ -135,6 +135,10 @@ def run_one(
     executable: str, manifest_dir: str, cargo_env: dict[str, str]
 ) -> tuple[str, bool, float, str]:
     env = dict(os.environ)
+    # Tests give the binary a scratch HOME; a state or config directory inherited from the
+    # developer's shell would take precedence over it and send test writes to the real one.
+    for name in ("BLYTE_STATE_DIR", "XDG_STATE_HOME", "XDG_CONFIG_HOME"):
+        env.pop(name, None)
     env["CARGO_MANIFEST_DIR"] = manifest_dir
     env.update(cargo_env)
     start = time.monotonic()

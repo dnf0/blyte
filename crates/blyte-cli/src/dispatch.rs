@@ -1058,6 +1058,86 @@ fn finish_summary_with_writers(
     }
 }
 
+const RUN_RECORD_EXTENSIONS: &[&str] = &[
+    "json",
+    "report.json",
+    "reported.json",
+    "report.md",
+    "start.json",
+    "verdict.json",
+    "checks.json",
+    "model-review.json",
+    "fixround.json",
+    "fix.report.json",
+    "hold.json",
+    "removed.json",
+    "log",
+    "setup.log",
+];
+
+fn archive_run_records_at(root: &Path, id: &str, unix_secs: u64) -> Result<Option<String>, String> {
+    let wt_parent = root.join(".wt");
+    let mut existing: Vec<(String, PathBuf)> = Vec::new();
+    for ext in RUN_RECORD_EXTENSIONS {
+        let file_name = format!("{id}.{ext}");
+        let src = wt_parent.join(&file_name);
+        match std::fs::symlink_metadata(&src) {
+            Ok(_) => existing.push((file_name, src)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(format!("{}: {e}", src.display()));
+            }
+        }
+    }
+    if existing.is_empty() {
+        return Ok(None);
+    }
+
+    let archive_root = wt_parent.join("archive");
+    if let Err(e) = std::fs::create_dir_all(&archive_root) {
+        return Err(format!("{}: {e}", archive_root.display()));
+    }
+    let mut suffix: u64 = 1;
+    let (archive_rel, archive_dir) = loop {
+        let dir_name = if suffix == 1 {
+            format!("{id}-{unix_secs}")
+        } else {
+            format!("{id}-{unix_secs}-{suffix}")
+        };
+        let rel = format!(".wt/archive/{dir_name}");
+        let dir = archive_root.join(&dir_name);
+        match std::fs::create_dir(&dir) {
+            Ok(()) => break (rel, dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                suffix += 1;
+            }
+            Err(e) => {
+                return Err(format!("{}: {e}", dir.display()));
+            }
+        }
+    };
+
+    for (file_name, src) in existing {
+        let dst = archive_dir.join(&file_name);
+        if let Err(e) = std::fs::rename(&src, &dst) {
+            return Err(format!(
+                "rename {} -> {}: {e}",
+                src.display(),
+                dst.display()
+            ));
+        }
+    }
+    Ok(Some(archive_rel))
+}
+
+fn archive_run_records(root: &Path, id: &str) -> Result<Option<String>, String> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("system clock before unix epoch: {e}"))?
+        .as_secs();
+    archive_run_records_at(root, id, secs)
+}
+
 pub fn branch_exists_message(root: &Path, branch: &str, id: &str) -> String {
     if crate::clean::is_branch_merged(root, branch) {
         format!(
@@ -1449,69 +1529,70 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     let task_file_recorded =
         recorded_task_file.unwrap_or_else(|| task_md_path.display().to_string());
 
-    let mut replaced_earlier_run = false;
-    if !args.research {
-        let start_path = wt_parent.join(format!("{}.start.json", args.id));
-        if start_path.exists() {
-            let start_str = match std::fs::read_to_string(&start_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("error reading {}: {e}", start_path.display());
-                    return 2;
-                }
-            };
-            let start_val: serde_json::Value = match serde_json::from_str(&start_str) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("error parsing {}: {e}", start_path.display());
-                    return 2;
-                }
-            };
-            let Some(pid) = start_val.get("pid").and_then(|v| v.as_i64()) else {
-                eprintln!("error: missing pid in {}", start_path.display());
+    let start_path = wt_parent.join(format!("{}.start.json", args.id));
+    if start_path.exists() {
+        let start_str = match std::fs::read_to_string(&start_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error reading {}: {e}", start_path.display());
                 return 2;
-            };
-            let Some(started_at) = start_val.get("started_at").and_then(|v| v.as_u64()) else {
-                eprintln!("error: missing started_at in {}", start_path.display());
+            }
+        };
+        let start_val: serde_json::Value = match serde_json::from_str(&start_str) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("error parsing {}: {e}", start_path.display());
                 return 2;
-            };
-            if crate::clean::is_pid_alive(pid) {
-                let finished_since_start = if summary_path.exists() {
-                    let meta = match std::fs::metadata(&summary_path) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            eprintln!("error reading metadata of {}: {e}", summary_path.display());
-                            return 2;
-                        }
-                    };
-                    let mtime = match meta.modified() {
-                        Ok(t) => t,
-                        Err(e) => {
-                            eprintln!("error reading mtime of {}: {e}", summary_path.display());
-                            return 2;
-                        }
-                    };
-                    let mtime_secs = match mtime.duration_since(std::time::UNIX_EPOCH) {
-                        Ok(d) => d.as_secs(),
-                        Err(e) => {
-                            eprintln!("error reading timestamp of {}: {e}", summary_path.display());
-                            return 2;
-                        }
-                    };
-                    mtime_secs >= started_at
-                } else {
-                    false
+            }
+        };
+        let Some(pid) = start_val.get("pid").and_then(|v| v.as_i64()) else {
+            eprintln!("error: missing pid in {}", start_path.display());
+            return 2;
+        };
+        let Some(started_at) = start_val.get("started_at").and_then(|v| v.as_u64()) else {
+            eprintln!("error: missing started_at in {}", start_path.display());
+            return 2;
+        };
+        if crate::clean::is_pid_alive(pid) {
+            let finished_since_start = if summary_path.exists() {
+                let meta = match std::fs::metadata(&summary_path) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("error reading metadata of {}: {e}", summary_path.display());
+                        return 2;
+                    }
                 };
-                if !finished_since_start {
-                    eprintln!(
-                        "error: run {} is still running (pid {pid}). Wait for it to finish, or dispatch with a new ID.",
-                        args.id
-                    );
-                    return 2;
-                }
+                let mtime = match meta.modified() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!("error reading mtime of {}: {e}", summary_path.display());
+                        return 2;
+                    }
+                };
+                let mtime_secs = match mtime.duration_since(std::time::UNIX_EPOCH) {
+                    Ok(d) => d.as_secs(),
+                    Err(e) => {
+                        eprintln!("error reading timestamp of {}: {e}", summary_path.display());
+                        return 2;
+                    }
+                };
+                mtime_secs >= started_at
+            } else {
+                false
+            };
+            if !finished_since_start {
+                eprintln!(
+                    "error: run {} is still running (pid {pid}). Wait for it to finish, or dispatch with a new ID.",
+                    args.id
+                );
+                return 2;
             }
         }
+    }
 
+    let mut replaced_reason: Option<String> = None;
+    let mut need_worktree_add = false;
+    let base_commit: Option<String> = if !args.research {
         if let Some(crate::fix_round::FixRoundRecord::Started {
             pre_round_sha,
             fallbacks_sent,
@@ -1661,12 +1742,20 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             }
         }
 
+        let resolved_base = match resolve_base_commit(&start_dir, &args.base) {
+            Ok(sha) => sha,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
+            }
+        };
+
         let branch_ref = format!("refs/heads/{branch}");
         let branch_out = Command::new("git")
             .args(["show-ref", "--verify", "--quiet", &branch_ref])
             .current_dir(&root)
             .output();
-        let branch_exists = match branch_out {
+        let mut branch_exists = match branch_out {
             Ok(o) if o.status.success() => true,
             Ok(o) if o.status.code() == Some(1) => false,
             Ok(o) => {
@@ -1685,51 +1774,8 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         if worktree_dir.exists() || branch_exists {
             match crate::clean::remove_finished_run(&root, &args.id) {
                 Ok(Some(reason)) => {
-                    replaced_earlier_run = true;
-                    let secs =
-                        match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-                            Ok(d) => d.as_secs(),
-                            Err(e) => {
-                                eprintln!("error: system clock before unix epoch: {e}");
-                                return 2;
-                            }
-                        };
-                    let archive_rel = format!(".wt/archive/{}-{secs}", args.id);
-                    let archive_dir = root.join(&archive_rel);
-                    if let Err(e) = std::fs::create_dir_all(&archive_dir) {
-                        eprintln!("error: {}: {e}", archive_dir.display());
-                        return 2;
-                    }
-                    for ext in [
-                        "json",
-                        "report.json",
-                        "reported.json",
-                        "start.json",
-                        "verdict.json",
-                        "checks.json",
-                        "model-review.json",
-                        "fixround.json",
-                        "fix.report.json",
-                        "log",
-                    ] {
-                        let file_name = format!("{}.{ext}", args.id);
-                        let src = wt_parent.join(&file_name);
-                        if src.exists() {
-                            let dst = archive_dir.join(&file_name);
-                            if let Err(e) = std::fs::rename(&src, &dst) {
-                                eprintln!(
-                                    "error: rename {} -> {}: {e}",
-                                    src.display(),
-                                    dst.display()
-                                );
-                                return 2;
-                            }
-                        }
-                    }
-                    eprintln!(
-                        "dispatch: replaced the earlier run {} ({reason}); its records are in {archive_rel}/",
-                        args.id
-                    );
+                    replaced_reason = Some(reason);
+                    branch_exists = false;
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -1738,16 +1784,101 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 }
             }
         }
+
+        if !worktree_dir.exists() {
+            if branch_exists {
+                eprintln!("{}", branch_exists_message(&root, &branch, &args.id));
+                return 2;
+            }
+            need_worktree_add = true;
+        } else {
+            let wt_head = match Command::new("git")
+                .args([
+                    "-C",
+                    worktree_dir.to_str().unwrap(),
+                    "rev-parse",
+                    "--verify",
+                    "HEAD^{commit}",
+                ])
+                .output()
+            {
+                Ok(o) if o.status.success() => {
+                    String::from_utf8_lossy(&o.stdout).trim().to_string()
+                }
+                Ok(o) => {
+                    eprintln!(
+                        "error: git -C {} rev-parse HEAD failed: {}",
+                        worktree_dir.display(),
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    );
+                    return 2;
+                }
+                Err(e) => {
+                    eprintln!("error: failed to execute git rev-parse: {e}");
+                    return 2;
+                }
+            };
+            let ancestor_out = Command::new("git")
+                .args(["merge-base", "--is-ancestor", &resolved_base, &wt_head])
+                .current_dir(&root)
+                .output();
+            match ancestor_out {
+                Ok(o) if o.status.success() => {}
+                Ok(o) if o.status.code() == Some(1) => {
+                    let short_wt_head = &wt_head[..wt_head.len().min(7)];
+                    let short_base = &resolved_base[..resolved_base.len().min(7)];
+                    eprintln!(
+                        "error: .wt/{id} is from an earlier run based on {short_wt_head}, which does not contain {short_base} ({base_name}). Run `blyte clean`, remove it with `git worktree remove .wt/{id}` and `git branch -D wip/{id}` if it is not needed, or dispatch with a new ID.",
+                        id = args.id,
+                        base_name = args.base,
+                    );
+                    return 2;
+                }
+                Ok(o) => {
+                    eprintln!(
+                        "error: git merge-base --is-ancestor failed: {}",
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    );
+                    return 2;
+                }
+                Err(e) => {
+                    eprintln!("error: failed to execute git merge-base --is-ancestor: {e}");
+                    return 2;
+                }
+            }
+        }
+        Some(resolved_base)
     } else if worktree_dir.exists() {
         eprintln!("error: {} already exists", worktree_dir.display());
         return 2;
-    }
+    } else {
+        None
+    };
 
+    let replaced_earlier_run = replaced_reason.is_some();
     let fix_round_already_done = !replaced_earlier_run
         && matches!(
             existing_fixround,
             Some(crate::fix_round::FixRoundRecord::Done { .. })
         );
+
+    let archive_rel = match archive_run_records(&root, &args.id) {
+        Ok(rel) => rel,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+    if let Some(reason) = replaced_reason {
+        if let Some(ref rel) = archive_rel {
+            eprintln!(
+                "dispatch: replaced the earlier run {} ({reason}); its records are in {rel}/",
+                args.id
+            );
+        } else {
+            eprintln!("dispatch: replaced the earlier run {} ({reason})", args.id);
+        }
+    }
 
     let started_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1761,7 +1892,6 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         std::env::var("BLYTE_SESSION").ok(),
         std::env::var("CLAUDE_CODE_SESSION_ID").ok(),
     );
-    let start_path = wt_parent.join(format!("{}.start.json", args.id));
     let mut initial_start = serde_json::json!({
         "id": args.id,
         "pid": std::process::id(),
@@ -1802,7 +1932,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         crate::clean::spawn_background_clean(&root, Some(&args.id));
     }
 
-    let base_commit: Option<String> = if args.research {
+    if args.research {
         if let Err(e) = std::fs::create_dir_all(&worktree_dir) {
             eprintln!(
                 "error creating scratch directory {}: {e}",
@@ -1856,30 +1986,8 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 return 2;
             }
         }
-        None
-    } else if !worktree_dir.exists() {
-        let branch_exists = Command::new("git")
-            .args([
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                &format!("refs/heads/{branch}"),
-            ])
-            .current_dir(&root)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if branch_exists {
-            eprintln!("{}", branch_exists_message(&root, &branch, &args.id));
-            return 2;
-        }
-        let base_commit = match resolve_base_commit(&start_dir, &args.base) {
-            Ok(sha) => sha,
-            Err(e) => {
-                eprintln!("error: {e}");
-                return 2;
-            }
-        };
+    } else if need_worktree_add {
+        let base_ref = base_commit.as_deref().unwrap();
         let add_out = Command::new("git")
             .args([
                 "worktree",
@@ -1887,7 +1995,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 "-b",
                 &branch,
                 worktree_dir.to_str().unwrap(),
-                &base_commit,
+                base_ref,
             ])
             .current_dir(&root)
             .output();
@@ -1905,85 +2013,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                 return 2;
             }
         }
-        Some(base_commit)
-    } else {
-        let base_commit = match Command::new("git")
-            .args([
-                "rev-parse",
-                "--verify",
-                &format!("{}^{{commit}}", args.base),
-            ])
-            .current_dir(&start_dir)
-            .output()
-        {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-            Ok(o) => {
-                eprintln!(
-                    "error: git rev-parse {} failed: {}",
-                    args.base,
-                    String::from_utf8_lossy(&o.stderr).trim()
-                );
-                return 2;
-            }
-            Err(e) => {
-                eprintln!("error: failed to execute git rev-parse: {e}");
-                return 2;
-            }
-        };
-        let wt_head = match Command::new("git")
-            .args([
-                "-C",
-                worktree_dir.to_str().unwrap(),
-                "rev-parse",
-                "--verify",
-                "HEAD^{commit}",
-            ])
-            .output()
-        {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-            Ok(o) => {
-                eprintln!(
-                    "error: git -C {} rev-parse HEAD failed: {}",
-                    worktree_dir.display(),
-                    String::from_utf8_lossy(&o.stderr).trim()
-                );
-                return 2;
-            }
-            Err(e) => {
-                eprintln!("error: failed to execute git rev-parse: {e}");
-                return 2;
-            }
-        };
-        let ancestor_out = Command::new("git")
-            .args(["merge-base", "--is-ancestor", &base_commit, &wt_head])
-            .current_dir(&root)
-            .output();
-        match ancestor_out {
-            Ok(o) if o.status.success() => {}
-            Ok(o) if o.status.code() == Some(1) => {
-                let short_wt_head = &wt_head[..wt_head.len().min(7)];
-                let short_base = &base_commit[..base_commit.len().min(7)];
-                eprintln!(
-                    "error: .wt/{id} is from an earlier run based on {short_wt_head}, which does not contain {short_base} ({base_name}). Run `blyte clean`, remove it with `git worktree remove .wt/{id}` and `git branch -D wip/{id}` if it is not needed, or dispatch with a new ID.",
-                    id = args.id,
-                    base_name = args.base,
-                );
-                return 2;
-            }
-            Ok(o) => {
-                eprintln!(
-                    "error: git merge-base --is-ancestor failed: {}",
-                    String::from_utf8_lossy(&o.stderr).trim()
-                );
-                return 2;
-            }
-            Err(e) => {
-                eprintln!("error: failed to execute git merge-base --is-ancestor: {e}");
-                return 2;
-            }
-        }
-        Some(base_commit)
-    };
+    }
 
     // 2. Ensure .wt/ is in info/exclude
     let common_dir_raw = Command::new("git")
@@ -2086,22 +2116,8 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     }
 
     let log_path = wt_parent.join(format!("{}.log", args.id));
-    let summary_path = wt_parent.join(format!("{}.json", args.id));
-    if summary_path.exists() {
-        let _ = std::fs::remove_file(&summary_path);
-    }
     let report_path = wt_parent.join(format!("{}.report.json", args.id));
-    if report_path.exists() {
-        let _ = std::fs::remove_file(&report_path);
-    }
     let research_report_path = wt_parent.join(format!("{}.report.md", args.id));
-    if research_report_path.exists() {
-        let _ = std::fs::remove_file(&research_report_path);
-    }
-    let reported_marker_path = wt_parent.join(format!("{}.reported.json", args.id));
-    if reported_marker_path.exists() {
-        let _ = std::fs::remove_file(&reported_marker_path);
-    }
 
     let configured_gate = gate;
     let passed_key = (!args.research)
@@ -3604,5 +3620,92 @@ mod tests {
         assert_eq!(resolve_max_cost(None, Some(8.0)), 8.0);
         assert_eq!(resolve_max_cost(Some(3.0), Some(8.0)), 3.0);
         assert_eq!(resolve_max_cost(Some(3.0), None), 3.0);
+    }
+
+    #[test]
+    fn archive_run_records_skips_archive_dir_when_empty() {
+        let d = tempfile::tempdir().unwrap();
+        let wt = d.path().join(".wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join("A1.task.md"), "task").unwrap();
+        std::fs::write(wt.join("A1.out"), "out").unwrap();
+
+        let res = archive_run_records_at(d.path(), "A1", 1700000000).unwrap();
+        assert_eq!(res, None);
+        assert!(!wt.join("archive").exists());
+        assert!(wt.join("A1.task.md").is_file());
+        assert!(wt.join("A1.out").is_file());
+    }
+
+    #[test]
+    fn archive_run_records_moves_all_extensions_and_uses_non_colliding_suffix() {
+        let d = tempfile::tempdir().unwrap();
+        let wt = d.path().join(".wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        for ext in RUN_RECORD_EXTENSIONS {
+            std::fs::write(wt.join(format!("A1.{ext}")), format!("first-{ext}")).unwrap();
+        }
+        std::fs::write(wt.join("A1.task.md"), "keep task").unwrap();
+        std::fs::write(wt.join("A1.out"), "keep out").unwrap();
+
+        let rel1 = archive_run_records_at(d.path(), "A1", 1700000000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rel1, ".wt/archive/A1-1700000000");
+        for ext in RUN_RECORD_EXTENSIONS {
+            assert!(!wt.join(format!("A1.{ext}")).exists());
+            assert_eq!(
+                std::fs::read_to_string(d.path().join(&rel1).join(format!("A1.{ext}"))).unwrap(),
+                format!("first-{ext}")
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(wt.join("A1.task.md")).unwrap(),
+            "keep task"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("A1.out")).unwrap(),
+            "keep out"
+        );
+
+        std::fs::write(wt.join("A1.verdict.json"), "second").unwrap();
+        let rel2 = archive_run_records_at(d.path(), "A1", 1700000000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rel2, ".wt/archive/A1-1700000000-2");
+        assert_eq!(
+            std::fs::read_to_string(d.path().join(&rel2).join("A1.verdict.json")).unwrap(),
+            "second"
+        );
+        assert_eq!(
+            std::fs::read_to_string(d.path().join(&rel1).join("A1.verdict.json")).unwrap(),
+            "first-verdict.json"
+        );
+
+        std::fs::write(wt.join("A1.verdict.json"), "third").unwrap();
+        let rel3 = archive_run_records_at(d.path(), "A1", 1700000000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rel3, ".wt/archive/A1-1700000000-3");
+        assert_eq!(
+            std::fs::read_to_string(d.path().join(&rel3).join("A1.verdict.json")).unwrap(),
+            "third"
+        );
+    }
+
+    #[test]
+    fn archive_run_records_errors_naming_path_when_archive_root_is_file() {
+        let d = tempfile::tempdir().unwrap();
+        let wt = d.path().join(".wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        let blocker = wt.join("archive");
+        std::fs::write(&blocker, "not a dir").unwrap();
+        std::fs::write(wt.join("A1.verdict.json"), r#"{"verdict":"accepted"}"#).unwrap();
+
+        let err = archive_run_records_at(d.path(), "A1", 1700000000).unwrap_err();
+        assert!(
+            err.contains(&blocker.display().to_string()),
+            "error should name archive root path: {err}"
+        );
     }
 }
