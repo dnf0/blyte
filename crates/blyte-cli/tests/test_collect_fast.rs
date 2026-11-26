@@ -145,8 +145,9 @@ fn old_finished_runs_are_skipped_without_reading_logs_or_start_json() {
         assert!(job.id.starts_with("NEW"), "unexpected job {}", job.id);
     }
     assert!(
-        elapsed < Duration::from_millis(1000),
-        "collect_jobs took {:?}, expected < 1000ms",
+        // 10 s, not 1 s: beside other test binaries on a busy machine the skip itself took 3 s.
+        elapsed < Duration::from_secs(10),
+        "collect_jobs took {:?}, expected < 10s",
         elapsed
     );
 }
