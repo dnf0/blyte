@@ -282,6 +282,17 @@ fn format_failure_queue_message(run_id: &str, summary: &ParsedSummary) -> String
     }
 }
 
+fn format_research_queue_message(run_id: &str, summary: &ParsedSummary) -> String {
+    if summary.outcome == "verified" {
+        format!("Research run {run_id} finished: verified. Report: .wt/{run_id}.report.md")
+    } else {
+        format!(
+            "Research run {run_id} finished: {}. Log: .wt/{run_id}.log",
+            summary.outcome
+        )
+    }
+}
+
 fn now_unix_secs() -> Result<u64, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -326,6 +337,7 @@ fn report_single_run(
     wt_dir: &Path,
     run_id: &str,
     request: &str,
+    is_research: bool,
 ) -> Result<(), String> {
     let marker_path = wt_dir.join(format!("{run_id}.reported.json"));
     if marker_path.exists() {
@@ -357,8 +369,15 @@ fn report_single_run(
             )
         })?;
 
-    if summary.outcome != "verified" {
-        let msg = format_failure_queue_message(run_id, &summary);
+    let queued_message = if is_research {
+        Some(format_research_queue_message(run_id, &summary))
+    } else if summary.outcome != "verified" {
+        Some(format_failure_queue_message(run_id, &summary))
+    } else {
+        None
+    };
+
+    if let Some(msg) = queued_message {
         surface
             .session
             .queue_for_request(request, &msg)
@@ -392,10 +411,9 @@ pub fn report_finished_runs(surface: &Surface) -> Result<(), String> {
     for path in start_files {
         match parse_start_file(&wt_dir, &path) {
             Ok(info) => {
-                if info.surface.as_deref() == Some(surface.surface_id.as_str()) && !info.is_research
-                {
+                if info.surface.as_deref() == Some(surface.surface_id.as_str()) {
                     if let Some(request) = info.request {
-                        candidates.push((info.started_at, info.id, request));
+                        candidates.push((info.started_at, info.id, request, info.is_research));
                     }
                 }
             }
@@ -405,8 +423,8 @@ pub fn report_finished_runs(surface: &Surface) -> Result<(), String> {
 
     candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 
-    for (_, run_id, request) in candidates {
-        if let Err(e) = report_single_run(surface, &wt_dir, &run_id, &request) {
+    for (_, run_id, request, is_research) in candidates {
+        if let Err(e) = report_single_run(surface, &wt_dir, &run_id, &request, is_research) {
             errors.push(e);
         }
     }

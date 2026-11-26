@@ -517,6 +517,14 @@ fn git_common_dir(root: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(line))
 }
 
+fn canonicalize_or_missing(path: &Path) -> Result<PathBuf, String> {
+    match path.canonicalize() {
+        Ok(p) => Ok(p),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(e) => Err(format!("cannot canonicalize {}: {e}", path.display())),
+    }
+}
+
 fn main_checkout_root(root: &Path) -> PathBuf {
     if let Some(common_dir) = git_common_dir(root) {
         if common_dir.file_name() == Some(std::ffi::OsStr::new(".git")) {
@@ -530,16 +538,120 @@ fn main_checkout_root(root: &Path) -> PathBuf {
     root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
 }
 
+fn main_checkout_root_checked(root: &Path) -> Result<PathBuf, String> {
+    if let Some(common_dir) = git_common_dir(root) {
+        if common_dir.file_name() == Some(std::ffi::OsStr::new(".git")) {
+            if let Some(main_root) = common_dir.parent() {
+                return canonicalize_or_missing(main_root);
+            }
+        }
+    }
+    canonicalize_or_missing(root)
+}
+
+fn create_private_temp_dir(path: &Path) -> Result<bool, String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "cannot create private temp directory {}: {e}",
+                path.display()
+            )
+        })?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        let created = match builder.create(path) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let meta = std::fs::metadata(path).map_err(|me| {
+                    format!(
+                        "cannot inspect private temp directory {}: {me}",
+                        path.display()
+                    )
+                })?;
+                if !meta.is_dir() {
+                    return Err(format!(
+                        "cannot create private temp directory {}: path exists and is not a directory",
+                        path.display()
+                    ));
+                }
+                false
+            }
+            Err(e) => {
+                return Err(format!(
+                    "cannot create private temp directory {}: {e}",
+                    path.display()
+                ));
+            }
+        };
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+            format!(
+                "cannot set permissions on private temp directory {}: {e}",
+                path.display()
+            )
+        })?;
+        Ok(created)
+    }
+    #[cfg(not(unix))]
+    {
+        match std::fs::create_dir(path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let meta = std::fs::metadata(path).map_err(|me| {
+                    format!(
+                        "cannot inspect private temp directory {}: {me}",
+                        path.display()
+                    )
+                })?;
+                if !meta.is_dir() {
+                    return Err(format!(
+                        "cannot create private temp directory {}: path exists and is not a directory",
+                        path.display()
+                    ));
+                }
+                Ok(false)
+            }
+            Err(e) => Err(format!(
+                "cannot create private temp directory {}: {e}",
+                path.display()
+            )),
+        }
+    }
+}
+
 /// Returns the `.wt/tasks` directory under the main checkout for `root`.
 pub fn conversation_tasks_dir(root: &Path) -> PathBuf {
     main_checkout_root(root).join(".wt").join("tasks")
 }
 
-/// Returns the writable directories allowed for the `--converse` sandboxed shell:
-/// `.wt/tasks` under the main checkout, system temporary directories, and common developer caches.
-pub fn conversation_allowed(root: &Path) -> Vec<PathBuf> {
-    let mut allowed = vec![
-        conversation_tasks_dir(root),
+/// Writable directories for a conversation sandbox and an optional private `TMPDIR` created when
+/// one or more default entries contained the repository root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationPaths {
+    pub allowed: Vec<PathBuf>,
+    pub tmpdir: Option<PathBuf>,
+    pub created_tmpdir: bool,
+}
+
+/// Sandbox profile and optional private `TMPDIR` for a conversation shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationSandbox {
+    pub profile: Profile,
+    pub tmpdir: Option<PathBuf>,
+}
+
+/// Computes the writable directories for the `--converse` sandbox and creates a private temp
+/// directory under `<root>/.wt/tmp/<pid>` whenever an ancestor of `root` (or `root` itself) had to
+/// be removed from the default list.
+pub fn conversation_paths(root: &Path) -> Result<ConversationPaths, String> {
+    let root_cmp = canonicalize_or_missing(root)?;
+    let main_cmp = main_checkout_root_checked(root)?;
+    let tasks_dir = main_cmp.join(".wt").join("tasks");
+    let mut raw = vec![
+        tasks_dir,
         PathBuf::from("/private/tmp"),
         PathBuf::from("/private/var/folders"),
         PathBuf::from("/tmp"),
@@ -549,7 +661,7 @@ pub fn conversation_allowed(root: &Path) -> Vec<PathBuf> {
 
     if let Some(tmp) = std::env::var_os("TMPDIR") {
         if !tmp.is_empty() {
-            allowed.push(PathBuf::from(tmp));
+            raw.push(PathBuf::from(tmp));
         }
     }
 
@@ -567,13 +679,51 @@ pub fn conversation_allowed(root: &Path) -> Vec<PathBuf> {
                 "go",
                 ".docker/buildx",
             ] {
-                allowed.push(home_path.join(sub));
+                raw.push(home_path.join(sub));
             }
-            push_home_local_grants(&home_path, &mut allowed);
+            push_home_local_grants(&home_path, &mut raw);
         }
     }
 
-    allowed
+    let mut allowed = Vec::with_capacity(raw.len() + 1);
+    let mut removed = false;
+    for (idx, entry) in raw.into_iter().enumerate() {
+        if idx == 0 {
+            allowed.push(entry);
+            continue;
+        }
+        let entry_cmp = canonicalize_or_missing(&entry)?;
+        if root_cmp.starts_with(&entry_cmp) || main_cmp.starts_with(&entry_cmp) {
+            removed = true;
+        } else {
+            allowed.push(entry);
+        }
+    }
+
+    let (tmpdir, created_tmpdir) = if removed {
+        let private_tmp = root_cmp
+            .join(".wt")
+            .join("tmp")
+            .join(std::process::id().to_string());
+        let created = create_private_temp_dir(&private_tmp)?;
+        allowed.push(private_tmp.clone());
+        (Some(private_tmp), created)
+    } else {
+        (None, false)
+    };
+
+    Ok(ConversationPaths {
+        allowed,
+        tmpdir,
+        created_tmpdir,
+    })
+}
+
+/// Returns the writable directories allowed for the `--converse` sandboxed shell:
+/// `.wt/tasks` under the main checkout, system temporary directories, and common developer caches,
+/// excluding any entry that is `root` or an ancestor of it.
+pub fn conversation_allowed(root: &Path) -> Result<Vec<PathBuf>, String> {
+    Ok(conversation_paths(root)?.allowed)
 }
 
 fn path_exists(path: &Path) -> Result<bool, String> {
@@ -651,14 +801,105 @@ fn allow_edit_worktrees(mut base: String, edit_worktrees: &[PathBuf]) -> String 
     base
 }
 
+/// Returns the `--converse` sandbox profile and optional private `TMPDIR` for the current platform.
+pub fn conversation_sandbox(
+    root: &Path,
+    allow_read: &[PathBuf],
+) -> Result<ConversationSandbox, String> {
+    conversation_sandbox_net(root, allow_read, true)
+}
+
+/// Returns the `--converse` sandbox profile and optional private `TMPDIR` with network configuration.
+pub fn conversation_sandbox_net(
+    root: &Path,
+    allow_read: &[PathBuf],
+    network: bool,
+) -> Result<ConversationSandbox, String> {
+    conversation_sandbox_with_edits(root, allow_read, network, &[])
+}
+
+/// Returns the `--converse` sandbox profile and optional private `TMPDIR` allowing writes in the
+/// given open edit worktrees.
+pub fn conversation_sandbox_with_edits(
+    root: &Path,
+    allow_read: &[PathBuf],
+    network: bool,
+    edit_worktrees: &[PathBuf],
+) -> Result<ConversationSandbox, String> {
+    let paths = conversation_paths(root)?;
+    let profile = {
+        #[cfg(target_os = "macos")]
+        {
+            let deny_read = match std::env::var_os("HOME") {
+                Some(home) if !home.is_empty() => read_denied(Path::new(&home)),
+                _ => Vec::new(),
+            };
+            let base = deny_state_blyte_write(allow_edit_worktrees(
+                profile_with(root, &paths.allowed, &deny_read, allow_read),
+                edit_worktrees,
+            ));
+            let profiled = if network {
+                base
+            } else {
+                let socks = match std::env::var_os("HOME") {
+                    Some(home) if !home.is_empty() => docker_sockets(Path::new(&home)),
+                    _ => Vec::new(),
+                };
+                offline(base, &socks)
+            };
+            Profile::Seatbelt(deny_unix_sockets(profiled, &current_agent_sockets()))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let home = std::env::var_os("HOME");
+            let home_path = home.as_ref().filter(|h| !h.is_empty()).map(Path::new);
+            let mut extra_read = vec![root.to_path_buf()];
+            if let Some(common_dir) = git_common_dir(root) {
+                extra_read.push(common_dir);
+            }
+            let main_wt = main_checkout_root_checked(root)?.join(".wt");
+            if main_wt.exists() {
+                extra_read.push(main_wt);
+            }
+            extra_read.extend_from_slice(allow_read);
+            let mut write = paths.allowed;
+            write.extend(edit_worktrees.iter().cloned());
+            Profile::LandlockConfined {
+                write,
+                read: read_allowed(home_path, &extra_read),
+                block_tcp: !network,
+            }
+        }
+    };
+    Ok(ConversationSandbox {
+        profile,
+        tmpdir: paths.tmpdir,
+    })
+}
+
+/// Builds the `--converse` sandbox including all currently open edit worktrees.
+pub fn conversation_sandbox_for_open_edits(
+    root: &Path,
+    allow_read: &[PathBuf],
+    network: bool,
+) -> Result<ConversationSandbox, String> {
+    let main = main_checkout_root_checked(root)?;
+    let edits = open_edit_worktrees(&main)?;
+    conversation_sandbox_with_edits(root, allow_read, network, &edits)
+}
+
 /// Returns the `--converse` sandbox profile for the current platform.
-pub fn conversation_profile(root: &Path, allow_read: &[PathBuf]) -> Profile {
-    conversation_profile_net(root, allow_read, true)
+pub fn conversation_profile(root: &Path, allow_read: &[PathBuf]) -> Result<Profile, String> {
+    Ok(conversation_sandbox(root, allow_read)?.profile)
 }
 
 /// Returns the `--converse` sandbox profile with network configuration.
-pub fn conversation_profile_net(root: &Path, allow_read: &[PathBuf], network: bool) -> Profile {
-    conversation_profile_with_edits(root, allow_read, network, &[])
+pub fn conversation_profile_net(
+    root: &Path,
+    allow_read: &[PathBuf],
+    network: bool,
+) -> Result<Profile, String> {
+    Ok(conversation_sandbox_net(root, allow_read, network)?.profile)
 }
 
 /// Returns the `--converse` sandbox profile allowing writes in the given open edit worktrees.
@@ -667,49 +908,8 @@ pub fn conversation_profile_with_edits(
     allow_read: &[PathBuf],
     network: bool,
     edit_worktrees: &[PathBuf],
-) -> Profile {
-    #[cfg(target_os = "macos")]
-    {
-        let deny_read = match std::env::var_os("HOME") {
-            Some(home) if !home.is_empty() => read_denied(Path::new(&home)),
-            _ => Vec::new(),
-        };
-        let base = deny_state_blyte_write(allow_edit_worktrees(
-            profile_with(root, &conversation_allowed(root), &deny_read, allow_read),
-            edit_worktrees,
-        ));
-        let profiled = if network {
-            base
-        } else {
-            let socks = match std::env::var_os("HOME") {
-                Some(home) if !home.is_empty() => docker_sockets(Path::new(&home)),
-                _ => Vec::new(),
-            };
-            offline(base, &socks)
-        };
-        Profile::Seatbelt(deny_unix_sockets(profiled, &current_agent_sockets()))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let home = std::env::var_os("HOME");
-        let home_path = home.as_ref().filter(|h| !h.is_empty()).map(Path::new);
-        let mut extra_read = vec![root.to_path_buf()];
-        if let Some(common_dir) = git_common_dir(root) {
-            extra_read.push(common_dir);
-        }
-        let main_wt = main_checkout_root(root).join(".wt");
-        if main_wt.exists() {
-            extra_read.push(main_wt);
-        }
-        extra_read.extend_from_slice(allow_read);
-        let mut write = conversation_allowed(root);
-        write.extend(edit_worktrees.iter().cloned());
-        Profile::LandlockConfined {
-            write,
-            read: read_allowed(home_path, &extra_read),
-            block_tcp: !network,
-        }
-    }
+) -> Result<Profile, String> {
+    Ok(conversation_sandbox_with_edits(root, allow_read, network, edit_worktrees)?.profile)
 }
 
 /// Builds the `--converse` sandbox profile including all currently open edit worktrees.
@@ -718,11 +918,7 @@ pub fn conversation_profile_for_open_edits(
     allow_read: &[PathBuf],
     network: bool,
 ) -> Result<Profile, String> {
-    let main = main_checkout_root(root);
-    let edits = open_edit_worktrees(&main)?;
-    Ok(conversation_profile_with_edits(
-        root, allow_read, network, &edits,
-    ))
+    Ok(conversation_sandbox_for_open_edits(root, allow_read, network)?.profile)
 }
 
 /// Returns the standard Unix socket paths used by Docker and container runtimes.
@@ -1004,6 +1200,7 @@ mod tests {
         std::fs::create_dir_all(&wt).unwrap();
         let Profile::Seatbelt(sbpl) =
             conversation_profile_with_edits(tmp.path(), &[], false, std::slice::from_ref(&wt))
+                .unwrap()
         else {
             panic!("expected Seatbelt profile on macOS");
         };

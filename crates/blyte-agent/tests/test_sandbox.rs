@@ -79,7 +79,7 @@ fn conversation_allowed_contains_wt_tasks_and_temp_not_root_git_or_wt() {
     let tasks = d.path().join(".wt/tasks");
     std::fs::create_dir_all(&tasks).unwrap();
 
-    let allowed = conversation_allowed(d.path());
+    let allowed = conversation_allowed(d.path()).unwrap();
     let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let root = canon(d.path());
     let tasks_canon = canon(&tasks);
@@ -90,10 +90,14 @@ fn conversation_allowed_contains_wt_tasks_and_temp_not_root_git_or_wt() {
         allowed.iter().any(|p| canon(p) == tasks_canon),
         "{allowed:?}"
     );
-    assert!(
-        allowed
-            .iter()
-            .any(|p| p == Path::new("/tmp") || p == Path::new("/private/tmp")),
+    // When the checkout itself is under the system temp directory, that directory contains the
+    // repository and must not be writable; anywhere else it stays allowed.
+    let has_system_tmp = allowed
+        .iter()
+        .any(|p| p == Path::new("/tmp") || p == Path::new("/private/tmp"));
+    assert_eq!(
+        has_system_tmp,
+        !root.starts_with("/private/tmp") && !root.starts_with("/tmp"),
         "{allowed:?}"
     );
     assert!(!allowed.iter().any(|p| canon(p) == root), "{allowed:?}");
@@ -152,7 +156,7 @@ fn conversation_allowed_in_linked_worktree_uses_main_wt_tasks() {
     let main_tasks = main_repo.path().join(".wt/tasks");
     std::fs::create_dir_all(&main_tasks).unwrap();
 
-    let allowed = conversation_allowed(&linked);
+    let allowed = conversation_allowed(&linked).unwrap();
     let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let main_root = canon(main_repo.path());
     let linked_root = canon(&linked);
@@ -261,7 +265,7 @@ mod macos {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    use blyte_agent::sandbox::{conversation_profile, profile};
+    use blyte_agent::sandbox::{conversation_profile, conversation_sandbox, profile};
     use blyte_agent::shell::{LocalShell, Shell};
 
     #[test]
@@ -309,7 +313,7 @@ mod macos {
         std::fs::create_dir_all(&tasks).unwrap();
         std::fs::create_dir_all(&passed).unwrap();
 
-        let sh = LocalShell::sandboxed(conversation_profile(repo.path(), &[]));
+        let sh = LocalShell::sandboxed(conversation_profile(repo.path(), &[]).unwrap());
         let ok_file = tasks.join("task.md");
         let ok = sh
             .exec(
@@ -323,6 +327,83 @@ mod macos {
         }
         assert_eq!(ok.exit_code, 0, "{}", ok.merged());
         assert!(ok_file.exists());
+
+        for denied_path in [
+            repo.path().join("root.txt"),
+            repo.path().join(".git/forged"),
+            passed.join("forged.json"),
+        ] {
+            let r = sh
+                .exec(
+                    &format!("echo no > '{}'", denied_path.display()),
+                    repo.path(),
+                    Duration::from_secs(30),
+                )
+                .unwrap();
+            assert_ne!(
+                r.exit_code,
+                0,
+                "write to {} must fail",
+                denied_path.display()
+            );
+            assert!(
+                !denied_path.exists(),
+                "{} must not be created",
+                denied_path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn conversation_profile_under_system_temp_dir_writes_only_in_wt_tasks_and_private_tmpdir() {
+        let repo = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        let tasks = repo.path().join(".wt/tasks");
+        let passed = repo.path().join(".wt/passed");
+        std::fs::create_dir_all(&tasks).unwrap();
+        std::fs::create_dir_all(&passed).unwrap();
+
+        let sb = conversation_sandbox(repo.path(), &[]).unwrap();
+        let private_tmp = sb
+            .tmpdir
+            .clone()
+            .expect("repo under system temp dir must get a private TMPDIR");
+        let sh = LocalShell::sandboxed(sb.profile).with_tmpdir(sb.tmpdir);
+
+        let ok_file = tasks.join("x");
+        let ok = sh
+            .exec(
+                &format!("echo ok > '{}'", ok_file.display()),
+                repo.path(),
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        if ok.exit_code == 71 && ok.merged().contains("Operation not permitted") {
+            return;
+        }
+        assert_eq!(ok.exit_code, 0, "{}", ok.merged());
+        assert!(ok_file.exists());
+
+        let tmp_write = sh
+            .exec(
+                r#"echo tmp > "$TMPDIR/probe.txt" && printf '%s' "$TMPDIR""#,
+                repo.path(),
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        assert_eq!(tmp_write.exit_code, 0, "{}", tmp_write.merged());
+        assert_eq!(
+            PathBuf::from(tmp_write.stdout.trim())
+                .canonicalize()
+                .unwrap(),
+            private_tmp.canonicalize().unwrap()
+        );
+        assert!(private_tmp.join("probe.txt").exists());
 
         for denied_path in [
             repo.path().join("root.txt"),

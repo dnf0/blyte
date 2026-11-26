@@ -193,8 +193,8 @@ mod macos {
             for profile in [
                 default_profile_net(ws.path(), &[], true),
                 default_profile_net(ws.path(), &[], false),
-                conversation_profile_net(ws.path(), &[], true),
-                conversation_profile_net(ws.path(), &[], false),
+                conversation_profile_net(ws.path(), &[], true).unwrap(),
+                conversation_profile_net(ws.path(), &[], false).unwrap(),
             ] {
                 let Profile::Seatbelt(sbpl) = profile else {
                     panic!("expected Seatbelt profile");
@@ -268,7 +268,7 @@ mod macos {
             &other_sock,
         );
         assert_agent_socket_blocked(
-            conversation_profile_net(ws.path(), &[], true),
+            conversation_profile_net(ws.path(), &[], true).unwrap(),
             ws.path(),
             &benign,
             &agent_sock,
@@ -282,7 +282,7 @@ mod macos {
             &other_sock,
         );
         assert_agent_socket_blocked(
-            conversation_profile_net(ws.path(), &[], false),
+            conversation_profile_net(ws.path(), &[], false).unwrap(),
             ws.path(),
             &benign,
             &agent_sock,

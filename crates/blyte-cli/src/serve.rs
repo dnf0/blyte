@@ -1139,6 +1139,33 @@ impl Drop for RegistryEntryGuard {
     }
 }
 
+struct PrivateTmpDirGuard {
+    path: PathBuf,
+}
+
+impl Drop for PrivateTmpDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+struct PublishToolGuard;
+
+impl PublishToolGuard {
+    fn install(surface: Arc<Surface>) -> Self {
+        blyte_agent::tools::set_publish_tool(Some(Arc::new(
+            crate::requests::SurfacePublishTool::new(surface),
+        )));
+        Self
+    }
+}
+
+impl Drop for PublishToolGuard {
+    fn drop(&mut self) {
+        blyte_agent::tools::set_publish_tool(None);
+    }
+}
+
 pub fn run(args: &SurfaceArgs, config: ReplConfig) -> i32 {
     #[cfg(unix)]
     {
@@ -1575,16 +1602,27 @@ where
     let entries_log_path = crate::surface_dir::entries_path(&main_checkout, &surface_id);
     blyte_agent::tools::set_blyte_surface(Some(surface_id.clone()));
     let model = resolve_initial_model(&config);
-    let session = match Session::start_with_log_io(model, Some(entries_log_path), err, |approver| {
-        custom_runner.unwrap_or_else(|| Box::new(AgentRunner::new(&config, approver)))
-    }) {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = writeln!(err, "blyte: {e}");
-            let _ = err.flush();
-            return 1;
-        }
-    };
+    let mut _private_tmp_guard: Option<PrivateTmpDirGuard> = None;
+    let session =
+        match Session::try_start_with_log_io(model, Some(entries_log_path), err, |approver| {
+            match custom_runner {
+                Some(r) => Ok(r),
+                None => {
+                    let runner = AgentRunner::try_new(&config, approver)?;
+                    _private_tmp_guard = runner.private_tmpdir().map(|path| PrivateTmpDirGuard {
+                        path: path.to_path_buf(),
+                    });
+                    Ok(Box::new(runner) as Box<dyn crate::session::PromptRunner>)
+                }
+            }
+        }) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = writeln!(err, "blyte: {e}");
+                let _ = err.flush();
+                return 1;
+            }
+        };
     let hook_dir = registry_dir.clone();
     let hook_entry = registry_entry.clone();
     session.set_activity_hook(Box::new(move |prompt| {
@@ -1635,6 +1673,7 @@ where
     });
 
     let timer_guard = spawn_reconcile_timer(Arc::clone(&surface));
+    let _publish_tool_guard = PublishToolGuard::install(Arc::clone(&surface));
 
     let serve_result =
         crate::http::serve_until(listener, should_stop, move |req| match now_duration() {
@@ -1642,6 +1681,7 @@ where
             Err(e) => json_error(500, e),
         });
 
+    drop(_publish_tool_guard);
     drop(timer_guard);
 
     match serve_result {

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use blyte_agent::sandbox::validate_surface_id;
 use serde::{Deserialize, Serialize};
 
-use crate::surface_dir::{health_matches, validate_surface_name};
+use crate::surface_dir::{probe, validate_surface_name, Liveness};
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -142,10 +142,9 @@ pub fn live_entries(dir: &Path) -> Result<Vec<RegistryEntry>, String> {
     let entries = read_entries(dir)?;
     let mut live = Vec::with_capacity(entries.len());
     for entry in entries {
-        if health_matches(entry.port, &entry.id) {
-            live.push(entry);
-        } else {
-            remove_entry(dir, &entry.id)?;
+        match probe(entry.pid, entry.port, &entry.id) {
+            Liveness::Running | Liveness::Unknown => live.push(entry),
+            Liveness::NotRunning => remove_entry(dir, &entry.id)?,
         }
     }
     Ok(live)

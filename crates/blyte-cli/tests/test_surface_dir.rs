@@ -14,7 +14,7 @@ fn sample_record(id: &str, name: &str, port: u16, started_at: u64) -> SurfaceRec
     SurfaceRecord {
         id: id.to_string(),
         name: name.to_string(),
-        pid: 4242,
+        pid: std::process::id(),
         port,
         session_id: format!("sess-{id}"),
         started_at,

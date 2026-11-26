@@ -61,7 +61,7 @@ fn conversation_profile_allows_only_wt_tasks_for_writes() {
     let git_canon = canon(&d.path().join(".git"));
     let wt_canon = canon(&d.path().join(".wt"));
 
-    let p = conversation_profile(d.path(), &[]);
+    let p = conversation_profile(d.path(), &[]).unwrap();
     if cfg!(target_os = "macos") {
         let Profile::Seatbelt(s) = p else {
             panic!("expected Seatbelt");
@@ -131,8 +131,8 @@ mod linux {
     use std::time::Duration;
 
     use blyte_agent::sandbox::{
-        available, conversation_profile, conversation_profile_net, default_profile_net,
-        landlock_abi, surface_token_path, Profile,
+        available, conversation_profile, conversation_profile_net, conversation_sandbox,
+        default_profile_net, landlock_abi, surface_token_path, Profile,
     };
     use blyte_agent::shell::{LocalShell, PersistentShell, Shell};
 
@@ -270,7 +270,7 @@ mod linux {
         std::fs::create_dir_all(&tasks).unwrap();
         std::fs::create_dir_all(&passed).unwrap();
 
-        let sh = LocalShell::sandboxed(conversation_profile(repo.path(), &[]));
+        let sh = LocalShell::sandboxed(conversation_profile(repo.path(), &[]).unwrap());
         let ok_file = tasks.join("task.md");
         let ok = sh
             .exec(
@@ -281,6 +281,84 @@ mod linux {
             .unwrap();
         assert_eq!(ok.exit_code, 0, "{}", ok.merged());
         assert!(ok_file.exists());
+
+        for denied_path in [
+            repo.path().join("root.txt"),
+            repo.path().join(".git/forged"),
+            passed.join("forged.json"),
+        ] {
+            let r = sh
+                .exec(
+                    &format!("echo no > '{}'", denied_path.display()),
+                    repo.path(),
+                    Duration::from_secs(30),
+                )
+                .unwrap();
+            assert_ne!(
+                r.exit_code,
+                0,
+                "write to {} must fail",
+                denied_path.display()
+            );
+            assert!(
+                !denied_path.exists(),
+                "{} must not be created",
+                denied_path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn conversation_profile_under_system_temp_dir_writes_only_in_wt_tasks_and_private_tmpdir() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if !landlock_or_skip() {
+            return;
+        }
+        let repo = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        let tasks = repo.path().join(".wt/tasks");
+        let passed = repo.path().join(".wt/passed");
+        std::fs::create_dir_all(&tasks).unwrap();
+        std::fs::create_dir_all(&passed).unwrap();
+
+        let sb = conversation_sandbox(repo.path(), &[]).unwrap();
+        let private_tmp = sb
+            .tmpdir
+            .clone()
+            .expect("repo under system temp dir must get a private TMPDIR");
+        let sh = LocalShell::sandboxed(sb.profile).with_tmpdir(sb.tmpdir);
+
+        let ok_file = tasks.join("x");
+        let ok = sh
+            .exec(
+                &format!("echo ok > '{}'", ok_file.display()),
+                repo.path(),
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        assert_eq!(ok.exit_code, 0, "{}", ok.merged());
+        assert!(ok_file.exists());
+
+        let tmp_write = sh
+            .exec(
+                r#"echo tmp > "$TMPDIR/probe.txt" && printf '%s' "$TMPDIR""#,
+                repo.path(),
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        assert_eq!(tmp_write.exit_code, 0, "{}", tmp_write.merged());
+        assert_eq!(
+            std::path::PathBuf::from(tmp_write.stdout.trim())
+                .canonicalize()
+                .unwrap(),
+            private_tmp.canonicalize().unwrap()
+        );
+        assert!(private_tmp.join("probe.txt").exists());
 
         for denied_path in [
             repo.path().join("root.txt"),
@@ -333,7 +411,7 @@ mod linux {
 
         let conv_network = landlock_abi() < 4;
         for profile in [
-            conversation_profile_net(repo.path(), &[], conv_network),
+            conversation_profile_net(repo.path(), &[], conv_network).unwrap(),
             default_profile_net(repo.path(), &[], true),
         ] {
             let sh = LocalShell::sandboxed(profile);

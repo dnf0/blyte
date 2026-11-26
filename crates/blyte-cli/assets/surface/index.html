@@ -853,6 +853,72 @@
       display: none;
     }
 
+    .entry-approval-publish {
+      border-color: var(--accent, var(--amber));
+    }
+
+    .approval-publish-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 12px;
+    }
+
+    .approval-publish-row {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      flex-wrap: wrap;
+    }
+
+    .approval-publish-label {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+      min-width: 56px;
+    }
+
+    .approval-publish-value {
+      color: var(--color-strong);
+      word-break: break-all;
+    }
+
+    .approval-publish-commits {
+      margin: 0;
+      padding-left: 18px;
+      font-size: 12.5px;
+      line-height: 1.45;
+      color: var(--color-text);
+    }
+
+    .approval-publish-commits-empty {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      color: var(--color-muted);
+    }
+
+    .approval-publish-title {
+      font-weight: 600;
+      font-size: 13.5px;
+      color: var(--color-strong);
+      word-break: break-word;
+    }
+
+    .approval-publish-body {
+      margin: 0;
+      padding: 8px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-page);
+      color: var(--color-text);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow-x: auto;
+    }
+
     .composer-error {
       padding: 6px 16px 0;
       background: var(--color-card);
@@ -3506,6 +3572,39 @@
           }
           const idAttr = escapeHtml(entry.id);
           const disabledAttr = surfaceToken ? "" : " disabled";
+          if (hasOwn(entry, "publish") && entry.publish !== undefined && entry.publish !== null) {
+            if (!isValidPublishDetails(entry.publish)) {
+              return renderEntryError(entry.seq, "approval_requested entry has invalid field publish");
+            }
+            const p = entry.publish;
+            const shortCommit = p.commit.slice(0, 7);
+            const commitsHtml = p.commits.length > 0
+              ? '<ul class="approval-publish-commits">' +
+                  p.commits.map(subject => '<li>' + escapeHtml(subject) + '</li>').join("") +
+                '</ul>'
+              : '<div class="approval-publish-commits-empty">No commits.</div>';
+            return (
+              '<div class="entry entry-approval entry-approval-publish" data-seq="' + seqAttr + '" data-approval-card="' + idAttr + '">' +
+                '<div class="approval-header">' +
+                  '<span class="approval-title">Publish request ' + escapeHtml(p.request) + '?</span>' +
+                  '<span class="approval-badge approval-badge-pending">Waiting for approval</span>' +
+                '</div>' +
+                '<div class="approval-publish-meta">' +
+                  '<div class="approval-publish-row"><span class="approval-publish-label">Remote</span><span class="approval-publish-value mono">' + escapeHtml(p.remote_url) + '</span></div>' +
+                  '<div class="approval-publish-row"><span class="approval-publish-label">Branch</span><span class="approval-publish-value mono">' + escapeHtml(p.branch) + ' &#8594; ' + escapeHtml(p.base) + '</span></div>' +
+                  '<div class="approval-publish-row"><span class="approval-publish-label">Commit</span><span class="approval-publish-value mono">' + escapeHtml(shortCommit) + '</span></div>' +
+                '</div>' +
+                commitsHtml +
+                '<div class="approval-publish-title">' + escapeHtml(p.title) + '</div>' +
+                '<pre class="approval-publish-body">' + escapeHtml(p.body) + '</pre>' +
+                '<div class="approval-actions">' +
+                  '<button type="button" class="btn approval-btn approval-btn-yes" data-approval-id="' + idAttr + '" data-approval-answer="yes"' + disabledAttr + '>Approve once</button>' +
+                  '<button type="button" class="btn approval-btn approval-btn-no" data-approval-id="' + idAttr + '" data-approval-answer="no"' + disabledAttr + '>Refuse</button>' +
+                '</div>' +
+                '<div class="approval-error" hidden></div>' +
+              '</div>'
+            );
+          }
           return (
             '<div class="entry entry-approval" data-seq="' + seqAttr + '" data-approval-card="' + idAttr + '">' +
               '<div class="approval-header">' +
@@ -3551,6 +3650,19 @@
         default:
           return renderEntryError(entry.seq, "unknown entry kind " + entry.kind);
       }
+    }
+
+    function isValidPublishDetails(p) {
+      if (!isPlainObject(p)) return false;
+      if (typeof p.request !== "string" || !p.request) return false;
+      if (typeof p.remote_url !== "string") return false;
+      if (typeof p.branch !== "string") return false;
+      if (typeof p.base !== "string") return false;
+      if (typeof p.commit !== "string") return false;
+      if (!Array.isArray(p.commits) || !p.commits.every(c => typeof c === "string")) return false;
+      if (typeof p.title !== "string") return false;
+      if (typeof p.body !== "string") return false;
+      return true;
     }
 
     function findApprovalCard(threadEl, id) {
@@ -3680,11 +3792,12 @@
           }
         }
 
-        if (isPlainObject(entry) && entry.kind === "approval_requested" && typeof entry.id === "string" && entry.id && typeof entry.command === "string" && typeof entry.reason === "string" && hasValidSeq && isTimestamp(entry.ts)) {
+        if (isPlainObject(entry) && entry.kind === "approval_requested" && typeof entry.id === "string" && entry.id && typeof entry.command === "string" && typeof entry.reason === "string" && (!hasOwn(entry, "publish") || entry.publish === undefined || entry.publish === null || isValidPublishDetails(entry.publish)) && hasValidSeq && isTimestamp(entry.ts)) {
           approvalsById.set(entry.id, {
             seq: entry.seq,
             command: entry.command,
             reason: entry.reason,
+            publish: hasOwn(entry, "publish") ? entry.publish : null,
             answer: null,
             inFlight: false
           });

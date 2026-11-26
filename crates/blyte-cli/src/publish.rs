@@ -37,12 +37,12 @@ fn validate_branch_name(branch: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn ensure_origin_remote(root: &Path) -> Result<(), String> {
+pub fn origin_remote_url(root: &Path) -> Result<String, String> {
     let out = run_git(root, &["remote", "get-url", "origin"])?;
     if out.status.success() {
         let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !url.is_empty() {
-            return Ok(());
+            return Ok(url);
         }
     }
     let detail = output_detail(&out);
@@ -50,6 +50,14 @@ fn ensure_origin_remote(root: &Path) -> Result<(), String> {
         return Err(format!("{}: not a git repository", root.display()));
     }
     Err(format!("repository has no 'origin' remote: {detail}"))
+}
+
+fn ensure_origin_remote(root: &Path) -> Result<(), String> {
+    origin_remote_url(root).map(|_| ())
+}
+
+pub fn default_branch(root: &Path) -> Result<String, String> {
+    default_branch_from_origin_head(root)
 }
 
 fn default_branch_from_origin_head(root: &Path) -> Result<String, String> {
@@ -74,6 +82,66 @@ fn ensure_local_branch(root: &Path, branch: &str) -> Result<(), String> {
         return Ok(());
     }
     Err(format!("branch '{branch}' does not exist"))
+}
+
+pub fn branch_commit(root: &Path, branch: &str) -> Result<String, String> {
+    validate_branch_name(branch)?;
+    ensure_local_branch(root, branch)?;
+    let spec = format!("refs/heads/{branch}^{{commit}}");
+    let out = run_git(root, &["rev-parse", "--verify", &spec])?;
+    if !out.status.success() {
+        let detail = output_detail(&out);
+        return Err(format!("could not read commit for '{branch}': {detail}"));
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if sha.is_empty() {
+        return Err(format!("could not read commit for '{branch}'"));
+    }
+    Ok(sha)
+}
+
+pub fn verify_branch_commit(root: &Path, branch: &str, expected: &str) -> Result<(), String> {
+    let current = branch_commit(root, branch)?;
+    if current != expected {
+        return Err(format!(
+            "branch '{branch}' moved after approval (expected {expected}, now {current}); nothing was pushed"
+        ));
+    }
+    Ok(())
+}
+
+pub fn branch_commit_subjects(
+    root: &Path,
+    branch: &str,
+    base: &str,
+) -> Result<Vec<String>, String> {
+    validate_branch_name(branch)?;
+    validate_branch_name(base)?;
+    ensure_local_branch(root, branch)?;
+    let origin_base = format!("refs/remotes/origin/{base}");
+    let base_ref = if run_git(root, &["show-ref", "--verify", "--quiet", &origin_base])
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        origin_base
+    } else {
+        format!("refs/heads/{base}")
+    };
+    let range = format!("{base_ref}..refs/heads/{branch}");
+    let out = run_git(root, &["log", "--format=%s", &range])?;
+    if !out.status.success() {
+        let detail = output_detail(&out);
+        return Err(format!(
+            "could not list commits on '{branch}' not on '{base}': {detail}"
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(String::from)
+        .collect())
 }
 
 fn is_gh_auth_error(out: &Output) -> bool {

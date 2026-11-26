@@ -27,12 +27,20 @@ pub trait PeerTools: Send + Sync {
     fn tell(&self, name: &str, message: &str) -> Result<String, String>;
 }
 
+pub trait PublishTool: Send + Sync {
+    fn publish(&self, request: &str, title: &str, body: &str) -> Result<String, String>;
+}
+
+pub const PUBLISH_TITLE_MAX_CHARS: usize = 200;
+pub const PUBLISH_BODY_MAX_BYTES: usize = 20_000;
+
 static READ_ROOTS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::new());
 static DISPATCH_CMD: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 static BLYTE_TOOL: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
 static BLYTE_SURFACE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 static APPROVAL: std::sync::RwLock<Option<ApprovalConfig>> = std::sync::RwLock::new(None);
 static PEER_TOOLS: std::sync::RwLock<Option<Arc<dyn PeerTools>>> = std::sync::RwLock::new(None);
+static PUBLISH_TOOL: std::sync::RwLock<Option<Arc<dyn PublishTool>>> = std::sync::RwLock::new(None);
 static WRITE_SCOPE: std::sync::RwLock<Option<WriteScope>> = std::sync::RwLock::new(None);
 thread_local! {
     static BLYTE_REQUEST: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
@@ -89,6 +97,37 @@ pub const BLYTE_TOOL_COMMANDS: [&str; 9] = [
     "edit-start",
     "edit-finish",
 ];
+
+pub const REFUSED_DISPATCH_OPTIONS: [&str; 6] = [
+    "--sandbox",
+    "--network",
+    "--allow-read",
+    "--pass-env",
+    "--gate",
+    "--no-path-check",
+];
+
+pub fn refused_dispatch_option_message(option: &str) -> String {
+    format!("do not pass {option}; only the user can loosen a run's sandbox or replace its checks")
+}
+
+fn refused_dispatch_option(args: &[String]) -> Option<&'static str> {
+    for arg in args.iter().skip(1) {
+        for &opt in &REFUSED_DISPATCH_OPTIONS {
+            if arg == opt
+                || arg
+                    .strip_prefix(opt)
+                    .is_some_and(|rest| rest.starts_with('='))
+            {
+                return Some(opt);
+            }
+        }
+        if arg.starts_with("-g") {
+            return Some("-g");
+        }
+    }
+    None
+}
 
 pub fn set_blyte_request(request: Option<String>) {
     BLYTE_REQUEST.with(|slot| {
@@ -161,6 +200,20 @@ pub fn set_peer_tools(tools: Option<Arc<dyn PeerTools>>) {
 
 pub fn peer_tools() -> Option<Arc<dyn PeerTools>> {
     PEER_TOOLS
+        .read()
+        .map(|r| r.clone())
+        .unwrap_or_else(|e| e.into_inner().clone())
+}
+
+pub fn set_publish_tool(tool: Option<Arc<dyn PublishTool>>) {
+    match PUBLISH_TOOL.write() {
+        Ok(mut lock) => *lock = tool,
+        Err(poisoned) => *poisoned.into_inner() = tool,
+    }
+}
+
+pub fn publish_tool() -> Option<Arc<dyn PublishTool>> {
+    PUBLISH_TOOL
         .read()
         .map(|r| r.clone())
         .unwrap_or_else(|e| e.into_inner().clone())
@@ -924,6 +977,30 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         });
     }
+    if publish_tool().is_some() {
+        tools.push(ToolSpec {
+            name: "publish".into(),
+            description: "Ask the user to approve pushing a combined request's branch to origin and opening a pull request against the default branch. Runs only when the user approves it on the page.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "request": {
+                        "type": "string",
+                        "description": "Request id of this surface to publish"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Pull request title"
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Pull request body"
+                    }
+                },
+                "required": ["request", "title", "body"]
+            }),
+        });
+    }
     tools
 }
 
@@ -1441,6 +1518,11 @@ fn execute_unbounded(
                         "do not pass --started-by; blyte sets it automatically",
                     );
                 }
+                if first == "dispatch" {
+                    if let Some(opt) = refused_dispatch_option(&cmd_args) {
+                        return ToolOutcome::err(refused_dispatch_option_message(opt));
+                    }
+                }
                 if let Some(req_id) = blyte_request() {
                     if let Some(pos) = exec_args.iter().position(|a| a == "--") {
                         exec_args.insert(pos, req_id);
@@ -1553,6 +1635,54 @@ fn execute_unbounded(
                 return ToolOutcome::err("tell needs a name and a message");
             };
             match peer.tell(target, message) {
+                Ok(text) => ToolOutcome::ok(text),
+                Err(text) => ToolOutcome::err(text),
+            }
+        }
+        "publish" => {
+            let Some(tool) = publish_tool() else {
+                return ToolOutcome::err("the publish tool is not available here");
+            };
+            if let Some(started_by) = blyte_started_by() {
+                return ToolOutcome::err(format!(
+                    "cannot publish during a turn started by another surface ({started_by})"
+                ));
+            }
+            let Some(obj) = args.as_object() else {
+                return ToolOutcome::err("publish arguments must be an object");
+            };
+            for key in obj.keys() {
+                if !matches!(key.as_str(), "request" | "title" | "body") {
+                    return ToolOutcome::err(format!("publish does not accept field {key}"));
+                }
+            }
+            let Some(request) = obj
+                .get("request")
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.trim().is_empty())
+            else {
+                return ToolOutcome::err("publish needs a non-empty request");
+            };
+            let Some(title) = obj.get("title").and_then(|v| v.as_str()) else {
+                return ToolOutcome::err("publish needs a title");
+            };
+            let Some(body) = obj.get("body").and_then(|v| v.as_str()) else {
+                return ToolOutcome::err("publish needs a body");
+            };
+            if title.trim().is_empty() {
+                return ToolOutcome::err("publish title must not be blank");
+            }
+            if title.chars().count() > PUBLISH_TITLE_MAX_CHARS {
+                return ToolOutcome::err(format!(
+                    "publish title must be at most {PUBLISH_TITLE_MAX_CHARS} characters"
+                ));
+            }
+            if body.len() > PUBLISH_BODY_MAX_BYTES {
+                return ToolOutcome::err(format!(
+                    "publish body must be at most {PUBLISH_BODY_MAX_BYTES} bytes"
+                ));
+            }
+            match tool.publish(request, title.trim(), body) {
                 Ok(text) => ToolOutcome::ok(text),
                 Err(text) => ToolOutcome::err(text),
             }

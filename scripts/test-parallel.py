@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
@@ -22,6 +23,7 @@ class ScriptError(Exception):
 
 
 DEFAULT_JOBS = 4
+DEFAULT_TIMEOUT = 1200
 
 
 def load_cargo_env(root: Path) -> dict[str, str]:
@@ -132,8 +134,8 @@ def build_and_discover(
 
 
 def run_one(
-    executable: str, manifest_dir: str, cargo_env: dict[str, str]
-) -> tuple[str, bool, float, str]:
+    executable: str, manifest_dir: str, cargo_env: dict[str, str], timeout: int
+) -> tuple[str, bool, float, str, bool]:
     env = dict(os.environ)
     # Tests give the binary a scratch HOME; a state or config directory inherited from the
     # developer's shell would take precedence over it and send test writes to the real one.
@@ -143,7 +145,7 @@ def run_one(
     env.update(cargo_env)
     start = time.monotonic()
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             [executable],
             cwd=manifest_dir,
             env=env,
@@ -151,13 +153,29 @@ def run_one(
             stderr=subprocess.STDOUT,
             text=True,
             errors="replace",
-            check=False,
+            start_new_session=True,
         )
-        elapsed = time.monotonic() - start
-        return executable, proc.returncode == 0, elapsed, proc.stdout
     except OSError as exc:
         elapsed = time.monotonic() - start
-        return executable, False, elapsed, f"failed to start {executable}: {exc}\n"
+        return (
+            executable,
+            False,
+            elapsed,
+            f"failed to start {executable}: {exc}\n",
+            False,
+        )
+    try:
+        output, _ = proc.communicate(timeout=timeout)
+        elapsed = time.monotonic() - start
+        return executable, proc.returncode == 0, elapsed, output, False
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        output, _ = proc.communicate()
+        elapsed = time.monotonic() - start
+        return executable, False, elapsed, output, True
 
 
 def test_result_lines(output: str) -> list[str]:
@@ -186,6 +204,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Number of test binaries to run at a time (default: 4).",
     )
     parser.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT,
+        help="Maximum seconds to wait for each test binary before killing it (default: 1200).",
+    )
+    parser.add_argument(
         "--root",
         help="Workspace root directory (default: parent of this script's directory).",
     )
@@ -202,6 +226,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.jobs < 1:
         print("error: --jobs must be at least 1", file=sys.stderr)
+        return 2
+
+    if args.timeout < 1:
+        print("error: --timeout must be at least 1", file=sys.stderr)
         return 2
 
     if args.root is not None:
@@ -234,11 +262,11 @@ def main(argv: list[str] | None = None) -> int:
 
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         futures = [
-            pool.submit(run_one, executable, manifest_dir, cargo_env)
+            pool.submit(run_one, executable, manifest_dir, cargo_env, args.timeout)
             for executable, manifest_dir in entries
         ]
         for future in as_completed(futures):
-            executable, passed, elapsed, output = future.result()
+            executable, passed, elapsed, output, timed_out = future.result()
             name = Path(executable).name
             if passed:
                 results = test_result_lines(output)
@@ -251,12 +279,22 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"ok {name} ({elapsed:.2f}s)", flush=True)
             else:
                 failed.append(name)
-                print(f"FAILED {name} ({elapsed:.2f}s)", flush=True)
-                if output:
-                    sys.stdout.write(output)
-                    if not output.endswith("\n"):
-                        sys.stdout.write("\n")
-                    sys.stdout.flush()
+                if timed_out:
+                    if output:
+                        sys.stdout.write(output)
+                        if not output.endswith("\n"):
+                            sys.stdout.write("\n")
+                    print(
+                        f"FAILED (timed out after {args.timeout}s): {executable}",
+                        flush=True,
+                    )
+                else:
+                    print(f"FAILED {name} ({elapsed:.2f}s)", flush=True)
+                    if output:
+                        sys.stdout.write(output)
+                        if not output.endswith("\n"):
+                            sys.stdout.write("\n")
+                        sys.stdout.flush()
 
     total_elapsed = time.monotonic() - total_start
     if failed:

@@ -138,3 +138,130 @@ fn the_same_commands_work_without_the_marker() {
         String::from_utf8_lossy(&model_review.stderr)
     );
 }
+
+fn blyte_dispatch_with_marker(
+    dir: &Path,
+    home: &Path,
+    args: &[&str],
+    marker: bool,
+) -> std::process::Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_blyte"));
+    cmd.args(args)
+        .current_dir(dir)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env("HOME", home)
+        .env("BLYTE_STATE_DIR", home.join("state"));
+    if marker {
+        cmd.env("BLYTE_MODEL_SHELL", "1");
+    } else {
+        cmd.env_remove("BLYTE_MODEL_SHELL");
+    }
+    cmd.output().unwrap()
+}
+
+fn assert_cli_dispatch_option_refused(args_variants: &[&[&str]], expected_option: &str) {
+    let r = repo();
+    let home = tempfile::tempdir().unwrap();
+    let expected = format!(
+        "do not pass {expected_option}; only the user can loosen a run's sandbox or replace its checks"
+    );
+    for args in args_variants {
+        let out = blyte_dispatch_with_marker(r.path(), home.path(), args, true);
+        assert_eq!(out.status.code(), Some(2), "for {args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(&expected),
+            "expected {expected:?} in stderr for {args:?}, got: {stderr}"
+        );
+        assert!(
+            !r.path().join(".wt/T1").exists(),
+            "worktree created for {args:?}"
+        );
+    }
+}
+
+#[test]
+fn refuses_dispatch_sandbox_in_model_shell() {
+    assert_cli_dispatch_option_refused(
+        &[
+            &["dispatch", "T1", "t.md", "--sandbox", "off"],
+            &["dispatch", "T1", "t.md", "--sandbox=off"],
+            &["dispatch", "T1", "t.md", "--sandbox", "on"],
+        ],
+        "--sandbox",
+    );
+}
+
+#[test]
+fn refuses_dispatch_network_in_model_shell() {
+    assert_cli_dispatch_option_refused(
+        &[
+            &["dispatch", "T1", "t.md", "--network", "off"],
+            &["dispatch", "T1", "t.md", "--network=on"],
+        ],
+        "--network",
+    );
+}
+
+#[test]
+fn refuses_dispatch_allow_read_in_model_shell() {
+    assert_cli_dispatch_option_refused(
+        &[
+            &["dispatch", "T1", "t.md", "--allow-read", "/etc"],
+            &["dispatch", "T1", "t.md", "--allow-read=/etc"],
+        ],
+        "--allow-read",
+    );
+}
+
+#[test]
+fn refuses_dispatch_pass_env_in_model_shell() {
+    assert_cli_dispatch_option_refused(
+        &[
+            &["dispatch", "T1", "t.md", "--pass-env", "SECRET"],
+            &["dispatch", "T1", "t.md", "--pass-env=SECRET"],
+        ],
+        "--pass-env",
+    );
+}
+
+#[test]
+fn refuses_dispatch_gate_in_model_shell() {
+    assert_cli_dispatch_option_refused(
+        &[
+            &["dispatch", "T1", "t.md", "--gate", "true"],
+            &["dispatch", "T1", "t.md", "--gate=true"],
+            &["dispatch", "T1", "t.md", "-g", "true"],
+            &["dispatch", "T1", "t.md", "-gtrue"],
+        ],
+        "--gate",
+    );
+}
+
+#[test]
+fn refuses_dispatch_no_path_check_in_model_shell() {
+    assert_cli_dispatch_option_refused(
+        &[&["dispatch", "T1", "t.md", "--no-path-check"]],
+        "--no-path-check",
+    );
+}
+
+#[test]
+fn dispatch_sandbox_option_is_not_refused_without_model_shell_marker() {
+    let r = repo();
+    let home = tempfile::tempdir().unwrap();
+    let args = &["dispatch", "T1", "missing.md", "--sandbox", "off"];
+
+    let refused = blyte_dispatch_with_marker(r.path(), home.path(), args, true);
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains(
+        "do not pass --sandbox; only the user can loosen a run's sandbox or replace its checks"
+    ));
+
+    let allowed = blyte_dispatch_with_marker(r.path(), home.path(), args, false);
+    let stderr = String::from_utf8_lossy(&allowed.stderr);
+    assert!(
+        !stderr.contains("only the user can loosen a run's sandbox or replace its checks"),
+        "expected no sandbox refusal without marker, got: {stderr}"
+    );
+}

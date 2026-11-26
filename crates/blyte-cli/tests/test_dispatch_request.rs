@@ -213,15 +213,7 @@ impl PromptRunner for DispatchingRunner {
             &LocalFs,
             "blyte",
             &json!({
-                "args": [
-                    "dispatch",
-                    id,
-                    "task.md",
-                    "--gate",
-                    "true",
-                    "--sandbox",
-                    "off"
-                ]
+                "args": ["dispatch", id, "task.md"]
             }),
         );
         Ok(())
@@ -295,6 +287,7 @@ fn surface_dispatch_carries_current_request_and_two_messages_get_two_ids() {
     let d = tempfile::tempdir().unwrap();
     let repo = d.path().join("repo");
     init_repo(&repo);
+    std::fs::write(repo.join("blyte.toml"), "[dispatch]\ngate = \"true\"\n").unwrap();
 
     std::env::set_var("BLYTE_STATE_DIR", repo.join(".state"));
     std::env::set_var("BLYTE_NO_UPDATE_CHECK", "1");

@@ -219,6 +219,13 @@ fn reference_describes_unsandboxed_and_no_dev_null_redirect() {
     assert!(blyte_cli::conversation_text::SANDBOX_ON_PARAGRAPH.contains(
         "the shell and the write tools can write only in `.wt/tasks` and temporary directories"
     ));
+    assert!(blyte_cli::conversation_text::SANDBOX_ON_PARAGRAPH
+        .contains("(for example a package install)"));
+    assert!(
+        !blyte_cli::conversation_text::SANDBOX_ON_PARAGRAPH.contains("(for example `git push`)")
+    );
+    assert!(blyte_cli::conversation_text::SANDBOX_ON_PARAGRAPH
+        .contains("To publish a request, use the `publish` tool; it runs only when the user approves it on the page."));
     assert!(!REFERENCE.contains("> /dev/null"));
     assert!(DEFAULT_PROCESS.contains(".wt/tasks/<name>.md"));
     assert!(DEFAULT_PROCESS.contains("approval"));
@@ -262,6 +269,42 @@ fn default_process_says_when_to_edit_directly() {
     assert!(
         normalized.contains("hand the request to one run")
             || normalized.contains("Hand anything larger to one run"),
+        "{DEFAULT_PROCESS}"
+    );
+}
+
+#[test]
+fn default_process_gives_five_file_read_rule_for_research() {
+    let normalized = DEFAULT_PROCESS
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        normalized.contains("about five file reads"),
+        "{DEFAULT_PROCESS}"
+    );
+}
+
+#[test]
+fn instructions_describe_publish_tool_instead_of_no_command() {
+    let normalized_process = DEFAULT_PROCESS
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let normalized_reference = REFERENCE.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(DEFAULT_PROCESS.contains("`publish`"), "{DEFAULT_PROCESS}");
+    assert!(REFERENCE.contains("`publish`"), "{REFERENCE}");
+    assert!(
+        !normalized_process.contains("You have no command for either"),
+        "{DEFAULT_PROCESS}"
+    );
+    assert!(
+        !normalized_reference.contains("You have no command for either"),
+        "{REFERENCE}"
+    );
+    assert!(
+        normalized_process
+            .contains("Do not say a request is combined, pushed or merged unless blyte said so."),
         "{DEFAULT_PROCESS}"
     );
 }

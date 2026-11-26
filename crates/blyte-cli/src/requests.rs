@@ -51,6 +51,19 @@ impl Publisher for RealPublisher {
 #[derive(Default)]
 struct RequestsInner {
     running: HashSet<String>,
+    publishing: HashSet<String>,
+}
+
+pub struct PublishGuard {
+    state: Arc<RequestsState>,
+    request: String,
+}
+
+impl Drop for PublishGuard {
+    fn drop(&mut self) {
+        let mut inner = self.state.lock_inner();
+        inner.publishing.remove(&self.request);
+    }
 }
 
 pub struct RequestsState {
@@ -78,6 +91,17 @@ impl RequestsState {
 
     pub fn is_combining(&self, request: &str) -> bool {
         self.lock_inner().running.contains(request)
+    }
+
+    pub fn try_begin_publish(self: &Arc<Self>, request: &str) -> Option<PublishGuard> {
+        let mut inner = self.lock_inner();
+        if !inner.publishing.insert(request.to_string()) {
+            return None;
+        }
+        Some(PublishGuard {
+            state: Arc::clone(self),
+            request: request.to_string(),
+        })
     }
 
     pub fn wait_for_idle(&self, request: &str) {
@@ -1674,6 +1698,174 @@ pub fn open_request_pull_request(
             ));
             Err(RequestActionError::Internal(e))
         }
+    }
+}
+
+fn request_action_error_message(err: RequestActionError) -> String {
+    match err {
+        RequestActionError::BadRequest(msg)
+        | RequestActionError::NotOwned(msg)
+        | RequestActionError::Conflict(msg)
+        | RequestActionError::Internal(msg) => msg,
+    }
+}
+
+pub fn publish_request_with_approval(
+    surface: &Surface,
+    approver: &dyn blyte_agent::approval::Approver,
+    request: &str,
+    title: &str,
+    body: &str,
+) -> Result<String, String> {
+    if let Some(started_by) = blyte_agent::tools::blyte_started_by() {
+        return Err(format!(
+            "cannot publish during a turn started by another surface ({started_by})"
+        ));
+    }
+    let trimmed_title = title.trim();
+    if trimmed_title.is_empty() {
+        return Err("publish title must not be blank".to_string());
+    }
+    if title.chars().count() > blyte_agent::tools::PUBLISH_TITLE_MAX_CHARS {
+        return Err(format!(
+            "publish title must be at most {} characters",
+            blyte_agent::tools::PUBLISH_TITLE_MAX_CHARS
+        ));
+    }
+    if body.len() > blyte_agent::tools::PUBLISH_BODY_MAX_BYTES {
+        return Err(format!(
+            "publish body must be at most {} bytes",
+            blyte_agent::tools::PUBLISH_BODY_MAX_BYTES
+        ));
+    }
+    crate::dispatch::validate_request_id(request)?;
+    match check_request_ownership(surface, request) {
+        Ok(RequestOwnership::Owned) => {}
+        Ok(RequestOwnership::OtherSurface) => {
+            return Err(format!("request {request} belongs to another surface"));
+        }
+        Ok(RequestOwnership::Unowned) => {
+            return Err(format!("request {request} was not started by this surface"));
+        }
+        Ok(RequestOwnership::NotFound) => {
+            return Err(format!("unknown request {request}"));
+        }
+        Err(RequestOwnershipError::Mixed(msg)) | Err(RequestOwnershipError::IoOrParse(msg)) => {
+            return Err(msg);
+        }
+    }
+    if surface.requests.is_combining(request) {
+        return Err(format!("request {request} is still combining"));
+    }
+    let statuses = list_requests(surface)?;
+    let status = statuses
+        .into_iter()
+        .find(|s| s.request == request)
+        .ok_or_else(|| format!("unknown request {request}"))?;
+    if status.state != "combined" {
+        return Err(format!(
+            "request {request} is not ready to publish (state: {})",
+            status.state
+        ));
+    }
+    if status.pushed {
+        if let Some(url) = status.pull_request_url {
+            return Err(format!(
+                "request {request} already has an open pull request ({url})"
+            ));
+        }
+    }
+    if surface.session.has_pending_publish(request) {
+        return Err(format!(
+            "a publish approval for request {request} is already waiting"
+        ));
+    }
+    let _publish_guard = surface
+        .requests
+        .try_begin_publish(request)
+        .ok_or_else(|| format!("a publish approval for request {request} is already waiting"))?;
+    if surface.session.has_pending_publish(request) {
+        return Err(format!(
+            "a publish approval for request {request} is already waiting"
+        ));
+    }
+
+    let branch = status
+        .branch
+        .ok_or_else(|| format!("request {request} has no combined branch"))?;
+    let remote_url = crate::publish::origin_remote_url(&surface.root)?;
+    let base = crate::publish::default_branch(&surface.root)?;
+    let commit = crate::publish::branch_commit(&surface.root, &branch)?;
+    let commits = crate::publish::branch_commit_subjects(&surface.root, &branch, &base)?;
+
+    let details = blyte_agent::approval::PublishDetails {
+        request: request.to_string(),
+        remote_url,
+        branch: branch.clone(),
+        base,
+        commit: commit.clone(),
+        commits,
+        title: trimmed_title.to_string(),
+        body: body.to_string(),
+    };
+
+    match approver.ask_publish(&details) {
+        blyte_agent::approval::Approval::Approved => {}
+        blyte_agent::approval::Approval::Denied => {
+            return Err("the user declined".to_string());
+        }
+        blyte_agent::approval::Approval::Unavailable => {
+            return Err("publish approval is not available here".to_string());
+        }
+    }
+
+    crate::publish::verify_branch_commit(&surface.root, &branch, &commit)?;
+
+    let published = load_published_record(&surface.root, request)?;
+    let already_pushed = published.pushed_commit.as_deref() == Some(commit.as_str());
+    if !already_pushed {
+        push_request(surface, request).map_err(request_action_error_message)?;
+    }
+
+    match open_request_pull_request(surface, request, trimmed_title, body) {
+        Ok(url) => Ok(url),
+        Err(err) => {
+            let detail = request_action_error_message(err);
+            if already_pushed {
+                Err(format!(
+                    "branch {branch} was already pushed at {commit}, but opening the pull request failed: {detail}"
+                ))
+            } else {
+                Err(format!(
+                    "push succeeded for {branch} ({commit}), but opening the pull request failed: {detail}"
+                ))
+            }
+        }
+    }
+}
+
+pub struct SurfacePublishTool {
+    surface: Arc<Surface>,
+    approver: Arc<dyn blyte_agent::approval::Approver>,
+}
+
+impl SurfacePublishTool {
+    pub fn new(surface: Arc<Surface>) -> Self {
+        let approver: Arc<dyn blyte_agent::approval::Approver> = surface.session.approver();
+        Self { surface, approver }
+    }
+
+    pub fn with_approver(
+        surface: Arc<Surface>,
+        approver: Arc<dyn blyte_agent::approval::Approver>,
+    ) -> Self {
+        Self { surface, approver }
+    }
+}
+
+impl blyte_agent::tools::PublishTool for SurfacePublishTool {
+    fn publish(&self, request: &str, title: &str, body: &str) -> Result<String, String> {
+        publish_request_with_approval(&self.surface, self.approver.as_ref(), request, title, body)
     }
 }
 

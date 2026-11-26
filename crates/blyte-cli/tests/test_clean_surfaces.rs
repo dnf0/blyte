@@ -465,7 +465,7 @@ fn running_surface_with_old_files_is_kept() {
     let record = SurfaceRecord {
         id: id.to_string(),
         name: "main".to_string(),
-        pid: 99999,
+        pid: std::process::id(),
         port,
         session_id: "sess-live".to_string(),
         started_at: NOW_SECS - 15 * DAY_SECS,

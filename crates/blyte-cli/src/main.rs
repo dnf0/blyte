@@ -45,6 +45,34 @@ fn main() {
             eprintln!("{}", blyte_agent::shell::model_shell_refusal_message(cmd));
             std::process::exit(2);
         }
+        if let Some(blyte_cli::cli::Command::Dispatch(args)) = &cli.command {
+            let dispatch_matches = matches.subcommand_matches("dispatch");
+            let refused_opt = if args.sandbox != "on"
+                || dispatch_matches.and_then(|m| m.value_source("sandbox"))
+                    == Some(clap::parser::ValueSource::CommandLine)
+            {
+                Some("--sandbox")
+            } else if args.network.is_some() {
+                Some("--network")
+            } else if !args.allow_read.is_empty() {
+                Some("--allow-read")
+            } else if !args.pass_env.is_empty() {
+                Some("--pass-env")
+            } else if args.gate.is_some() {
+                Some("--gate")
+            } else if args.no_path_check {
+                Some("--no-path-check")
+            } else {
+                None
+            };
+            if let Some(opt) = refused_opt {
+                eprintln!(
+                    "{}",
+                    blyte_agent::tools::refused_dispatch_option_message(opt)
+                );
+                std::process::exit(2);
+            }
+        }
     }
     let has_surface_flags = cli.port.is_some()
         || cli.no_open
