@@ -1,3 +1,9 @@
+## v0.67.0 (2026-11-26)
+
+### Feat
+
+- a surface can ask to publish with the user's approval, and three gaps from the self-hosting trial are closed (#433)
+
 ## v0.66.1 (2026-11-26)
 
 ### Fix
