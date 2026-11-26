@@ -161,7 +161,10 @@ fn health_response(surface: &Surface) -> Response {
 
 fn session_response(surface: &Surface) -> Response {
     let info = surface.session.info();
-    let repository = is_repository(&surface.root);
+    let repository = match is_repository(&surface.root) {
+        Ok(v) => v,
+        Err(e) => return json_error(500, e),
+    };
     Response::json(
         200,
         &serde_json::json!({
@@ -474,7 +477,7 @@ pub fn reconcile_runs(
         .reconcile_lock
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    if !is_repository(&surface.root) {
+    if !is_repository(&surface.root)? {
         return Ok((
             crate::live_runs::LiveRuns {
                 generated_at: now,
@@ -578,9 +581,17 @@ fn handle_runs_changed(surface: &Surface) -> Response {
 
 const NOT_A_GIT_REPO_ERROR: &str = "this folder is not a git repository";
 
+fn require_repository(root: &Path) -> Result<(), Response> {
+    match is_repository(root) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(json_error(409, NOT_A_GIT_REPO_ERROR)),
+        Err(e) => Err(json_error(500, e)),
+    }
+}
+
 fn handle_run_diff(surface: &Surface, id: &str) -> Response {
-    if !is_repository(&surface.root) {
-        return json_error(409, NOT_A_GIT_REPO_ERROR);
+    if let Err(resp) = require_repository(&surface.root) {
+        return resp;
     }
     if !is_valid_run_id(id) {
         return json_error(404, format!("unknown run: {id}"));
@@ -637,8 +648,8 @@ fn parse_action(raw: &str) -> Result<Action, String> {
 }
 
 fn handle_run_decision(surface: &Surface, id: &str, req: &Request, now: u64) -> Response {
-    if !is_repository(&surface.root) {
-        return json_error(409, NOT_A_GIT_REPO_ERROR);
+    if let Err(resp) = require_repository(&surface.root) {
+        return resp;
     }
     let obj = match parse_json_object(&req.body) {
         Ok(o) => o,
@@ -724,8 +735,10 @@ fn handle_map(surface: &Surface) -> Response {
 }
 
 fn handle_requests(surface: &Surface) -> Response {
-    if !is_repository(&surface.root) {
-        return Response::json(200, &serde_json::json!([]));
+    match is_repository(&surface.root) {
+        Ok(true) => {}
+        Ok(false) => return Response::json(200, &serde_json::json!([])),
+        Err(e) => return json_error(500, e),
     }
     match crate::requests::list_requests(surface) {
         Ok(list) => match serde_json::to_value(&list) {
@@ -746,8 +759,8 @@ fn request_action_error_response(err: RequestActionError) -> Response {
 }
 
 fn handle_request_push(surface: &Surface, id: &str) -> Response {
-    if !is_repository(&surface.root) {
-        return json_error(409, NOT_A_GIT_REPO_ERROR);
+    if let Err(resp) = require_repository(&surface.root) {
+        return resp;
     }
     match crate::requests::push_request(surface, id) {
         Ok(()) => Response::json(200, &serde_json::json!({ "pushed": true })),
@@ -756,8 +769,8 @@ fn handle_request_push(surface: &Surface, id: &str) -> Response {
 }
 
 fn handle_request_pull_request(surface: &Surface, id: &str, req: &Request) -> Response {
-    if !is_repository(&surface.root) {
-        return json_error(409, NOT_A_GIT_REPO_ERROR);
+    if let Err(resp) = require_repository(&surface.root) {
+        return resp;
     }
     if let Err(e) = crate::dispatch::validate_request_id(id) {
         return json_error(400, e);
@@ -982,15 +995,55 @@ fn find_git_toplevel(dir: &Path) -> Result<GitToplevel, String> {
     Ok(GitToplevel::Repository(PathBuf::from(path_str)))
 }
 
-pub(crate) fn is_repository(root: &Path) -> bool {
-    matches!(find_git_toplevel(root), Ok(GitToplevel::Repository(_)))
+pub(crate) fn is_repository(root: &Path) -> Result<bool, String> {
+    match find_git_toplevel(root)? {
+        GitToplevel::Repository(_) => Ok(true),
+        GitToplevel::NotARepository => Ok(false),
+    }
+}
+
+fn resolve_denied_path(denied: &Path) -> Result<PathBuf, String> {
+    let mut probe = denied;
+    let mut tail = Vec::new();
+    loop {
+        match probe.canonicalize() {
+            Ok(mut resolved) => {
+                for part in tail.into_iter().rev() {
+                    resolved.push(part);
+                }
+                return Ok(resolved);
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                let Some(name) = probe.file_name() else {
+                    return Err(format!("cannot canonicalize {}: {e}", denied.display()));
+                };
+                let Some(parent) = probe.parent() else {
+                    return Err(format!("cannot canonicalize {}: {e}", denied.display()));
+                };
+                tail.push(name.to_os_string());
+                probe = parent;
+            }
+            Err(e) => {
+                return Err(format!("cannot canonicalize {}: {e}", denied.display()));
+            }
+        }
+    }
 }
 
 pub fn check_linux_non_repo_root(root: &Path, home: &Path) -> Result<(), String> {
-    let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let home_canon = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    let root_canon = root
+        .canonicalize()
+        .map_err(|e| format!("cannot canonicalize {}: {e}", root.display()))?;
+    let home_canon = home
+        .canonicalize()
+        .map_err(|e| format!("cannot canonicalize home directory {}: {e}", home.display()))?;
     for denied in blyte_agent::sandbox::read_denied(&home_canon) {
-        let denied_canon = denied.canonicalize().unwrap_or_else(|_| denied.clone());
+        let denied_canon = resolve_denied_path(&denied)?;
         if denied.starts_with(&root_canon) || denied_canon.starts_with(&root_canon) {
             return Err(format!(
                 "on Linux a surface cannot start in {}: it contains {}, which the sandbox could not keep unreadable; start it in a subfolder",
@@ -1007,6 +1060,19 @@ pub fn check_linux_non_repo_root(root: &Path, home: &Path) -> Result<(), String>
         ));
     }
     Ok(())
+}
+
+pub fn check_linux_non_repo_root_for_env(
+    root: &Path,
+    home: Option<&std::ffi::OsStr>,
+) -> Result<(), String> {
+    let home = home.filter(|h| !h.is_empty()).ok_or_else(|| {
+        format!(
+            "cannot check whether {} contains protected paths on Linux: HOME is not set",
+            root.display()
+        )
+    })?;
+    check_linux_non_repo_root(root, Path::new(home))
 }
 
 fn resolve_main_checkout(worktree_root: &Path) -> Result<PathBuf, String> {
@@ -1370,20 +1436,18 @@ fn spawn_reconcile_timer(surface: Arc<Surface>) -> ReconcileTimerGuard {
             }
             let requested = surface.reconcile_requested.swap(false, Ordering::AcqRel);
             if went_idle || requested || Instant::now() >= next_tick {
-                if is_repository(&surface.root) {
-                    match now_duration().and_then(|d| reconcile_runs(&surface, d.as_secs())) {
-                        Ok((_, errors)) => {
-                            for msg in errors {
-                                if seen_errors.insert(msg.clone()) {
-                                    surface.session.record_error(&msg);
-                                    eprintln!("blyte: {msg}");
-                                }
+                match now_duration().and_then(|d| reconcile_runs(&surface, d.as_secs())) {
+                    Ok((_, errors)) => {
+                        for msg in errors {
+                            if seen_errors.insert(msg.clone()) {
+                                surface.session.record_error(&msg);
+                                eprintln!("blyte: {msg}");
                             }
                         }
-                        Err(e) => {
-                            if seen_errors.insert(e.clone()) {
-                                eprintln!("blyte: {e}");
-                            }
+                    }
+                    Err(e) => {
+                        if seen_errors.insert(e.clone()) {
+                            eprintln!("blyte: {e}");
                         }
                     }
                 }
@@ -1463,11 +1527,11 @@ where
 
     #[cfg(target_os = "linux")]
     if !is_repo {
-        if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
-            if let Err(e) = check_linux_non_repo_root(&main_checkout, Path::new(&home)) {
-                let _ = writeln!(err, "blyte: {e}");
-                return 1;
-            }
+        if let Err(e) =
+            check_linux_non_repo_root_for_env(&main_checkout, std::env::var_os("HOME").as_deref())
+        {
+            let _ = writeln!(err, "blyte: {e}");
+            return 1;
         }
     }
 

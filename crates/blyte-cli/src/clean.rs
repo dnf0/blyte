@@ -2781,10 +2781,8 @@ pub fn clean_surfaces(
         }
     }
 
-    let records = crate::surface_dir::list_records_for_root(
-        main_checkout,
-        crate::registry::state_dir().as_deref(),
-    )?;
+    let state_dir = crate::surface_registry::state_dir()?;
+    let records = crate::surface_dir::list_records_for_root(main_checkout, Some(&state_dir))?;
     let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(now_secs);
     let max_age = std::time::Duration::from_secs(older_than_days.saturating_mul(86_400));
 

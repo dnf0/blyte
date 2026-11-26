@@ -173,7 +173,7 @@ pub fn configure_converse_policy_with_paths(
             private_tmpdir: None,
         });
     }
-    if !crate::serve::is_repository(root) {
+    if !crate::serve::is_repository(root)? {
         let root_canon = root
             .canonicalize()
             .map_err(|e| format!("cannot canonicalize {}: {e}", root.display()))?;
