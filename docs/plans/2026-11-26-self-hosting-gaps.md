@@ -281,3 +281,99 @@ combined, pushed or merged unless blyte said so."
 **Constraints.** Other sections unchanged.
 
 **Commit message.** `docs: the surface's instructions describe publishing with the user's approval`
+
+### Task H6: a busy surface is not taken for a stopped one, and a hung test binary fails
+
+**Goal.** A surface decides whether another surface is alive with one HTTP probe that gives up
+after 300 ms and treats every error as "not running". On a loaded machine a live surface misses
+that, `live_entries` deletes its registry entry, a resume by the same name is no longer refused,
+and `resume_fails_when_name_is_running_in_another_repository` then serves for ever (seen: 46
+minutes in the landing check until killed). Make the probe say "unknown" when it cannot tell,
+never delete on "unknown", and make a hung test binary a failure instead of a hang.
+
+**Depends on:** none (based on `feat/self-hosting-gaps`). **Siblings:** none.
+
+**Files.** `crates/blyte-cli/src/surface_dir.rs`, `crates/blyte-cli/src/surface_registry.rs`,
+`crates/blyte-cli/src/serve.rs` and `crates/blyte-cli/src/clean.rs` (callers only),
+`crates/blyte-cli/tests/test_serve.rs`, `scripts/test-parallel.py`,
+`crates/blyte-cli/tests/test_test_parallel_script.rs`, and a new
+`crates/blyte-cli/tests/test_surface_liveness.rs`.
+
+**What to build.**
+
+1. In `surface_dir.rs`:
+   - `pub enum Liveness { Running, NotRunning, Unknown }` (derive `Debug, Clone, Copy, PartialEq, Eq`).
+   - `pub fn probe(pid: u32, port: u16, id: &str) -> Liveness`, replacing `health_matches`
+     (remove `health_matches`; no wrapper returning `bool` from the HTTP result alone):
+     - `port == 0` → `NotRunning`.
+     - `pid` is not a live process (`libc::kill(pid, 0)` fails with `ESRCH`; `pid == 0` counts
+       as not live) → `NotRunning`, without connecting. `EPERM` means the process exists.
+     - connect to `127.0.0.1:<port>`: `ConnectionRefused` → `NotRunning`.
+     - a complete HTTP response was read: status 200 with JSON `surface_id == id` → `Running`;
+       any other complete response (other status, other id, not JSON, no header/body split)
+       → `NotRunning` (something else owns the port).
+     - anything else (connect, write or read timed out: `TimedOut`/`WouldBlock`; any other I/O
+       error) → make one more attempt with a 2 s timeout for connect, read and write, classified
+       by the same rules; if that attempt also cannot tell → `Unknown`. The first attempt keeps
+       `PROBE_TIMEOUT` (300 ms), so the usual case costs what it does today.
+   - `pub fn is_running(record: &SurfaceRecord) -> bool` returns true for `Running` **and**
+     `Unknown` (a surface that might be alive is treated as alive: its name stays taken and
+     `blyte clean` leaves it alone). Say so in a doc comment.
+   - Any other use of the old function in `surface_dir.rs` (around the `pick_name`/running-name
+     code) follows the same rule: `Unknown` counts as running.
+2. In `surface_registry.rs`, `live_entries` keeps an entry whose probe is `Running` or
+   `Unknown`, and removes the entry only on `NotRunning`. It passes the entry's `pid`.
+3. `serve.rs` and `clean.rs` need changes only if they call the removed function directly.
+4. `tests/test_serve.rs`, `resume_fails_when_name_is_running_in_another_repository`: the test
+   must not be able to hang. Start a watchdog thread that sets the `stop` flag passed to
+   `run_with_hooks` after 60 s (and is told to finish when the call returns), so that if the
+   resume is wrongly accepted the call returns and the existing assertions fail. Do not change
+   what the test asserts.
+5. `scripts/test-parallel.py`: a new option `--timeout <seconds>` (integer, default `1200`,
+   must be at least 1, otherwise exit 2 with a message naming the option). A binary still running
+   after that long is killed (the whole process group: start it with `start_new_session=True`
+   and `os.killpg(..., SIGKILL)`), counted as failed, and reported with the output it had
+   produced plus a line `FAILED (timed out after <n>s): <executable>`. The run's exit code is 1
+   as for any failure. Everything else about the script stays as it is.
+
+No fallbacks: an error reading the registry stays an error; `Unknown` is never turned into
+`NotRunning` to make progress. Nothing here runs for long, so "resumable" does not apply.
+
+**Tests** (each must fail on the current code or be new).
+
+`crates/blyte-cli/tests/test_surface_liveness.rs` (use `std::process::id()` for a live pid; for a
+dead pid, spawn `true`, wait for it and use its pid):
+- `port_zero_is_not_running`.
+- `closed_port_is_not_running`: bind a listener on port 0, note the port, drop it, probe with
+  the live pid → `NotRunning`.
+- `dead_pid_is_not_running_without_connecting`: a listener that would answer with the right id,
+  probed with the dead pid → `NotRunning`, and the listener accepted no connection.
+- `right_id_is_running`: a thread answers `HTTP/1.1 200 OK` with body `{"surface_id":"abc"}`
+  → `Running` for id `abc`.
+- `other_id_is_not_running`: same server, probe for id `xyz` → `NotRunning`.
+- `silent_listener_is_unknown`: a listener that accepts and never writes (hold the streams
+  open until the test ends) → `Unknown`, and the call returns within 6 s.
+- `slow_answer_is_running`: a server that answers with the right id after 800 ms → `Running`
+  (proves the second attempt).
+- `live_entries_keeps_a_stalled_entry_and_removes_a_dead_one`: in a temp registry directory
+  write two entries with the registry's own write function: one with the live pid and the
+  silent listener's port, one with the dead pid; `live_entries` returns only the first, the
+  first's file still exists and the second's is gone.
+- `is_running_is_true_when_unknown`: a `SurfaceRecord` pointing at the silent listener with the
+  live pid → `true`.
+
+`crates/blyte-cli/tests/test_test_parallel_script.rs`:
+- `a_binary_past_the_timeout_is_killed_and_reported_failed`: one script that prints `started`
+  and then sleeps 60 s, one that passes; run with `--timeout 2`; exit code 1, output contains
+  `started` and `FAILED (timed out after 2s)`, the passing binary is reported as passing, and
+  the whole run takes under 20 s.
+- `a_timeout_below_one_is_an_error`: `--timeout 0` exits 2 and names `--timeout`.
+
+Run: `cargo test -p blyte --test test_surface_liveness --test test_test_parallel_script --test test_serve`
+and then the repository's checks.
+
+**Constraints.** Existing tests pass unmodified apart from the watchdog in item 4 and callers
+of the removed function. No new dependencies. No home-directory paths or private names.
+
+**Commit message.**
+`fix: a busy surface is no longer taken for a stopped one, and a hung test binary fails after a timeout`
