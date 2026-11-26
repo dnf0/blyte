@@ -705,12 +705,31 @@ fn is_in_open_edit_worktree(edit_worktrees: &Path, real_target: &Path) -> Result
     crate::sandbox::is_open_edit_worktree_id(edit_worktrees, id)
 }
 
+fn protected_read_refusal(verb: &str, path: &Path) -> String {
+    format!(
+        "{verb} was not made: {} is a credential path that this conversation cannot read",
+        path.display()
+    )
+}
+
+fn append_skipped_line(mut text: String, skipped: usize) -> String {
+    if skipped > 0 {
+        text.push_str(&format!("\n(credential paths skipped: {skipped})"));
+    }
+    text
+}
+
 fn check_write_scope(fs: &dyn Fs, tool: &str, path: &Path) -> Result<(), String> {
     let Some(scope) = write_scope() else {
         return Ok(());
     };
     let real_target = resolve_real_target(fs, path)?;
-    if scope.allowed.iter().any(|dir| real_target.starts_with(dir)) {
+    let in_blyte_own = if fs.is_local() {
+        crate::sandbox::is_in_blyte_own_dir(&real_target)?
+    } else {
+        false
+    };
+    if !in_blyte_own && scope.allowed.iter().any(|dir| real_target.starts_with(dir)) {
         return Ok(());
     }
     if let Some(edit_worktrees) = &scope.edit_worktrees {
@@ -718,28 +737,38 @@ fn check_write_scope(fs: &dyn Fs, tool: &str, path: &Path) -> Result<(), String>
             return Ok(());
         }
     }
-    let allowed_list = scope
-        .allowed
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let (reason, hint) = if in_blyte_own {
+        (
+            "inside blyte's own state or configuration".to_string(),
+            "the user can approve writes to blyte's own state or configuration",
+        )
+    } else {
+        let allowed_list = scope
+            .allowed
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        (
+            format!("outside the directories this conversation may write ({allowed_list})"),
+            "the user can approve writes outside these directories",
+        )
+    };
     let cmd = format!("{tool} {}", real_target.display());
-    let reason = format!("outside the directories this conversation may write ({allowed_list})");
     let Some(cfg) = approval() else {
         return Err(format!(
-            "write was not made: {} is outside the directories this conversation may write ({allowed_list}); no approver is configured (the user can approve writes outside these directories).",
+            "write was not made: {} is {reason}; no approver is configured ({hint}).",
             real_target.display()
         ));
     };
     match cfg.approver.ask(&cmd, &reason) {
         Approval::Approved => Ok(()),
         Approval::Denied => Err(format!(
-            "write was not made: {} is outside the directories this conversation may write ({allowed_list}); the user refused (the user can approve writes outside these directories).",
+            "write was not made: {} is {reason}; the user refused ({hint}).",
             real_target.display()
         )),
         Approval::Unavailable => Err(format!(
-            "write was not made: {} is outside the directories this conversation may write ({allowed_list}); nobody can approve it in this run (the user can approve writes outside these directories).",
+            "write was not made: {} is {reason}; nobody can approve it in this run ({hint}).",
             real_target.display()
         )),
     }
@@ -1117,6 +1146,11 @@ fn execute_unbounded(
                 Ok(p) => p,
                 Err(e) => return ToolOutcome::err(e),
             };
+            match crate::sandbox::is_protected_read(&path) {
+                Ok(true) => return ToolOutcome::err(protected_read_refusal("read", &path)),
+                Ok(false) => {}
+                Err(e) => return ToolOutcome::err(e),
+            }
             let body = match fs.read(&path) {
                 Ok(b) => b,
                 Err(e) => return ToolOutcome::err(e),
@@ -1267,12 +1301,16 @@ fn execute_unbounded(
                 Ok(d) => d,
                 Err(e) => return ToolOutcome::err(e),
             };
-            // .gitignore-aware, fd/ripgrep style. A local workspace expands in-process; a
-            // container lists its repository with one `git ls-files` and matches here. Outside a
-            // git repository, or for patterns not handled here, the shell glob below runs as before.
-            let outcome = |hits: Vec<String>| {
-                if hits.is_empty() {
-                    ToolOutcome::ok(format!("no files match {pattern}"))
+            if fs.is_local() {
+                match crate::sandbox::is_protected_read(&dir) {
+                    Ok(true) => return ToolOutcome::err(protected_read_refusal("glob", &dir)),
+                    Ok(false) => {}
+                    Err(e) => return ToolOutcome::err(e),
+                }
+            }
+            let outcome = |hits: Vec<String>, skipped: usize| {
+                let text = if hits.is_empty() {
+                    format!("no files match {pattern}")
                 } else {
                     let shown: Vec<String> = if raw_path.is_empty() {
                         hits
@@ -1282,12 +1320,15 @@ fn execute_unbounded(
                             .map(|h| base.join(h).to_string_lossy().into_owned())
                             .collect()
                     };
-                    ToolOutcome::ok(format!("{} file(s):\n{}", shown.len(), shown.join("\n")))
-                }
+                    format!("{} file(s):\n{}", shown.len(), shown.join("\n"))
+                };
+                ToolOutcome::ok(append_skipped_line(text, skipped))
             };
             if fs.is_local() {
-                if let Some(hits) = crate::search::glob_paths(&dir, &pattern, MAX_MATCHES) {
-                    return outcome(hits);
+                match crate::search::glob_paths_checked(&dir, &pattern, MAX_MATCHES) {
+                    Ok(Some(res)) => return outcome(res.hits, res.skipped),
+                    Ok(None) => {}
+                    Err(e) => return ToolOutcome::err(e),
                 }
             } else if let Ok(o) = shell.exec(
                 "if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
@@ -1299,14 +1340,10 @@ fn execute_unbounded(
                 if o.exit_code == 0 && !o.stdout.starts_with("__BLYTE_NO_GIT__") {
                     if let Some(hits) = crate::search::glob_filter(&o.stdout, &pattern, MAX_MATCHES)
                     {
-                        return outcome(hits);
+                        return outcome(hits, 0);
                     }
                 }
             }
-            // Delegated to the shell rather than a glob crate so that `**`, brace expansion and
-            // character classes behave exactly as the model expects from a terminal.
-            // When bash has globstar (Linux / bash 4+), use it. On platforms where bash lacks
-            // globstar (such as macOS /bin/bash 3.2), fall back to zsh which supports `**` natively.
             let cmd = format!(
                 "if shopt -s globstar 2>/dev/null; then \
                      shopt -s nullglob dotglob 2>/dev/null; \
@@ -1320,13 +1357,31 @@ fn execute_unbounded(
             );
             match shell.exec(&cmd, &dir, command_timeout) {
                 Ok(o) => {
-                    let hits: Vec<String> = o
+                    let raw_hits: Vec<String> = o
                         .stdout
                         .lines()
                         .filter(|l| !l.trim().is_empty())
                         .map(String::from)
                         .collect();
-                    outcome(hits)
+                    if fs.is_local() {
+                        let protected = match crate::sandbox::protected_read_paths() {
+                            Ok(p) => p,
+                            Err(e) => return ToolOutcome::err(e),
+                        };
+                        let mut hits = Vec::with_capacity(raw_hits.len());
+                        let mut skipped = 0usize;
+                        for hit in raw_hits {
+                            let full = dir.join(&hit);
+                            match crate::sandbox::is_protected_read_with(&full, &protected) {
+                                Ok(true) => skipped += 1,
+                                Ok(false) => hits.push(hit),
+                                Err(e) => return ToolOutcome::err(e),
+                            }
+                        }
+                        outcome(hits, skipped)
+                    } else {
+                        outcome(raw_hits, 0)
+                    }
                 }
                 Err(e) => ToolOutcome::err(format!("glob failed: {e}")),
             }
@@ -1341,15 +1396,29 @@ fn execute_unbounded(
                     p
                 }
             };
-            if let Err(e) = resolve_for_read(fs, root, &sub) {
-                return ToolOutcome::err(e);
+            let search_root = match resolve_for_read(fs, root, &sub) {
+                Ok(p) => p,
+                Err(e) => return ToolOutcome::err(e),
+            };
+            if fs.is_local() {
+                match crate::sandbox::is_protected_read(&search_root) {
+                    Ok(true) => {
+                        return ToolOutcome::err(protected_read_refusal("grep", &search_root))
+                    }
+                    Ok(false) => {}
+                    Err(e) => return ToolOutcome::err(e),
+                }
             }
             let glob_str = s("glob");
-            // A local workspace is searched in-process with ripgrep's libraries; elsewhere one
-            // command, using rg when the environment has it (no separate probe).
-            let lines: Vec<String> = if fs.is_local() {
-                match crate::search::grep_lines(root, &sub, &pattern, &glob_str, MAX_MATCHES + 1) {
-                    Ok(l) => l,
+            let (lines, skipped): (Vec<String>, usize) = if fs.is_local() {
+                match crate::search::grep_lines_checked(
+                    root,
+                    &sub,
+                    &pattern,
+                    &glob_str,
+                    MAX_MATCHES + 1,
+                ) {
+                    Ok(res) => (res.hits, res.skipped),
                     Err(e) => return ToolOutcome::err(format!("grep failed: {e}")),
                 }
             } else {
@@ -1359,17 +1428,22 @@ fn execute_unbounded(
                     grep_command(false, &pattern, &sub, &glob_str)
                 );
                 match shell.exec(&cmd, root, command_timeout) {
-                    Ok(o) => o
-                        .stdout
-                        .lines()
-                        .filter(|l| !l.trim().is_empty())
-                        .map(String::from)
-                        .collect(),
+                    Ok(o) => (
+                        o.stdout
+                            .lines()
+                            .filter(|l| !l.trim().is_empty())
+                            .map(String::from)
+                            .collect(),
+                        0,
+                    ),
                     Err(e) => return ToolOutcome::err(format!("grep failed: {e}")),
                 }
             };
             if lines.is_empty() {
-                return ToolOutcome::ok(format!("no matches for {pattern}"));
+                return ToolOutcome::ok(append_skipped_line(
+                    format!("no matches for {pattern}"),
+                    skipped,
+                ));
             }
             let pattern_re = regex::Regex::new(&pattern).ok();
             let lines: Vec<String> = lines
@@ -1392,13 +1466,19 @@ fn execute_unbounded(
                 })
                 .collect();
             if lines.len() > MAX_MATCHES {
-                ToolOutcome::ok(format!(
-                    "{}\n\n[capped at {MAX_MATCHES} matches; narrow the pattern or pass `glob` \
-                     to see the rest]",
-                    lines[..MAX_MATCHES].join("\n")
+                ToolOutcome::ok(append_skipped_line(
+                    format!(
+                        "{}\n\n[capped at {MAX_MATCHES} matches; narrow the pattern or pass `glob` \
+                         to see the rest]",
+                        lines[..MAX_MATCHES].join("\n")
+                    ),
+                    skipped,
                 ))
             } else {
-                ToolOutcome::ok(format!("{} match(es):\n{}", lines.len(), lines.join("\n")))
+                ToolOutcome::ok(append_skipped_line(
+                    format!("{} match(es):\n{}", lines.len(), lines.join("\n")),
+                    skipped,
+                ))
             }
         }
         "dispatch" => {
