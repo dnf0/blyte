@@ -1,7 +1,7 @@
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 
-use blyte_agent::approval::{Approval, Approver};
+use blyte_agent::approval::{Approval, Approver, PublishDetails};
 
 pub struct TtyApprover;
 
@@ -33,5 +33,9 @@ impl Approver for TtyApprover {
             return Approval::Denied;
         }
         decide(&line)
+    }
+
+    fn ask_publish(&self, _details: &PublishDetails) -> Approval {
+        Approval::Unavailable
     }
 }

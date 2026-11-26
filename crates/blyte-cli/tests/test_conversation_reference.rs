@@ -219,6 +219,13 @@ fn reference_describes_unsandboxed_and_no_dev_null_redirect() {
     assert!(blyte_cli::conversation_text::SANDBOX_ON_PARAGRAPH.contains(
         "the shell and the write tools can write only in `.wt/tasks` and temporary directories"
     ));
+    assert!(blyte_cli::conversation_text::SANDBOX_ON_PARAGRAPH
+        .contains("(for example a package install)"));
+    assert!(
+        !blyte_cli::conversation_text::SANDBOX_ON_PARAGRAPH.contains("(for example `git push`)")
+    );
+    assert!(blyte_cli::conversation_text::SANDBOX_ON_PARAGRAPH
+        .contains("To publish a request, use the `publish` tool; it runs only when the user approves it on the page."));
     assert!(!REFERENCE.contains("> /dev/null"));
     assert!(DEFAULT_PROCESS.contains(".wt/tasks/<name>.md"));
     assert!(DEFAULT_PROCESS.contains("approval"));

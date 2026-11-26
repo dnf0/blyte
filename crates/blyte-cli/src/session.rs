@@ -35,8 +35,7 @@ pub struct Entry {
     pub body: EntryBody,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq)]
 pub enum EntryBody {
     UserMessage {
         text: String,
@@ -88,6 +87,12 @@ pub enum EntryBody {
         command: String,
         reason: String,
     },
+    PublishApprovalRequested {
+        id: String,
+        command: String,
+        reason: String,
+        publish: blyte_agent::approval::PublishDetails,
+    },
     ApprovalAnswered {
         id: String,
         command: String,
@@ -100,6 +105,293 @@ pub enum EntryBody {
         queued: bool,
         held: bool,
     },
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum EntryBodyWire {
+    UserMessage {
+        text: String,
+        reports: Vec<String>,
+        queued: bool,
+    },
+    Turn {
+        n: u32,
+        text: String,
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: Option<f64>,
+    },
+    ToolStarted {
+        name: String,
+        input: String,
+    },
+    ToolFinished {
+        name: String,
+        summary: String,
+        is_error: bool,
+    },
+    Retry {
+        attempt: u32,
+        max: u32,
+        wait_ms: u64,
+        reason: String,
+    },
+    Error {
+        message: String,
+    },
+    Idle {
+        turns: u32,
+        cost_usd: Option<f64>,
+    },
+    ModelChanged {
+        model: String,
+    },
+    EffortChanged {
+        effort: Option<String>,
+    },
+    Decision {
+        run: String,
+        action: String,
+        note: Option<String>,
+    },
+    ApprovalRequested {
+        id: String,
+        command: String,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        publish: Option<blyte_agent::approval::PublishDetails>,
+    },
+    ApprovalAnswered {
+        id: String,
+        command: String,
+        answer: String,
+    },
+    PeerMessage {
+        from_name: String,
+        from_repository: String,
+        text: String,
+        queued: bool,
+        held: bool,
+    },
+}
+
+impl From<EntryBody> for EntryBodyWire {
+    fn from(body: EntryBody) -> Self {
+        match body {
+            EntryBody::UserMessage {
+                text,
+                reports,
+                queued,
+            } => EntryBodyWire::UserMessage {
+                text,
+                reports,
+                queued,
+            },
+            EntryBody::Turn {
+                n,
+                text,
+                input_tokens,
+                output_tokens,
+                cost_usd,
+            } => EntryBodyWire::Turn {
+                n,
+                text,
+                input_tokens,
+                output_tokens,
+                cost_usd,
+            },
+            EntryBody::ToolStarted { name, input } => EntryBodyWire::ToolStarted { name, input },
+            EntryBody::ToolFinished {
+                name,
+                summary,
+                is_error,
+            } => EntryBodyWire::ToolFinished {
+                name,
+                summary,
+                is_error,
+            },
+            EntryBody::Retry {
+                attempt,
+                max,
+                wait_ms,
+                reason,
+            } => EntryBodyWire::Retry {
+                attempt,
+                max,
+                wait_ms,
+                reason,
+            },
+            EntryBody::Error { message } => EntryBodyWire::Error { message },
+            EntryBody::Idle { turns, cost_usd } => EntryBodyWire::Idle { turns, cost_usd },
+            EntryBody::ModelChanged { model } => EntryBodyWire::ModelChanged { model },
+            EntryBody::EffortChanged { effort } => EntryBodyWire::EffortChanged { effort },
+            EntryBody::Decision { run, action, note } => {
+                EntryBodyWire::Decision { run, action, note }
+            }
+            EntryBody::ApprovalRequested {
+                id,
+                command,
+                reason,
+            } => EntryBodyWire::ApprovalRequested {
+                id,
+                command,
+                reason,
+                publish: None,
+            },
+            EntryBody::PublishApprovalRequested {
+                id,
+                command,
+                reason,
+                publish,
+            } => EntryBodyWire::ApprovalRequested {
+                id,
+                command,
+                reason,
+                publish: Some(publish),
+            },
+            EntryBody::ApprovalAnswered {
+                id,
+                command,
+                answer,
+            } => EntryBodyWire::ApprovalAnswered {
+                id,
+                command,
+                answer,
+            },
+            EntryBody::PeerMessage {
+                from_name,
+                from_repository,
+                text,
+                queued,
+                held,
+            } => EntryBodyWire::PeerMessage {
+                from_name,
+                from_repository,
+                text,
+                queued,
+                held,
+            },
+        }
+    }
+}
+
+impl From<EntryBodyWire> for EntryBody {
+    fn from(wire: EntryBodyWire) -> Self {
+        match wire {
+            EntryBodyWire::UserMessage {
+                text,
+                reports,
+                queued,
+            } => EntryBody::UserMessage {
+                text,
+                reports,
+                queued,
+            },
+            EntryBodyWire::Turn {
+                n,
+                text,
+                input_tokens,
+                output_tokens,
+                cost_usd,
+            } => EntryBody::Turn {
+                n,
+                text,
+                input_tokens,
+                output_tokens,
+                cost_usd,
+            },
+            EntryBodyWire::ToolStarted { name, input } => EntryBody::ToolStarted { name, input },
+            EntryBodyWire::ToolFinished {
+                name,
+                summary,
+                is_error,
+            } => EntryBody::ToolFinished {
+                name,
+                summary,
+                is_error,
+            },
+            EntryBodyWire::Retry {
+                attempt,
+                max,
+                wait_ms,
+                reason,
+            } => EntryBody::Retry {
+                attempt,
+                max,
+                wait_ms,
+                reason,
+            },
+            EntryBodyWire::Error { message } => EntryBody::Error { message },
+            EntryBodyWire::Idle { turns, cost_usd } => EntryBody::Idle { turns, cost_usd },
+            EntryBodyWire::ModelChanged { model } => EntryBody::ModelChanged { model },
+            EntryBodyWire::EffortChanged { effort } => EntryBody::EffortChanged { effort },
+            EntryBodyWire::Decision { run, action, note } => {
+                EntryBody::Decision { run, action, note }
+            }
+            EntryBodyWire::ApprovalRequested {
+                id,
+                command,
+                reason,
+                publish: None,
+            } => EntryBody::ApprovalRequested {
+                id,
+                command,
+                reason,
+            },
+            EntryBodyWire::ApprovalRequested {
+                id,
+                command,
+                reason,
+                publish: Some(publish),
+            } => EntryBody::PublishApprovalRequested {
+                id,
+                command,
+                reason,
+                publish,
+            },
+            EntryBodyWire::ApprovalAnswered {
+                id,
+                command,
+                answer,
+            } => EntryBody::ApprovalAnswered {
+                id,
+                command,
+                answer,
+            },
+            EntryBodyWire::PeerMessage {
+                from_name,
+                from_repository,
+                text,
+                queued,
+                held,
+            } => EntryBody::PeerMessage {
+                from_name,
+                from_repository,
+                text,
+                queued,
+                held,
+            },
+        }
+    }
+}
+
+impl serde::Serialize for EntryBody {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        EntryBodyWire::from(self.clone()).serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for EntryBody {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        EntryBodyWire::deserialize(deserializer).map(EntryBody::from)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,32 +426,18 @@ pub struct SurfaceApprover {
     shared: Arc<Shared>,
 }
 
-impl blyte_agent::approval::Approver for SurfaceApprover {
-    fn ask(&self, command: &str, reason: &str) -> blyte_agent::approval::Approval {
-        let mut state = self.shared.lock_state();
-        if state.closed {
-            return blyte_agent::approval::Approval::Denied;
-        }
-        state.next_approval_id += 1;
-        let order = state.next_approval_id;
-        let id = format!("approval-{order}");
-        state.approvals.insert(
-            id.clone(),
-            ApprovalRecord {
-                order,
-                command: command.to_string(),
-                answer: None,
-            },
-        );
-        state.push_entry(EntryBody::ApprovalRequested {
-            id: id.clone(),
-            command: command.to_string(),
-            reason: reason.to_string(),
-        });
-        self.shared.log_cv.notify_all();
+impl SurfaceApprover {
+    pub fn has_pending_publish(&self, request: &str) -> bool {
+        let state = self.shared.lock_state();
+        state.approvals.values().any(|record| {
+            record.answer.is_none() && record.publish_request.as_deref() == Some(request)
+        })
+    }
 
+    fn wait_for_approval(&self, id: &str) -> blyte_agent::approval::Approval {
+        let mut state = self.shared.lock_state();
         loop {
-            if let Some(answer) = state.approvals.get(&id).and_then(|r| r.answer) {
+            if let Some(answer) = state.approvals.get(id).and_then(|r| r.answer) {
                 return answer.to_approval();
             }
             if state.closed {
@@ -171,6 +449,71 @@ impl blyte_agent::approval::Approver for SurfaceApprover {
                 .wait(state)
                 .unwrap_or_else(|e| e.into_inner());
         }
+    }
+}
+
+impl blyte_agent::approval::Approver for SurfaceApprover {
+    fn ask(&self, command: &str, reason: &str) -> blyte_agent::approval::Approval {
+        let id = {
+            let mut state = self.shared.lock_state();
+            if state.closed {
+                return blyte_agent::approval::Approval::Denied;
+            }
+            state.next_approval_id += 1;
+            let order = state.next_approval_id;
+            let id = format!("approval-{order}");
+            state.approvals.insert(
+                id.clone(),
+                ApprovalRecord {
+                    order,
+                    command: command.to_string(),
+                    publish_request: None,
+                    answer: None,
+                },
+            );
+            state.push_entry(EntryBody::ApprovalRequested {
+                id: id.clone(),
+                command: command.to_string(),
+                reason: reason.to_string(),
+            });
+            self.shared.log_cv.notify_all();
+            id
+        };
+        self.wait_for_approval(&id)
+    }
+
+    fn ask_publish(
+        &self,
+        details: &blyte_agent::approval::PublishDetails,
+    ) -> blyte_agent::approval::Approval {
+        let id = {
+            let mut state = self.shared.lock_state();
+            if state.closed {
+                return blyte_agent::approval::Approval::Denied;
+            }
+            state.next_approval_id += 1;
+            let order = state.next_approval_id;
+            let id = format!("approval-{order}");
+            let command = format!("publish {}", details.request);
+            state.approvals.insert(
+                id.clone(),
+                ApprovalRecord {
+                    order,
+                    command: command.clone(),
+                    publish_request: Some(details.request.clone()),
+                    answer: None,
+                },
+            );
+            state.push_entry(EntryBody::PublishApprovalRequested {
+                id: id.clone(),
+                command,
+                reason: details.title.clone(),
+                publish: details.clone(),
+            });
+            self.shared.log_cv.notify_all();
+            id
+        };
+        self.wait_for_approval(&id)
     }
 }
 
@@ -304,6 +647,7 @@ impl PromptRunner for AgentRunner {
 struct ApprovalRecord {
     order: u64,
     command: String,
+    publish_request: Option<String>,
     answer: Option<ApprovalAnswer>,
 }
 
@@ -481,7 +825,9 @@ fn max_approval_id(entries: &[Entry]) -> u64 {
     entries
         .iter()
         .filter_map(|e| match &e.body {
-            EntryBody::ApprovalRequested { id, .. } | EntryBody::ApprovalAnswered { id, .. } => {
+            EntryBody::ApprovalRequested { id, .. }
+            | EntryBody::PublishApprovalRequested { id, .. }
+            | EntryBody::ApprovalAnswered { id, .. } => {
                 id.strip_prefix("approval-")?.parse::<u64>().ok()
             }
             _ => None,
@@ -829,6 +1175,13 @@ impl Session {
     pub fn approver(&self) -> Arc<SurfaceApprover> {
         Arc::new(SurfaceApprover {
             shared: Arc::clone(&self.guard.shared),
+        })
+    }
+
+    pub fn has_pending_publish(&self, request: &str) -> bool {
+        let state = self.guard.shared.lock_state();
+        state.approvals.values().any(|record| {
+            record.answer.is_none() && record.publish_request.as_deref() == Some(request)
         })
     }
 

@@ -1149,6 +1149,23 @@ impl Drop for PrivateTmpDirGuard {
     }
 }
 
+struct PublishToolGuard;
+
+impl PublishToolGuard {
+    fn install(surface: Arc<Surface>) -> Self {
+        blyte_agent::tools::set_publish_tool(Some(Arc::new(
+            crate::requests::SurfacePublishTool::new(surface),
+        )));
+        Self
+    }
+}
+
+impl Drop for PublishToolGuard {
+    fn drop(&mut self) {
+        blyte_agent::tools::set_publish_tool(None);
+    }
+}
+
 pub fn run(args: &SurfaceArgs, config: ReplConfig) -> i32 {
     #[cfg(unix)]
     {
@@ -1656,6 +1673,7 @@ where
     });
 
     let timer_guard = spawn_reconcile_timer(Arc::clone(&surface));
+    let _publish_tool_guard = PublishToolGuard::install(Arc::clone(&surface));
 
     let serve_result =
         crate::http::serve_until(listener, should_stop, move |req| match now_duration() {
@@ -1663,6 +1681,7 @@ where
             Err(e) => json_error(500, e),
         });
 
+    drop(_publish_tool_guard);
     drop(timer_guard);
 
     match serve_result {

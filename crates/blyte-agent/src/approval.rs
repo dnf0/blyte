@@ -1,5 +1,18 @@
 use std::sync::Arc;
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublishDetails {
+    pub request: String,
+    pub remote_url: String,
+    pub branch: String,
+    pub base: String,
+    pub commit: String,
+    pub commits: Vec<String>,
+    pub title: String,
+    pub body: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Approval {
     Approved,
@@ -9,6 +22,10 @@ pub enum Approval {
 
 pub trait Approver: Send + Sync {
     fn ask(&self, command: &str, reason: &str) -> Approval;
+
+    fn ask_publish(&self, _details: &PublishDetails) -> Approval {
+        Approval::Unavailable
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -16,6 +33,10 @@ pub struct NoApprover;
 
 impl Approver for NoApprover {
     fn ask(&self, _command: &str, _reason: &str) -> Approval {
+        Approval::Unavailable
+    }
+
+    fn ask_publish(&self, _details: &PublishDetails) -> Approval {
         Approval::Unavailable
     }
 }

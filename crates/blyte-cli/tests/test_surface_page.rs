@@ -2173,3 +2173,58 @@ assert.ok(!missingHtml.includes("started by surface"), missingHtml);
 "#;
     run_surface_script(harness);
 }
+
+#[test]
+fn publish_approval_card_renders_details_and_escapes_script_as_text() {
+    let harness = r#"
+const assert = require("assert");
+
+const html = renderEntry({
+  seq: 42,
+  ts: "2026-01-01T00:00:00Z",
+  kind: "approval_requested",
+  id: "approval-pub-1",
+  command: "publish req-42",
+  reason: "Ship <script>alert(1)</script>",
+  publish: {
+    request: "req-42",
+    remote_url: "https://github.com/example/repo.git",
+    branch: "blyte/req-42",
+    base: "main",
+    commit: "abcdef1234567890abcdef1234567890abcdef12",
+    commits: ["First <b>commit</b>", "Second commit"],
+    title: "Ship <script>alert(1)</script>",
+    body: "Body with <script>alert('xss')</script> and\nmultiple lines"
+  }
+});
+
+assert.ok(html.includes("entry-approval-publish"), html);
+assert.ok(html.includes("Publish request req-42?"), html);
+assert.ok(!html.includes("Command outside the sandbox"), html);
+assert.ok(html.includes("https://github.com/example/repo.git"), html);
+assert.ok(html.includes("blyte/req-42"), html);
+assert.ok(html.includes("main"), html);
+assert.ok(html.includes("abcdef1"), html);
+assert.ok(!html.includes("abcdef1234567890"), html);
+assert.ok(html.includes("First &lt;b&gt;commit&lt;/b&gt;"), html);
+assert.ok(html.includes("Second commit"), html);
+assert.ok(html.includes("Ship &lt;script&gt;alert(1)&lt;/script&gt;"), html);
+assert.ok(html.includes('<pre class="approval-publish-body">Body with &lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt; and\nmultiple lines</pre>'), html);
+assert.ok(!html.includes("<script>"), html);
+assert.ok(!html.includes("<b>"), html);
+assert.ok(html.includes('data-approval-answer="yes"'), html);
+assert.ok(html.includes('data-approval-answer="no"'), html);
+
+const plainHtml = renderEntry({
+  seq: 43,
+  ts: "2026-01-01T00:00:00Z",
+  kind: "approval_requested",
+  id: "approval-cmd-1",
+  command: "npm install",
+  reason: "install deps"
+});
+assert.ok(plainHtml.includes("Command outside the sandbox"), plainHtml);
+assert.ok(!plainHtml.includes("Publish request"), plainHtml);
+"#;
+    run_surface_script(harness);
+}
