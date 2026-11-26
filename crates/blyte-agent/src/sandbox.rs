@@ -348,6 +348,220 @@ pub fn surface_message_path_for_id(surface_id: &str) -> Result<PathBuf, String> 
     Ok(dir.join(format!("{surface_id}.message")))
 }
 
+const MAX_SYMLINK_DEPTH: usize = 40;
+
+enum PathPart {
+    Prefix(std::ffi::OsString),
+    RootDir,
+    CurDir,
+    ParentDir,
+    Normal(std::ffi::OsString),
+}
+
+impl From<std::path::Component<'_>> for PathPart {
+    fn from(comp: std::path::Component<'_>) -> Self {
+        match comp {
+            std::path::Component::Prefix(p) => Self::Prefix(p.as_os_str().to_os_string()),
+            std::path::Component::RootDir => Self::RootDir,
+            std::path::Component::CurDir => Self::CurDir,
+            std::path::Component::ParentDir => Self::ParentDir,
+            std::path::Component::Normal(s) => Self::Normal(s.to_os_string()),
+        }
+    }
+}
+
+fn resolve_real_path(path: &Path) -> Result<PathBuf, String> {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("cannot determine current directory: {e}"))?
+            .join(path)
+    };
+    match abs.canonicalize() {
+        Ok(resolved) => return Ok(resolved),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) => {}
+        Err(e) => return Err(format!("cannot canonicalize {}: {e}", abs.display())),
+    }
+
+    let mut queue: std::collections::VecDeque<PathPart> =
+        abs.components().map(PathPart::from).collect();
+    let mut cur = PathBuf::new();
+    let mut missing = false;
+    let mut symlinks_followed = 0usize;
+
+    while let Some(part) = queue.pop_front() {
+        match part {
+            PathPart::Prefix(p) => cur.push(p),
+            PathPart::RootDir => cur.push(std::path::MAIN_SEPARATOR_STR),
+            PathPart::CurDir => {}
+            PathPart::ParentDir => {
+                cur.pop();
+            }
+            PathPart::Normal(name) => {
+                cur.push(&name);
+                if missing {
+                    continue;
+                }
+                match std::fs::symlink_metadata(&cur) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        symlinks_followed += 1;
+                        if symlinks_followed > MAX_SYMLINK_DEPTH {
+                            return Err(format!(
+                                "cannot canonicalize {}: too many levels of symbolic links",
+                                abs.display()
+                            ));
+                        }
+                        let target = std::fs::read_link(&cur)
+                            .map_err(|e| format!("cannot read link {}: {e}", cur.display()))?;
+                        if target.is_absolute() {
+                            cur.clear();
+                        } else {
+                            cur.pop();
+                        }
+                        for comp in target.components().rev() {
+                            queue.push_front(PathPart::from(comp));
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) =>
+                    {
+                        cur.pop();
+                        if !cur.as_os_str().is_empty() {
+                            cur = cur.canonicalize().map_err(|ce| {
+                                format!("cannot canonicalize {}: {ce}", cur.display())
+                            })?;
+                        }
+                        cur.push(&name);
+                        missing = true;
+                    }
+                    Err(e) => {
+                        return Err(format!("cannot canonicalize {}: {e}", cur.display()));
+                    }
+                }
+            }
+        }
+    }
+
+    if !missing && !cur.as_os_str().is_empty() {
+        if let Ok(resolved) = cur.canonicalize() {
+            return Ok(resolved);
+        }
+    }
+    Ok(cur)
+}
+
+fn resolve_protected_prefix(path: &Path) -> Result<PathBuf, String> {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("cannot determine current directory: {e}"))?
+            .join(path)
+    };
+    let mut probe = abs.as_path();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        match probe.canonicalize() {
+            Ok(mut resolved) => {
+                for part in tail.into_iter().rev() {
+                    resolved.push(part);
+                }
+                return Ok(resolved);
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::NotADirectory
+                        | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                let Some(name) = probe.file_name() else {
+                    return Err(format!("cannot canonicalize {}: {e}", probe.display()));
+                };
+                tail.push(name.to_os_string());
+                let Some(parent) = probe.parent() else {
+                    return Err(format!("cannot canonicalize {}: {e}", probe.display()));
+                };
+                probe = parent;
+            }
+            Err(e) => {
+                return Err(format!("cannot canonicalize {}: {e}", probe.display()));
+            }
+        }
+    }
+}
+
+/// Returns the paths denied for reading by the sandbox profile, resolved on their existing prefix.
+pub fn protected_read_paths() -> Result<Vec<PathBuf>, String> {
+    let mut raw = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        let home_path = Path::new(&home);
+        raw.extend(read_denied(home_path));
+        let blyte_env = home_path.join(".config/blyte/env");
+        if !raw.contains(&blyte_env) {
+            raw.push(blyte_env);
+        }
+    }
+    if let Some(dir) = surface_token_dir() {
+        if !raw.contains(&dir) {
+            raw.push(dir);
+        }
+    }
+    let mut out = Vec::with_capacity(raw.len());
+    for path in raw {
+        let resolved = resolve_protected_prefix(&path)?;
+        if !out.contains(&resolved) {
+            out.push(resolved);
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn is_protected_read_with(path: &Path, protected: &[PathBuf]) -> Result<bool, String> {
+    let real = resolve_real_path(path)?;
+    let dot_env = std::ffi::OsStr::new(".env");
+    if path.file_name() == Some(dot_env) || real.file_name() == Some(dot_env) {
+        return Ok(true);
+    }
+    Ok(protected.iter().any(|p| real.starts_with(p)))
+}
+
+/// Reports whether `path` resolves to a credential path or `.env` file denied for reading.
+pub fn is_protected_read(path: &Path) -> Result<bool, String> {
+    let protected = protected_read_paths()?;
+    is_protected_read_with(path, &protected)
+}
+
+pub(crate) fn is_in_blyte_own_dir(real_target: &Path) -> Result<bool, String> {
+    let mut raw = Vec::new();
+    if let Some(dir) = state_blyte_dir() {
+        raw.push(dir);
+    }
+    if let Some(dir) = std::env::var_os("BLYTE_STATE_DIR").filter(|d| !d.is_empty()) {
+        raw.push(PathBuf::from(dir));
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        raw.push(PathBuf::from(home).join(".config").join("blyte"));
+    }
+    for dir in raw {
+        let resolved = resolve_protected_prefix(&dir)?;
+        if real_target.starts_with(&resolved) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
     if let Ok(canon) = path.canonicalize() {
         return canon;
@@ -517,6 +731,11 @@ fn git_common_dir(root: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(line))
 }
 
+/// Returns whether `root` is inside a git repository.
+pub fn is_git_repository(root: &Path) -> bool {
+    git_common_dir(root).is_some()
+}
+
 fn canonicalize_or_missing(path: &Path) -> Result<PathBuf, String> {
     match path.canonicalize() {
         Ok(p) => Ok(p),
@@ -648,10 +867,18 @@ pub struct ConversationSandbox {
 /// be removed from the default list.
 pub fn conversation_paths(root: &Path) -> Result<ConversationPaths, String> {
     let root_cmp = canonicalize_or_missing(root)?;
-    let main_cmp = main_checkout_root_checked(root)?;
-    let tasks_dir = main_cmp.join(".wt").join("tasks");
+    let common_dir = git_common_dir(root);
+    let is_repo = common_dir.is_some();
+    let main_cmp = match common_dir {
+        Some(ref dir) if dir.file_name() == Some(std::ffi::OsStr::new(".git")) => {
+            match dir.parent() {
+                Some(main_root) => canonicalize_or_missing(main_root)?,
+                None => root_cmp.clone(),
+            }
+        }
+        _ => root_cmp.clone(),
+    };
     let mut raw = vec![
-        tasks_dir,
         PathBuf::from("/private/tmp"),
         PathBuf::from("/private/var/folders"),
         PathBuf::from("/tmp"),
@@ -685,13 +912,12 @@ pub fn conversation_paths(root: &Path) -> Result<ConversationPaths, String> {
         }
     }
 
-    let mut allowed = Vec::with_capacity(raw.len() + 1);
+    let mut allowed = Vec::with_capacity(raw.len() + 2);
+    if is_repo {
+        allowed.push(main_cmp.join(".wt").join("tasks"));
+    }
     let mut removed = false;
-    for (idx, entry) in raw.into_iter().enumerate() {
-        if idx == 0 {
-            allowed.push(entry);
-            continue;
-        }
+    for entry in raw {
         let entry_cmp = canonicalize_or_missing(&entry)?;
         if root_cmp.starts_with(&entry_cmp) || main_cmp.starts_with(&entry_cmp) {
             removed = true;
@@ -701,10 +927,41 @@ pub fn conversation_paths(root: &Path) -> Result<ConversationPaths, String> {
     }
 
     let (tmpdir, created_tmpdir) = if removed {
-        let private_tmp = root_cmp
-            .join(".wt")
-            .join("tmp")
-            .join(std::process::id().to_string());
+        let private_tmp = if is_repo {
+            root_cmp
+                .join(".wt")
+                .join("tmp")
+                .join(std::process::id().to_string())
+        } else {
+            let mut temp_grants = Vec::new();
+            if let Some(tmp) = std::env::var_os("TMPDIR") {
+                if !tmp.is_empty() {
+                    temp_grants.push(PathBuf::from(tmp));
+                }
+            }
+            temp_grants.push(PathBuf::from("/private/tmp"));
+            temp_grants.push(PathBuf::from("/tmp"));
+            temp_grants.push(PathBuf::from("/var/tmp"));
+
+            let mut chosen = None;
+            for grant in temp_grants {
+                let grant_cmp = canonicalize_or_missing(&grant)?;
+                if root_cmp.starts_with(&grant_cmp) || grant_cmp.starts_with(&root_cmp) {
+                    continue;
+                }
+                if grant_cmp.is_dir() {
+                    chosen = Some(grant_cmp);
+                    break;
+                }
+            }
+            let Some(grant) = chosen else {
+                return Err(format!(
+                    "cannot choose private temp directory for {}: no remaining writable temp directory",
+                    root.display()
+                ));
+            };
+            grant.join(format!("blyte-{}", std::process::id()))
+        };
         let created = create_private_temp_dir(&private_tmp)?;
         allowed.push(private_tmp.clone());
         (Some(private_tmp), created)

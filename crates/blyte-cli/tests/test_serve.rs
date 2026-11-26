@@ -337,6 +337,7 @@ fn session_info_shape() {
         "session_id",
         "surface_name",
         "repo",
+        "repository",
         "started_at",
         "model",
         "effort",
@@ -351,6 +352,7 @@ fn session_info_shape() {
     assert_eq!(obj.get("session_id").unwrap(), "sess-test-1");
     assert_eq!(obj.get("surface_name").unwrap(), "demo-repo");
     assert_eq!(obj.get("repo").unwrap(), "demo-repo");
+    assert_eq!(obj.get("repository").unwrap(), true);
     assert_eq!(obj.get("started_at").unwrap(), 1_700_000_000);
     assert_eq!(obj.get("model").unwrap(), "gemini-4-neon");
     assert_eq!(obj.get("effort").unwrap(), &serde_json::Value::Null);
@@ -3714,7 +3716,7 @@ fn started_surface_writes_registry_entry_with_metadata_and_idle() {
         entry.root.canonicalize().unwrap(),
         repo.canonicalize().unwrap()
     );
-    assert_eq!(entry.branch, "feat/registry-entry");
+    assert_eq!(entry.branch.as_deref(), Some("feat/registry-entry"));
     assert_eq!(entry.doing, "idle");
 
     running.stop.store(true, Ordering::Relaxed);
@@ -3893,7 +3895,7 @@ fn stale_registry_entry_does_not_block_name_and_is_removed() {
         id: stale_id.to_string(),
         name: "reg-stale-repo".to_string(),
         root: d.path().join("ghost-repo"),
-        branch: "main".to_string(),
+        branch: Some("main".to_string()),
         pid: 999_999,
         port: dead_port,
         started_at: 1_700_000_000,

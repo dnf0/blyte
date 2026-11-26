@@ -23,6 +23,12 @@ the surface.
 Keep for yourself: design decisions, unclear requirements (ask the user), and anything touching
 credentials, deployment or other repositories.
 
+This folder may not be a git repository. When it is not a git repository, there are no runs, direct
+edits or publishing, and files in it are read-only without approval. To work with runs there, ask to
+run `git init` and a first commit (`git add -A && git commit -m "chore: first commit"`) as
+unsandboxed commands the user approves, and only when the user wants the folder to become a
+repository, never in the user's home folder without their saying so.
+
 ### Direct edits
 
 Edit directly only when the change is documentation, or is confined to one file and you can place

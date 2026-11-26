@@ -15,6 +15,17 @@ use serde_json::json;
 static BLYTE_TOOL_LOCK: Mutex<()> = Mutex::new(());
 static DISPATCHER: OnceLock<(tempfile::TempDir, PathBuf, PathBuf)> = OnceLock::new();
 
+fn git_tempdir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let status = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "git init failed");
+    dir
+}
+
 fn dispatcher() -> &'static (tempfile::TempDir, PathBuf, PathBuf) {
     DISPATCHER.get_or_init(|| {
         let dir = tempfile::tempdir().unwrap();
@@ -99,7 +110,7 @@ fn specs_offers_blyte_tool_only_when_set() {
 
 #[test]
 fn runs_allowed_command_with_args_cwd_and_parent_env() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let _g = BlyteToolGuard::acquire_script(
         "printf 'args=%s\\n' \"$*\"\nprintf 'cwd=%s\\n' \"$PWD\"\nprintf 'parent=%s\\n' \"$BLYTE_DISPATCH_PARENT\"\n",
     );
@@ -139,7 +150,7 @@ fn runs_allowed_command_with_args_cwd_and_parent_env() {
 
 #[test]
 fn rejects_empty_or_disallowed_commands_without_running_executable() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let scripts = tempfile::tempdir().unwrap();
     let marker = scripts.path().join("ran");
     let _g = BlyteToolGuard::acquire_script(&format!(": > '{}'\n", marker.display()));
@@ -162,7 +173,7 @@ fn rejects_empty_or_disallowed_commands_without_running_executable() {
 
 #[test]
 fn background_rules_and_async_dispatch() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let scripts = tempfile::tempdir().unwrap();
     let gate = scripts.path().join("go");
     let marker = scripts.path().join("done");
@@ -229,7 +240,7 @@ fn background_rules_and_async_dispatch() {
 
 #[test]
 fn nonzero_exit_returns_error_with_stderr_text() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let _g = BlyteToolGuard::acquire_script("echo 'something went wrong on stderr' >&2\nexit 3\n");
 
     let out = execute(
@@ -254,7 +265,7 @@ fn nonzero_exit_returns_error_with_stderr_text() {
 
 #[test]
 fn wait_exit_2_is_still_waiting_not_error() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let _g = BlyteToolGuard::acquire_script("echo 'still running: IS1' >&2\nexit 2\n");
 
     let out = execute(
@@ -275,7 +286,7 @@ fn wait_exit_2_is_still_waiting_not_error() {
 
 #[test]
 fn wait_exit_1_and_non_wait_exit_2_remain_errors() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let _g = BlyteToolGuard::acquire_script(
         "if [ \"$1\" = \"wait\" ]; then echo 'no dispatch IS1 here' >&2; exit 1; fi\nexit 2\n",
     );
@@ -311,7 +322,7 @@ impl Drop for RequestReset {
 
 #[test]
 fn dispatch_injects_current_request_and_rejects_model_supplied_request() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let bg_log = root.path().join("bg.args");
     let bg_tmp = root.path().join("bg.args.tmp");
     let refused_marker = root.path().join("refused.ran");
@@ -442,7 +453,7 @@ fn dispatch_injects_current_request_and_rejects_model_supplied_request() {
 
 #[test]
 fn edit_start_and_edit_finish_are_accepted_and_request_injected_on_finish() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
     let _reset = RequestReset;
 
@@ -526,7 +537,7 @@ fn blyte_command_timeout_gives_edit_finish_3600s_and_others_300s() {
 
 #[test]
 fn blyte_tool_passes_edit_finish_message_with_spaces_and_quotes_intact() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
     let _reset = RequestReset;
 
@@ -568,7 +579,7 @@ fn blyte_tool_passes_edit_finish_message_with_spaces_and_quotes_intact() {
 
 #[test]
 fn the_tool_refuses_verdict_accepted_fixed_combine_and_model_review() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let marker = root.path().join("invoked");
     let _g = BlyteToolGuard::acquire_script(&format!(
         "touch '{}'\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
@@ -631,7 +642,7 @@ fn the_tool_refuses_verdict_accepted_fixed_combine_and_model_review() {
 
 #[test]
 fn the_tool_child_does_not_carry_the_marker() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let env_file = root.path().join("child.env");
     let _g = BlyteToolGuard::acquire_script(&format!(
         "env > '{}'\nprintf 'marker=%s\\n' \"${{BLYTE_MODEL_SHELL:-UNSET}}\"\n",
@@ -670,7 +681,7 @@ fn the_tool_child_does_not_carry_the_marker() {
 
 #[test]
 fn background_dispatch_early_nonzero_exit_reports_error_and_keeps_output() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let _g = BlyteToolGuard::acquire_script("printf 'no API key\\n' >&2\nexit 3\n");
 
     let start = Instant::now();
@@ -707,7 +718,7 @@ fn background_dispatch_early_nonzero_exit_reports_error_and_keeps_output() {
 
 #[test]
 fn background_dispatch_still_running_after_startup_wait_reports_started_and_output_path() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let _g = BlyteToolGuard::acquire_script("exec sleep 5\n");
 
     let start = Instant::now();
@@ -742,7 +753,7 @@ fn background_dispatch_still_running_after_startup_wait_reports_started_and_outp
 
 #[test]
 fn background_dispatch_immediate_zero_exit_reports_finished_with_output() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let _g = BlyteToolGuard::acquire_script("printf 'ok\\n'\nexit 0\n");
 
     let out = execute(
@@ -768,7 +779,7 @@ fn background_dispatch_immediate_zero_exit_reports_finished_with_output() {
 
 #[test]
 fn background_dispatch_fails_when_wt_is_a_regular_file() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let wt_path = root.path().join(".wt");
     std::fs::write(&wt_path, "not a directory").unwrap();
     let marker = root.path().join("ran");
@@ -794,7 +805,7 @@ fn background_dispatch_fails_when_wt_is_a_regular_file() {
 
 #[test]
 fn background_dispatch_truncates_previous_output_and_bounds_large_early_failure() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let wt_dir = root.path().join(".wt");
     std::fs::create_dir_all(&wt_dir).unwrap();
     let out_file = wt_dir.join("BD5.dispatch.out");
@@ -836,7 +847,7 @@ fn background_dispatch_truncates_previous_output_and_bounds_large_early_failure(
 
 #[test]
 fn surface_injected_into_dispatch_args() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
     let _req_reset = RequestReset;
     set_blyte_request(None);
@@ -863,7 +874,7 @@ fn surface_injected_into_dispatch_args() {
 
 #[test]
 fn surface_injected_into_edit_finish_args() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
     let _req_reset = RequestReset;
     set_blyte_request(None);
@@ -888,7 +899,7 @@ fn surface_injected_into_edit_finish_args() {
 
 #[test]
 fn surface_inserted_before_double_dash_separator() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
     let _req_reset = RequestReset;
     set_blyte_request(None);
@@ -946,7 +957,7 @@ fn surface_inserted_before_double_dash_separator() {
 
 #[test]
 fn surface_not_added_to_other_subcommands() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
     let _req_reset = RequestReset;
     set_blyte_request(None);
@@ -974,7 +985,7 @@ fn surface_not_added_to_other_subcommands() {
 
 #[test]
 fn model_supplied_surface_flag_is_rejected_without_running() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let refused_marker = root.path().join("surface_refused.ran");
     let _g = BlyteToolGuard::acquire_script(&format!(": > '{}'\n", refused_marker.display()));
     let _req_reset = RequestReset;
@@ -1016,7 +1027,7 @@ fn model_supplied_surface_flag_is_rejected_without_running() {
 
 #[test]
 fn no_surface_added_when_blyte_surface_is_none() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
     let _req_reset = RequestReset;
     set_blyte_request(None);
@@ -1055,7 +1066,7 @@ impl Drop for StartedByReset {
 
 #[test]
 fn blyte_tool_adds_started_by_to_dispatch_and_edit_finish() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
     let _req_reset = RequestReset;
     let _started_reset = StartedByReset;
@@ -1131,7 +1142,7 @@ fn blyte_tool_adds_started_by_to_dispatch_and_edit_finish() {
 
 #[test]
 fn blyte_tool_adds_nothing_when_no_peer_started_the_turn() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
     let _req_reset = RequestReset;
     let _started_reset = StartedByReset;
@@ -1164,7 +1175,7 @@ fn blyte_tool_adds_nothing_when_no_peer_started_the_turn() {
 
 #[test]
 fn blyte_tool_refuses_a_model_supplied_started_by() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let refused_marker = root.path().join("started_by_refused.ran");
     let _g = BlyteToolGuard::acquire_script(&format!(": > '{}'\n", refused_marker.display()));
     let _req_reset = RequestReset;
@@ -1207,7 +1218,7 @@ fn blyte_tool_refuses_a_model_supplied_started_by() {
 }
 
 fn assert_dispatch_option_refused(cases: &[serde_json::Value], expected_option: &str) {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let refused_marker = root.path().join("sandbox_opt_refused.ran");
     let _g = BlyteToolGuard::acquire_script(&format!(": > '{}'\n", refused_marker.display()));
     let _req_reset = RequestReset;
@@ -1310,7 +1321,7 @@ fn blyte_tool_refuses_dispatch_no_path_check_option() {
 
 #[test]
 fn blyte_tool_accepts_model_research_and_other_allowed_dispatch_options() {
-    let root = tempfile::tempdir().unwrap();
+    let root = git_tempdir();
     let _g = BlyteToolGuard::acquire_script("for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
     let _req_reset = RequestReset;
     let _started_reset = StartedByReset;

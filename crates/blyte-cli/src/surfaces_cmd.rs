@@ -26,7 +26,7 @@ pub fn format_surfaces_table(entries: &[RegistryEntry], current_id: Option<&str>
             (
                 name,
                 repository_name(&entry.root),
-                entry.branch.as_str(),
+                entry.branch.as_deref().unwrap_or("-"),
                 entry.doing.as_str(),
             )
         })

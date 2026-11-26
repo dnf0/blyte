@@ -5,12 +5,19 @@
 //! spawns per grep cost about 110 ms locally and 345 ms in a container (harness_bench).
 
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use grep_regex::RegexMatcher;
 use grep_searcher::sinks::UTF8;
 use grep_searcher::{BinaryDetection, SearcherBuilder};
 use ignore::overrides::OverrideBuilder;
 use ignore::WalkBuilder;
+
+pub(crate) struct SearchOutput {
+    pub(crate) hits: Vec<String>,
+    pub(crate) skipped: usize,
+}
 
 /// Matching lines for `pattern` under `root.join(sub)`, at most `max`, filtered by `glob` (rg
 /// `--glob` semantics) when non-empty. `Err` for an invalid pattern or glob.
@@ -21,9 +28,20 @@ pub fn grep_lines(
     glob: &str,
     max: usize,
 ) -> Result<Vec<String>, String> {
+    Ok(grep_lines_checked(root, sub, pattern, glob, max)?.hits)
+}
+
+pub(crate) fn grep_lines_checked(
+    root: &Path,
+    sub: &str,
+    pattern: &str,
+    glob: &str,
+    max: usize,
+) -> Result<SearchOutput, String> {
     let matcher =
         RegexMatcher::new_line_matcher(pattern).map_err(|e| format!("invalid pattern: {e}"))?;
     let base = root.join(sub);
+    let protected = Arc::new(crate::sandbox::protected_read_paths()?);
     let mut searcher = SearcherBuilder::new()
         .line_number(true)
         .binary_detection(BinaryDetection::quit(b'\x00'))
@@ -31,6 +49,12 @@ pub fn grep_lines(
     let mut out = Vec::new();
 
     if base.is_file() {
+        if crate::sandbox::is_protected_read_with(&base, &protected)? {
+            return Ok(SearchOutput {
+                hits: Vec::new(),
+                skipped: 1,
+            });
+        }
         let _ = searcher.search_path(
             &matcher,
             &base,
@@ -39,17 +63,69 @@ pub fn grep_lines(
                 Ok(out.len() < max)
             }),
         );
-        return Ok(out);
+        return Ok(SearchOutput {
+            hits: out,
+            skipped: 0,
+        });
     }
 
+    let skipped = Arc::new(AtomicUsize::new(0));
+    let walk_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let protected_filter = Arc::clone(&protected);
+    let skipped_filter = Arc::clone(&skipped);
+    let err_filter = Arc::clone(&walk_err);
+
     let mut walk = WalkBuilder::new(&base);
-    if !glob.is_empty() {
+    let overrides = if !glob.is_empty() {
         let mut ob = OverrideBuilder::new(&base);
         ob.add(glob).map_err(|e| format!("invalid glob: {e}"))?;
-        walk.overrides(ob.build().map_err(|e| format!("invalid glob: {e}"))?);
-    }
-    walk.sort_by_file_path(|a, b| a.cmp(b));
+        let built = ob.build().map_err(|e| format!("invalid glob: {e}"))?;
+        walk.overrides(built.clone());
+        Some(built)
+    } else {
+        None
+    };
+    walk.hidden(false).sort_by_file_path(|a, b| a.cmp(b));
+    walk.filter_entry(move |e| {
+        if e.depth() == 0 {
+            return true;
+        }
+        if err_filter
+            .lock()
+            .unwrap_or_else(|er| er.into_inner())
+            .is_some()
+        {
+            return false;
+        }
+        match crate::sandbox::is_protected_read_with(e.path(), &protected_filter) {
+            Ok(true) => {
+                skipped_filter.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
+            Ok(false) => {}
+            Err(err) => {
+                let mut slot = err_filter.lock().unwrap_or_else(|er| er.into_inner());
+                if slot.is_none() {
+                    *slot = Some(err);
+                }
+                return false;
+            }
+        }
+        if e.file_name().as_encoded_bytes().starts_with(b".") {
+            let is_dir = e.file_type().is_some_and(|t| t.is_dir());
+            let whitelisted = overrides
+                .as_ref()
+                .is_some_and(|ov| ov.matched(e.path(), is_dir).is_whitelist());
+            if !whitelisted {
+                return false;
+            }
+        }
+        true
+    });
     for entry in walk.build() {
+        if let Some(err) = walk_err.lock().unwrap_or_else(|er| er.into_inner()).clone() {
+            return Err(err);
+        }
         let Ok(entry) = entry else { continue };
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
@@ -75,7 +151,13 @@ pub fn grep_lines(
             break;
         }
     }
-    Ok(out)
+    if let Some(err) = walk_err.lock().unwrap_or_else(|er| er.into_inner()).take() {
+        return Err(err);
+    }
+    Ok(SearchOutput {
+        hits: out,
+        skipped: skipped.load(Ordering::Relaxed),
+    })
 }
 
 /// The glob matcher shared by local and container globs. `None` for patterns not handled here
@@ -108,15 +190,53 @@ fn is_meta(s: &str) -> bool {
 /// `None` for patterns not handled here. A bash `**` walked `target/` and `node_modules`: 273 ms
 /// for `**/*.rs` at a Rust repository's root, and results full of build artefacts.
 pub fn glob_paths(root: &Path, pattern: &str, max: usize) -> Option<Vec<String>> {
-    let matcher = glob_matcher(pattern)?;
+    glob_paths_checked(root, pattern, max)
+        .ok()
+        .flatten()
+        .map(|res| res.hits)
+}
+
+pub(crate) fn glob_paths_checked(
+    root: &Path,
+    pattern: &str,
+    max: usize,
+) -> Result<Option<SearchOutput>, String> {
+    let Some(matcher) = glob_matcher(pattern) else {
+        return Ok(None);
+    };
+    let protected = Arc::new(crate::sandbox::protected_read_paths()?);
     if !is_meta(pattern) {
-        return Some(if root.join(pattern).exists() {
-            vec![pattern.to_string()]
-        } else {
-            Vec::new()
-        });
+        let candidate = root.join(pattern);
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(_) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(Some(SearchOutput {
+                    hits: Vec::new(),
+                    skipped: 0,
+                }));
+            }
+            Err(e) => return Err(format!("cannot stat {}: {e}", candidate.display())),
+        }
+        if crate::sandbox::is_protected_read_with(&candidate, &protected)? {
+            return Ok(Some(SearchOutput {
+                hits: Vec::new(),
+                skipped: 1,
+            }));
+        }
+        return Ok(Some(SearchOutput {
+            hits: if candidate.exists() {
+                vec![pattern.to_string()]
+            } else {
+                Vec::new()
+            },
+            skipped: 0,
+        }));
     }
-    // Walk from the pattern's literal leading directories, only as deep as it can reach.
     let comps: Vec<&str> = pattern.split('/').collect();
     let lit = comps[..comps.len() - 1]
         .iter()
@@ -125,30 +245,99 @@ pub fn glob_paths(root: &Path, pattern: &str, max: usize) -> Option<Vec<String>>
     let base = comps[..lit]
         .iter()
         .fold(root.to_path_buf(), |p, c| p.join(c));
-    if !base.is_dir() {
-        return Some(Vec::new());
+    match std::fs::symlink_metadata(&base) {
+        Ok(_) => {}
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(Some(SearchOutput {
+                hits: Vec::new(),
+                skipped: 0,
+            }));
+        }
+        Err(e) => return Err(format!("cannot stat {}: {e}", base.display())),
     }
+    if lit > 0 && crate::sandbox::is_protected_read_with(&base, &protected)? {
+        return Ok(Some(SearchOutput {
+            hits: Vec::new(),
+            skipped: 1,
+        }));
+    }
+    if !base.is_dir() {
+        return Ok(Some(SearchOutput {
+            hits: Vec::new(),
+            skipped: 0,
+        }));
+    }
+    let skipped = Arc::new(AtomicUsize::new(0));
+    let walk_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let protected_filter = Arc::clone(&protected);
+    let skipped_filter = Arc::clone(&skipped);
+    let err_filter = Arc::clone(&walk_err);
+
     let mut walk = WalkBuilder::new(&base);
     walk.hidden(false)
         .follow_links(false)
-        .filter_entry(|e| e.file_name() != ".git");
+        .filter_entry(move |e| {
+            if e.depth() == 0 {
+                return true;
+            }
+            if e.file_name() == ".git" {
+                return false;
+            }
+            if err_filter
+                .lock()
+                .unwrap_or_else(|er| er.into_inner())
+                .is_some()
+            {
+                return false;
+            }
+            match crate::sandbox::is_protected_read_with(e.path(), &protected_filter) {
+                Ok(true) => {
+                    skipped_filter.fetch_add(1, Ordering::Relaxed);
+                    false
+                }
+                Ok(false) => true,
+                Err(err) => {
+                    let mut slot = err_filter.lock().unwrap_or_else(|er| er.into_inner());
+                    if slot.is_none() {
+                        *slot = Some(err);
+                    }
+                    false
+                }
+            }
+        });
     if !pattern.contains("**") {
         walk.max_depth(Some(comps.len() - lit));
     }
-    let mut hits: Vec<String> = walk
-        .build()
-        .filter_map(Result::ok)
-        .filter(|e| e.depth() > 0)
-        .filter_map(|e| {
-            let rel = e.path().strip_prefix(root).ok()?.to_path_buf();
-            matcher
-                .is_match(&rel)
-                .then(|| rel.to_string_lossy().into_owned())
-        })
-        .collect();
+    let mut hits: Vec<String> = Vec::new();
+    for entry in walk.build() {
+        if let Some(err) = walk_err.lock().unwrap_or_else(|er| er.into_inner()).clone() {
+            return Err(err);
+        }
+        let Ok(e) = entry else { continue };
+        if e.depth() == 0 {
+            continue;
+        }
+        let Ok(rel) = e.path().strip_prefix(root) else {
+            continue;
+        };
+        if matcher.is_match(rel) {
+            hits.push(rel.to_string_lossy().into_owned());
+        }
+    }
+    if let Some(err) = walk_err.lock().unwrap_or_else(|er| er.into_inner()).take() {
+        return Err(err);
+    }
     hits.sort();
     hits.truncate(max);
-    Some(hits)
+    Ok(Some(SearchOutput {
+        hits,
+        skipped: skipped.load(Ordering::Relaxed),
+    }))
 }
 
 /// Paths from a newline-separated file listing (e.g. `git ls-files`) matching a glob, with the

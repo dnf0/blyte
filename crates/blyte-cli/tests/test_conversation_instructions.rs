@@ -9,7 +9,9 @@ use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{Budget, Runner, CONVERSATION_FIXED};
 use blyte_agent::shell::LocalShell;
 use blyte_agent::state::State;
-use blyte_cli::conversation_text::{build, DEFAULT_PROCESS, REFERENCE, REFERENCE_DISPATCH_TOOL};
+use blyte_cli::conversation_text::{
+    build, build_with_sandbox, DEFAULT_PROCESS, REFERENCE, REFERENCE_DISPATCH_TOOL,
+};
 use blyte_cli::repl::{render_banner_to, ReplConfig, ReplSession};
 use blyte_provider::{Provider, ProviderError, Request, Response};
 
@@ -254,4 +256,40 @@ fn one_shot_prints_start_lines_and_not_implementer_rules() {
     );
     assert!(stderr.contains("blyte: repository rules: none"), "{stderr}");
     assert!(!stderr.contains("blyte: repository rules from"), "{stderr}");
+}
+
+#[test]
+fn assembled_instructions_explain_working_without_a_git_repository() {
+    let root = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let _guard = XdgGuard::set(xdg.path());
+
+    let built = build(false, Answers::Person, root.path()).unwrap();
+    assert!(
+        built.instructions.contains("git init"),
+        "{}",
+        built.instructions
+    );
+    assert!(
+        built.instructions.contains("not a git repository"),
+        "{}",
+        built.instructions
+    );
+
+    let built_off = build_with_sandbox(false, Answers::Person, root.path(), false, 0).unwrap();
+    assert!(
+        built_off.instructions.contains("git init"),
+        "{}",
+        built_off.instructions
+    );
+    assert!(
+        built_off.instructions.contains("not a git repository"),
+        "{}",
+        built_off.instructions
+    );
+    assert!(
+        !built_off.instructions.contains("unsandboxed"),
+        "{}",
+        built_off.instructions
+    );
 }

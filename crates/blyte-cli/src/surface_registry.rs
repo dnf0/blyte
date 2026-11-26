@@ -14,20 +14,22 @@ pub struct RegistryEntry {
     pub id: String,
     pub name: String,
     pub root: PathBuf,
-    pub branch: String,
+    pub branch: Option<String>,
     pub pid: u32,
     pub port: u16,
     pub started_at: u64,
     pub doing: String,
 }
 
+pub fn state_dir() -> Result<PathBuf, String> {
+    crate::registry::state_dir().ok_or_else(|| {
+        "cannot find the blyte state directory: set BLYTE_STATE_DIR, XDG_STATE_HOME or HOME"
+            .to_string()
+    })
+}
+
 pub fn registry_dir() -> Result<PathBuf, String> {
-    crate::registry::state_dir()
-        .map(|dir| dir.join("surfaces"))
-        .ok_or_else(|| {
-            "cannot find the blyte state directory: set BLYTE_STATE_DIR, XDG_STATE_HOME or HOME"
-                .to_string()
-        })
+    state_dir().map(|dir| dir.join("surfaces"))
 }
 
 pub fn entry_path(dir: &Path, id: &str) -> PathBuf {

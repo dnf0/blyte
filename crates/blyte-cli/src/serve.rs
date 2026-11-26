@@ -161,12 +161,17 @@ fn health_response(surface: &Surface) -> Response {
 
 fn session_response(surface: &Surface) -> Response {
     let info = surface.session.info();
+    let repository = match is_repository(&surface.root) {
+        Ok(v) => v,
+        Err(e) => return json_error(500, e),
+    };
     Response::json(
         200,
         &serde_json::json!({
             "session_id": surface.session_id,
             "surface_name": surface.surface_name,
             "repo": surface.repo,
+            "repository": repository,
             "started_at": surface.started_at,
             "model": info.model,
             "effort": info.effort,
@@ -472,6 +477,18 @@ pub fn reconcile_runs(
         .reconcile_lock
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    if !is_repository(&surface.root)? {
+        return Ok((
+            crate::live_runs::LiveRuns {
+                generated_at: now,
+                repo: surface.repo.clone(),
+                running: Vec::new(),
+                runs: Vec::new(),
+                skipped: Vec::new(),
+            },
+            Vec::new(),
+        ));
+    }
     let owned = crate::requests::owned_run_ids(surface)?;
     let mut live = crate::live_runs::collect(&surface.root, now, surface.days)?;
     let mut any_written = false;
@@ -562,7 +579,20 @@ fn handle_runs_changed(surface: &Surface) -> Response {
     Response::json(202, &serde_json::json!({}))
 }
 
+const NOT_A_GIT_REPO_ERROR: &str = "this folder is not a git repository";
+
+fn require_repository(root: &Path) -> Result<(), Response> {
+    match is_repository(root) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(json_error(409, NOT_A_GIT_REPO_ERROR)),
+        Err(e) => Err(json_error(500, e)),
+    }
+}
+
 fn handle_run_diff(surface: &Surface, id: &str) -> Response {
+    if let Err(resp) = require_repository(&surface.root) {
+        return resp;
+    }
     if !is_valid_run_id(id) {
         return json_error(404, format!("unknown run: {id}"));
     }
@@ -618,6 +648,9 @@ fn parse_action(raw: &str) -> Result<Action, String> {
 }
 
 fn handle_run_decision(surface: &Surface, id: &str, req: &Request, now: u64) -> Response {
+    if let Err(resp) = require_repository(&surface.root) {
+        return resp;
+    }
     let obj = match parse_json_object(&req.body) {
         Ok(o) => o,
         Err(resp) => return resp,
@@ -702,6 +735,11 @@ fn handle_map(surface: &Surface) -> Response {
 }
 
 fn handle_requests(surface: &Surface) -> Response {
+    match is_repository(&surface.root) {
+        Ok(true) => {}
+        Ok(false) => return Response::json(200, &serde_json::json!([])),
+        Err(e) => return json_error(500, e),
+    }
     match crate::requests::list_requests(surface) {
         Ok(list) => match serde_json::to_value(&list) {
             Ok(val) => Response::json(200, &val),
@@ -721,6 +759,9 @@ fn request_action_error_response(err: RequestActionError) -> Response {
 }
 
 fn handle_request_push(surface: &Surface, id: &str) -> Response {
+    if let Err(resp) = require_repository(&surface.root) {
+        return resp;
+    }
     match crate::requests::push_request(surface, id) {
         Ok(()) => Response::json(200, &serde_json::json!({ "pushed": true })),
         Err(err) => request_action_error_response(err),
@@ -728,6 +769,9 @@ fn handle_request_push(surface: &Surface, id: &str) -> Response {
 }
 
 fn handle_request_pull_request(surface: &Surface, id: &str, req: &Request) -> Response {
+    if let Err(resp) = require_repository(&surface.root) {
+        return resp;
+    }
     if let Err(e) = crate::dispatch::validate_request_id(id) {
         return json_error(400, e);
     }
@@ -918,20 +962,117 @@ pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
     }
 }
 
-fn find_git_toplevel(dir: &Path) -> Result<PathBuf, String> {
+enum GitToplevel {
+    Repository(PathBuf),
+    NotARepository,
+}
+
+fn find_git_toplevel(dir: &Path) -> Result<GitToplevel, String> {
     let out = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
+        .env("LC_ALL", "C")
         .current_dir(dir)
         .output()
         .map_err(|e| format!("failed to run git rev-parse --show-toplevel: {e}"))?;
     if !out.status.success() {
-        return Err(format!("not inside a git repository ({})", dir.display()));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr.contains("not a git repository (or any") {
+            return Ok(GitToplevel::NotARepository);
+        }
+        let detail = stderr.trim();
+        if detail.is_empty() {
+            return Err(format!("not inside a git repository ({})", dir.display()));
+        }
+        return Err(format!(
+            "not inside a git repository ({}): {detail}",
+            dir.display()
+        ));
     }
     let path_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if path_str.is_empty() {
         return Err(format!("not inside a git repository ({})", dir.display()));
     }
-    Ok(PathBuf::from(path_str))
+    Ok(GitToplevel::Repository(PathBuf::from(path_str)))
+}
+
+pub(crate) fn is_repository(root: &Path) -> Result<bool, String> {
+    match find_git_toplevel(root)? {
+        GitToplevel::Repository(_) => Ok(true),
+        GitToplevel::NotARepository => Ok(false),
+    }
+}
+
+fn resolve_denied_path(denied: &Path) -> Result<PathBuf, String> {
+    let mut probe = denied;
+    let mut tail = Vec::new();
+    loop {
+        match probe.canonicalize() {
+            Ok(mut resolved) => {
+                for part in tail.into_iter().rev() {
+                    resolved.push(part);
+                }
+                return Ok(resolved);
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                let Some(name) = probe.file_name() else {
+                    return Err(format!("cannot canonicalize {}: {e}", denied.display()));
+                };
+                let Some(parent) = probe.parent() else {
+                    return Err(format!("cannot canonicalize {}: {e}", denied.display()));
+                };
+                tail.push(name.to_os_string());
+                probe = parent;
+            }
+            Err(e) => {
+                return Err(format!("cannot canonicalize {}: {e}", denied.display()));
+            }
+        }
+    }
+}
+
+pub fn check_linux_non_repo_root(root: &Path, home: &Path) -> Result<(), String> {
+    let root_canon = root
+        .canonicalize()
+        .map_err(|e| format!("cannot canonicalize {}: {e}", root.display()))?;
+    let home_canon = home
+        .canonicalize()
+        .map_err(|e| format!("cannot canonicalize home directory {}: {e}", home.display()))?;
+    for denied in blyte_agent::sandbox::read_denied(&home_canon) {
+        let denied_canon = resolve_denied_path(&denied)?;
+        if denied.starts_with(&root_canon) || denied_canon.starts_with(&root_canon) {
+            return Err(format!(
+                "on Linux a surface cannot start in {}: it contains {}, which the sandbox could not keep unreadable; start it in a subfolder",
+                root_canon.display(),
+                denied.display()
+            ));
+        }
+    }
+    if home_canon.starts_with(&root_canon) {
+        return Err(format!(
+            "on Linux a surface cannot start in {}: it contains {}, which the sandbox could not keep unreadable; start it in a subfolder",
+            root_canon.display(),
+            home_canon.display()
+        ));
+    }
+    Ok(())
+}
+
+pub fn check_linux_non_repo_root_for_env(
+    root: &Path,
+    home: Option<&std::ffi::OsStr>,
+) -> Result<(), String> {
+    let home = home.filter(|h| !h.is_empty()).ok_or_else(|| {
+        format!(
+            "cannot check whether {} contains protected paths on Linux: HOME is not set",
+            root.display()
+        )
+    })?;
+    check_linux_non_repo_root(root, Path::new(home))
 }
 
 fn resolve_main_checkout(worktree_root: &Path) -> Result<PathBuf, String> {
@@ -981,7 +1122,11 @@ fn resolve_main_checkout(worktree_root: &Path) -> Result<PathBuf, String> {
     })
 }
 
-fn current_branch(main_checkout: &Path) -> Result<String, String> {
+fn current_branch(main_checkout: &Path) -> Result<Option<String>, String> {
+    match find_git_toplevel(main_checkout)? {
+        GitToplevel::NotARepository => return Ok(None),
+        GitToplevel::Repository(_) => {}
+    }
     if let Ok(out) = Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(main_checkout)
@@ -990,7 +1135,7 @@ fn current_branch(main_checkout: &Path) -> Result<String, String> {
         if out.status.success() {
             let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !branch.is_empty() {
-                return Ok(branch);
+                return Ok(Some(branch));
             }
         }
     }
@@ -1002,7 +1147,7 @@ fn current_branch(main_checkout: &Path) -> Result<String, String> {
         if out.status.success() {
             let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !branch.is_empty() {
-                return Ok(branch);
+                return Ok(Some(branch));
             }
         }
     }
@@ -1328,33 +1473,49 @@ fn run_inner<S>(
 where
     S: Fn() -> bool,
 {
-    let worktree_root = match find_git_toplevel(&config.repo_root) {
-        Ok(r) => r,
+    let (main_checkout, is_repo) = match find_git_toplevel(&config.repo_root) {
+        Ok(GitToplevel::Repository(worktree_root)) => {
+            let main = match resolve_main_checkout(&worktree_root) {
+                Ok(m) => m,
+                Err(e) => {
+                    let _ = writeln!(err, "blyte: {e}");
+                    return 1;
+                }
+            };
+            let same_checkout = match (worktree_root.canonicalize(), main.canonicalize()) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => worktree_root == main,
+            };
+            if !same_checkout {
+                let _ = writeln!(
+                    err,
+                    "blyte: started in a linked worktree ({}); this surface works in the main checkout {}",
+                    worktree_root.display(),
+                    main.display()
+                );
+                let _ = err.flush();
+            }
+            (main, true)
+        }
+        Ok(GitToplevel::NotARepository) => {
+            let canonical = match config.repo_root.canonicalize() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = writeln!(
+                        err,
+                        "blyte: cannot canonicalize {}: {e}",
+                        config.repo_root.display()
+                    );
+                    return 1;
+                }
+            };
+            (canonical, false)
+        }
         Err(e) => {
             let _ = writeln!(err, "blyte: {e}");
             return 1;
         }
     };
-    let main_checkout = match resolve_main_checkout(&worktree_root) {
-        Ok(m) => m,
-        Err(e) => {
-            let _ = writeln!(err, "blyte: {e}");
-            return 1;
-        }
-    };
-    let same_checkout = match (worktree_root.canonicalize(), main_checkout.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => worktree_root == main_checkout,
-    };
-    if !same_checkout {
-        let _ = writeln!(
-            err,
-            "blyte: started in a linked worktree ({}); this surface works in the main checkout {}",
-            worktree_root.display(),
-            main_checkout.display()
-        );
-        let _ = err.flush();
-    }
 
     let repo = match repo_name_for(&main_checkout) {
         Ok(r) => r,
@@ -1364,28 +1525,40 @@ where
         }
     };
 
-    let registry_dir = match crate::surface_registry::registry_dir() {
+    #[cfg(target_os = "linux")]
+    if !is_repo {
+        if let Err(e) =
+            check_linux_non_repo_root_for_env(&main_checkout, std::env::var_os("HOME").as_deref())
+        {
+            let _ = writeln!(err, "blyte: {e}");
+            return 1;
+        }
+    }
+
+    let state_dir = match crate::surface_registry::state_dir() {
         Ok(d) => d,
         Err(e) => {
             let _ = writeln!(err, "blyte: {e}");
             return 1;
         }
     };
+    let registry_dir = state_dir.join("surfaces");
 
-    let all_records = match crate::surface_dir::list_records(&main_checkout) {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = writeln!(err, "blyte: {e}");
-            return 1;
-        }
-    };
+    let all_records =
+        match crate::surface_dir::list_records_for_root(&main_checkout, Some(&state_dir)) {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = writeln!(err, "blyte: {e}");
+                return 1;
+            }
+        };
     let mut running = Vec::new();
     let mut stopped = Vec::new();
-    for rec in all_records {
-        if crate::surface_dir::is_running(&rec) {
-            running.push(rec);
+    for located in all_records {
+        if crate::surface_dir::is_running(&located.record) {
+            running.push(located);
         } else {
-            stopped.push(rec);
+            stopped.push(located);
         }
     }
 
@@ -1396,28 +1569,28 @@ where
             return 1;
         }
     };
-    let mut running_names: Vec<String> = running.iter().map(|r| r.name.clone()).collect();
+    let mut running_names: Vec<String> = running.iter().map(|r| r.record.name.clone()).collect();
     for entry in &live_registry {
         if !running_names.iter().any(|n| n == &entry.name) {
             running_names.push(entry.name.clone());
         }
     }
 
-    let (surface_id, surface_name) = if let Some(ref target) = args.resume {
-        if let Some(rec) = running
+    let (surface_id, surface_name, surface_record_dir) = if let Some(ref target) = args.resume {
+        if let Some(located) = running
             .iter()
-            .find(|r| r.id == *target || r.name == *target)
+            .find(|r| r.record.id == *target || r.record.name == *target)
         {
             let _ = writeln!(
                 err,
                 "blyte: surface {target} is already running (port {})",
-                rec.port
+                located.record.port
             );
             return 1;
         }
-        let stopped_matches: Vec<&SurfaceRecord> = stopped
+        let stopped_matches: Vec<&crate::surface_dir::LocatedRecord> = stopped
             .iter()
-            .filter(|r| r.id == *target || r.name == *target)
+            .filter(|r| r.record.id == *target || r.record.name == *target)
             .collect();
         if stopped_matches.is_empty() {
             let _ = writeln!(
@@ -1428,7 +1601,10 @@ where
             return 1;
         }
         if stopped_matches.len() > 1 {
-            let ids: Vec<&str> = stopped_matches.iter().map(|r| r.id.as_str()).collect();
+            let ids: Vec<&str> = stopped_matches
+                .iter()
+                .map(|r| r.record.id.as_str())
+                .collect();
             let _ = writeln!(
                 err,
                 "blyte: more than one stopped surface is named {target}; resume by id: {}",
@@ -1436,16 +1612,20 @@ where
             );
             return 1;
         }
-        let rec = stopped_matches[0];
-        if running_names.iter().any(|n| n == &rec.name) {
+        let located = stopped_matches[0];
+        if running_names.iter().any(|n| n == &located.record.name) {
             let _ = writeln!(
                 err,
                 "blyte: a running surface is already named {}; stop it or resume by another name",
-                rec.name
+                located.record.name
             );
             return 1;
         }
-        (rec.id.clone(), rec.name.clone())
+        (
+            located.record.id.clone(),
+            located.record.name.clone(),
+            located.dir.clone(),
+        )
     } else {
         let id = match crate::surface_dir::new_surface_id() {
             Ok(id) => id,
@@ -1462,7 +1642,19 @@ where
                 return 1;
             }
         };
-        (id, name)
+        let record_dir = if is_repo {
+            crate::surface_dir::surface_dir(&main_checkout, &id)
+        } else {
+            let store = match crate::surface_dir::folder_store(&state_dir, &main_checkout) {
+                Ok(store) => store,
+                Err(e) => {
+                    let _ = writeln!(err, "blyte: {e}");
+                    return 1;
+                }
+            };
+            store.join("surfaces").join(&id)
+        };
+        (id, name, record_dir)
     };
 
     let branch = match current_branch(&main_checkout) {
@@ -1571,7 +1763,7 @@ where
         session_id: session_id.clone(),
         started_at,
     };
-    if let Err(e) = crate::surface_dir::write_record(&main_checkout, &record) {
+    if let Err(e) = crate::surface_dir::write_record_in(&surface_record_dir, &record) {
         let _ = writeln!(err, "blyte: {e}");
         return 1;
     }
@@ -1599,7 +1791,7 @@ where
         surface_name: surface_name.clone(),
         repository: repo.clone(),
     })));
-    let entries_log_path = crate::surface_dir::entries_path(&main_checkout, &surface_id);
+    let entries_log_path = surface_record_dir.join("entries.jsonl");
     blyte_agent::tools::set_blyte_surface(Some(surface_id.clone()));
     let model = resolve_initial_model(&config);
     let mut _private_tmp_guard: Option<PrivateTmpDirGuard> = None;
@@ -1639,7 +1831,15 @@ where
         };
         // The whole entry is written, not only the changed field: another process removes an
         // entry whose surface did not answer its health check in time, and this puts it back.
+        let branch = match current_branch(&hook_entry.root) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("blyte: {e}");
+                return;
+            }
+        };
         let entry = crate::surface_registry::RegistryEntry {
+            branch,
             doing,
             ..hook_entry.clone()
         };
@@ -1647,6 +1847,15 @@ where
             eprintln!("blyte: {e}");
         }
     }));
+
+    if !is_repo {
+        let _ = writeln!(
+            err,
+            "blyte: {} is not a git repository: runs, combining and publishing are off until it is one",
+            main_checkout.display()
+        );
+        let _ = err.flush();
+    }
 
     let url = format!("http://127.0.0.1:{actual_port}/#token={token}");
     let _ = writeln!(out, "blyte: surface {surface_name} at {url}");
