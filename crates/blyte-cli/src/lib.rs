@@ -16,6 +16,7 @@ pub mod fallback_check;
 pub mod fix_round;
 pub mod gate_drift;
 pub mod http;
+pub mod in_place_review;
 pub mod init;
 pub mod instructions_cmd;
 pub mod keep_awake;

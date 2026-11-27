@@ -78,6 +78,14 @@ pub enum Command {
     /// Print the instructions the conversation model is given
     #[command(hide = true)]
     Instructions(InstructionsArgs),
+    /// Restore a folder to its state before an in-place run
+    Undo(UndoArgs),
+}
+
+#[derive(clap::Args, Debug, PartialEq, Clone)]
+pub struct UndoArgs {
+    /// Run id to undo
+    pub id: String,
 }
 
 #[derive(clap::Args, Debug, PartialEq, Clone)]

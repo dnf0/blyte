@@ -2602,6 +2602,18 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
 }
 
 pub fn run_review(args: &ReviewArgs) -> i32 {
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(out) = Command::new("git")
+            .current_dir(&cwd)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+        {
+            if !out.status.success() {
+                return crate::in_place_review::review(args);
+            }
+        }
+    }
+
     let root = match crate::clean::find_repo_root() {
         Ok(r) => r,
         Err(e) => {

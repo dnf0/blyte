@@ -114,6 +114,34 @@ pub fn unix_timestamp_secs(now: std::time::SystemTime) -> Result<u64, String> {
         .map_err(|e| format!("system clock is before UNIX_EPOCH: {e}"))
 }
 
+fn copy_after_files(root: &Path, after_dir: &Path, changed_files: &[String]) -> Result<(), String> {
+    match std::fs::remove_dir_all(after_dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!(
+                "cannot clear after-copies directory {}: {e}",
+                after_dir.display()
+            ));
+        }
+    }
+    for rel in changed_files {
+        let src = root.join(rel);
+        let dst = after_dir.join(rel);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "cannot create directory {} for after-copy of {rel}: {e}",
+                    parent.display()
+                )
+            })?;
+        }
+        std::fs::copy(&src, &dst)
+            .map_err(|e| format!("cannot copy {} to {}: {e}", src.display(), dst.display()))?;
+    }
+    Ok(())
+}
+
 struct FreshStartGuard {
     path: PathBuf,
     armed: bool,
@@ -184,6 +212,7 @@ pub fn run(args: &DispatchArgs) -> i32 {
     let manifest_path = store.join(format!("{}.changes.json", args.id));
     let diff_path = store.join(format!("{}.diff", args.id));
     let before_dir = store.join(format!("{}.before", args.id));
+    let after_dir = store.join(format!("{}.after", args.id));
 
     if summary_path.exists() {
         eprintln!(
@@ -411,12 +440,15 @@ pub fn run(args: &DispatchArgs) -> i32 {
         );
 
     let (changed_files, outcome, error) = match snapshot_result {
-        Ok(files) => {
-            let (outcome, unexpected_err) =
-                in_place_outcome(&pass.report_outcome, has_gate, !files.is_empty());
-            let error = unexpected_err.or(pass.error);
-            (files, outcome, error)
-        }
+        Ok(files) => match copy_after_files(&root, &after_dir, &files) {
+            Ok(()) => {
+                let (outcome, unexpected_err) =
+                    in_place_outcome(&pass.report_outcome, has_gate, !files.is_empty());
+                let error = unexpected_err.or(pass.error);
+                (files, outcome, error)
+            }
+            Err(err_msg) => (files, "error", Some(err_msg)),
+        },
         Err(err_msg) => (Vec::new(), "error", Some(err_msg)),
     };
 
