@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use blyte_cli::attachments;
 use blyte_cli::session::{Entry, EntryBody, PromptRunner, QueuedAttachment, Session};
 use blyte_cli::surface_dir::{folder_store, surface_dir, write_record_in, SurfaceRecord};
-use blyte_cli::surface_registry::{write_entry, RegistryEntry};
+use blyte_cli::surface_registry::{write_entry, RegistryEntry, SurfaceState};
 use blyte_cli::surfaces_cmd::{
     format_stopped_surfaces_table, format_surfaces_table, run_stopped_surfaces, stopped_surfaces,
     StoppedSurface,
@@ -673,6 +673,7 @@ fn surfaces_without_stopped_prints_unchanged_output_for_same_state() {
         port: server.port,
         started_at: 1_700_001_000,
         doing: "working on tests".to_string(),
+        state: SurfaceState::Working,
     };
     let reg_dir = state.path().join("surfaces");
     write_entry(&reg_dir, &live_entry).unwrap();

@@ -428,7 +428,7 @@ fn a_peer_turn_marks_its_runs_started_by_the_sender() {
     };
     let session = Session::start(Box::new(runner), "test-model".to_string());
     let after_hook = Arc::clone(&after_turn);
-    session.set_activity_hook(Box::new(move |prompt| {
+    session.set_activity_hook(Box::new(move |prompt, _state| {
         if prompt.is_none() {
             after_hook
                 .lock()

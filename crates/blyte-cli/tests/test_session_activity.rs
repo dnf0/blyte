@@ -135,7 +135,7 @@ fn sending_a_message_calls_hook_with_some_then_none() {
     let calls: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
     let hook_calls = Arc::clone(&calls);
     let session_for_hook = session.clone();
-    session.set_activity_hook(Box::new(move |prompt| {
+    session.set_activity_hook(Box::new(move |prompt, _state| {
         let _ = session_for_hook.info();
         hook_calls
             .lock()
@@ -160,7 +160,7 @@ fn runner_error_still_calls_hook_with_none() {
 
     let calls: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
     let hook_calls = Arc::clone(&calls);
-    session.set_activity_hook(Box::new(move |prompt| {
+    session.set_activity_hook(Box::new(move |prompt, _state| {
         hook_calls
             .lock()
             .unwrap()
@@ -184,7 +184,7 @@ fn two_queued_messages_produce_interleaved_some_and_none_calls() {
 
     let calls: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
     let hook_calls = Arc::clone(&calls);
-    session.set_activity_hook(Box::new(move |prompt| {
+    session.set_activity_hook(Box::new(move |prompt, _state| {
         hook_calls
             .lock()
             .unwrap()
@@ -229,7 +229,7 @@ fn panicking_hook_on_first_call_does_not_stop_second_message() {
     let calls: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
     let hook_panicked = Arc::clone(&panicked_once);
     let hook_calls = Arc::clone(&calls);
-    session.set_activity_hook(Box::new(move |prompt| {
+    session.set_activity_hook(Box::new(move |prompt, _state| {
         if !hook_panicked.swap(true, Ordering::SeqCst) {
             panic!("intentional hook panic");
         }

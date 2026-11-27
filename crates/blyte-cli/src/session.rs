@@ -7,6 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::surface_registry::SurfaceState;
+
+const SEEN_GRACE_WINDOW: Duration = Duration::from_secs(2);
+
 pub const RESTART_NOTICE_TEXT: &str =
     "blyte restarted: the entries above are from before; the model does not remember them";
 pub const RESUME_REMEMBERS_NOTICE_TEXT: &str =
@@ -530,14 +534,16 @@ impl blyte_agent::approval::Approver for SurfaceApprover {
                     answer: None,
                 },
             );
+            state.surface_state = SurfaceState::Approval;
             state.push_entry(EntryBody::ApprovalRequested {
                 id: id.clone(),
                 command: command.to_string(),
                 reason: reason.to_string(),
             });
-            self.shared.log_cv.notify_all();
             id
         };
+        sync_activity_hook(&self.shared);
+        self.shared.log_cv.notify_all();
         self.wait_for_approval(&id)
     }
 
@@ -563,15 +569,17 @@ impl blyte_agent::approval::Approver for SurfaceApprover {
                     answer: None,
                 },
             );
+            state.surface_state = SurfaceState::Approval;
             state.push_entry(EntryBody::PublishApprovalRequested {
                 id: id.clone(),
                 command,
                 reason: details.title.clone(),
                 publish: details.clone(),
             });
-            self.shared.log_cv.notify_all();
             id
         };
+        sync_activity_hook(&self.shared);
+        self.shared.log_cv.notify_all();
         self.wait_for_approval(&id)
     }
 }
@@ -596,6 +604,7 @@ pub struct SessionInfo {
     pub busy: bool,
     pub queued: usize,
     pub last_seq: u64,
+    pub state: SurfaceState,
 }
 
 pub trait PromptRunner: Send + 'static {
@@ -998,6 +1007,9 @@ struct SessionState {
     approvals: HashMap<String, ApprovalRecord>,
     next_approval_id: u64,
     peer_turns_since_user: usize,
+    surface_state: SurfaceState,
+    current_doing: Option<String>,
+    last_seen: Option<Instant>,
 }
 
 impl SessionState {
@@ -1073,6 +1085,12 @@ impl SessionState {
         }
     }
 
+    fn has_pending_approval(&self) -> bool {
+        self.approvals
+            .values()
+            .any(|record| record.answer.is_none())
+    }
+
     fn deny_all_pending(&mut self) -> bool {
         let mut pending: Vec<(u64, String, String)> = self
             .approvals
@@ -1098,11 +1116,12 @@ impl SessionState {
     }
 }
 
-type ActivityHook = Arc<dyn Fn(Option<&str>) + Send + Sync>;
+type ActivityHook = Arc<dyn Fn(Option<&str>, SurfaceState) + Send + Sync>;
 
 struct Shared {
     state: Mutex<SessionState>,
     activity_hook: Mutex<Option<ActivityHook>>,
+    hook_run_lock: Mutex<()>,
     log_cv: Condvar,
     work_cv: Condvar,
     approval_cv: Condvar,
@@ -1141,8 +1160,12 @@ impl Shared {
                 approvals: HashMap::new(),
                 next_approval_id: 0,
                 peer_turns_since_user: 0,
+                surface_state: SurfaceState::Idle,
+                current_doing: None,
+                last_seen: None,
             }),
             activity_hook: Mutex::new(None),
+            hook_run_lock: Mutex::new(()),
             log_cv: Condvar::new(),
             work_cv: Condvar::new(),
             approval_cv: Condvar::new(),
@@ -1195,6 +1218,9 @@ impl Shared {
             approvals: HashMap::new(),
             next_approval_id,
             peer_turns_since_user: 0,
+            surface_state: SurfaceState::Idle,
+            current_doing: None,
+            last_seen: None,
         };
         if had_entries {
             let notice = match resume_memory {
@@ -1210,6 +1236,7 @@ impl Shared {
         Ok(Self {
             state: Mutex::new(state),
             activity_hook: Mutex::new(None),
+            hook_run_lock: Mutex::new(()),
             log_cv: Condvar::new(),
             work_cv: Condvar::new(),
             approval_cv: Condvar::new(),
@@ -1267,7 +1294,7 @@ fn lock_turn_totals(
 
 impl Session {
     #[allow(clippy::type_complexity)]
-    pub fn set_activity_hook(&self, hook: Box<dyn Fn(Option<&str>) + Send + Sync>) {
+    pub fn set_activity_hook(&self, hook: Box<dyn Fn(Option<&str>, SurfaceState) + Send + Sync>) {
         let mut slot = self
             .guard
             .shared
@@ -1413,30 +1440,77 @@ impl Session {
     }
 
     pub fn answer_approval(&self, id: &str, answer: ApprovalAnswer) -> Result<u64, AnswerError> {
-        let mut state = self.guard.shared.lock_state();
-        let command = match state.approvals.get_mut(id) {
-            None => return Err(AnswerError::NotFound),
-            Some(record) if record.answer.is_some() => return Err(AnswerError::AlreadyAnswered),
-            Some(record) => {
-                record.answer = Some(answer);
-                record.command.clone()
-            }
+        let (seq, sync_needed) = {
+            let mut state = self.guard.shared.lock_state();
+            let command = match state.approvals.get_mut(id) {
+                None => return Err(AnswerError::NotFound),
+                Some(record) if record.answer.is_some() => {
+                    return Err(AnswerError::AlreadyAnswered)
+                }
+                Some(record) => {
+                    record.answer = Some(answer);
+                    record.command.clone()
+                }
+            };
+            let seq = state.push_entry(EntryBody::ApprovalAnswered {
+                id: id.to_string(),
+                command,
+                answer: answer.as_str().to_string(),
+            });
+            let sync_needed =
+                if !state.has_pending_approval() && state.surface_state == SurfaceState::Approval {
+                    state.surface_state = SurfaceState::Working;
+                    true
+                } else {
+                    false
+                };
+            (seq, sync_needed)
         };
-        let seq = state.push_entry(EntryBody::ApprovalAnswered {
-            id: id.to_string(),
-            command,
-            answer: answer.as_str().to_string(),
-        });
+        if sync_needed {
+            sync_activity_hook(&self.guard.shared);
+        }
         self.guard.shared.approval_cv.notify_all();
         self.guard.shared.log_cv.notify_all();
         Ok(seq)
     }
 
     pub fn stop_run(&self) {
-        let mut state = self.guard.shared.lock_state();
-        if state.deny_all_pending() {
+        let (denied, sync_needed) = {
+            let mut state = self.guard.shared.lock_state();
+            let denied = state.deny_all_pending();
+            let sync_needed = if denied
+                && !state.has_pending_approval()
+                && state.surface_state == SurfaceState::Approval
+            {
+                state.surface_state = SurfaceState::Working;
+                true
+            } else {
+                false
+            };
+            (denied, sync_needed)
+        };
+        if sync_needed {
+            sync_activity_hook(&self.guard.shared);
+        }
+        if denied {
             self.guard.shared.approval_cv.notify_all();
             self.guard.shared.log_cv.notify_all();
+        }
+    }
+
+    pub fn mark_seen(&self) {
+        let changed = {
+            let mut state = self.guard.shared.lock_state();
+            state.last_seen = Some(Instant::now());
+            if state.surface_state == SurfaceState::Replied {
+                state.surface_state = SurfaceState::Idle;
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            sync_activity_hook(&self.guard.shared);
         }
     }
 
@@ -1563,6 +1637,7 @@ impl Session {
             busy: state.busy,
             queued: state.queue.len(),
             last_seq: state.last_seq,
+            state: state.surface_state,
         }
     }
 
@@ -1712,7 +1787,7 @@ impl Drop for RequestGuard {
     }
 }
 
-fn call_activity_hook(shared: &Shared, prompt: Option<&str>) {
+fn sync_activity_hook(shared: &Shared) {
     let hook = {
         let slot = shared
             .activity_hook
@@ -1721,7 +1796,17 @@ fn call_activity_hook(shared: &Shared, prompt: Option<&str>) {
         slot.clone()
     };
     if let Some(hook) = hook {
-        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| hook(prompt))) {
+        let _serial = shared
+            .hook_run_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (doing, surface_state) = {
+            let state = shared.lock_state();
+            (state.current_doing.clone(), state.surface_state)
+        };
+        if let Err(payload) =
+            catch_unwind(AssertUnwindSafe(|| hook(doing.as_deref(), surface_state)))
+        {
             let msg = panic_message(payload).replace(['\r', '\n'], " ");
             eprintln!("blyte: activity hook panicked: {msg}");
         }
@@ -1730,7 +1815,7 @@ fn call_activity_hook(shared: &Shared, prompt: Option<&str>) {
 
 fn worker_loop(mut runner: Box<dyn PromptRunner>, shared: Arc<Shared>) {
     loop {
-        let (msg, effective_model) = {
+        let (msg, effective_model, started) = {
             let mut state = shared.lock_state();
             loop {
                 if state.closed {
@@ -1738,8 +1823,9 @@ fn worker_loop(mut runner: Box<dyn PromptRunner>, shared: Arc<Shared>) {
                 }
                 if let Some(msg) = state.take_next_runnable() {
                     state.busy = true;
+                    state.surface_state = SurfaceState::Working;
                     let model = state.effective_model();
-                    break (msg, model);
+                    break (msg, model, Instant::now());
                 }
                 state = shared
                     .work_cv
@@ -1748,13 +1834,16 @@ fn worker_loop(mut runner: Box<dyn PromptRunner>, shared: Arc<Shared>) {
             }
         };
 
-        let started = Instant::now();
         let prepared = prepare_queued_message(&msg);
         let activity_prompt = match &prepared {
             Ok((prompt, _)) => prompt.as_str(),
             Err(_) => msg.prompt.as_str(),
         };
-        call_activity_hook(&shared, Some(activity_prompt));
+        {
+            let mut state = shared.lock_state();
+            state.current_doing = Some(activity_prompt.to_string());
+        }
+        sync_activity_hook(&shared);
 
         let totals = Mutex::new(TurnTotals {
             turns: 0,
@@ -1811,40 +1900,53 @@ fn worker_loop(mut runner: Box<dyn PromptRunner>, shared: Arc<Shared>) {
             Err(err) => Ok(Err(err)),
         };
 
-        call_activity_hook(&shared, None);
-
         let totals_result =
             lock_turn_totals(&totals).map(|t| (t.turns, t.cost_usd, t.first_output));
-
-        let mut state = shared.lock_state();
-        match outcome {
-            Ok(Ok(())) => {}
-            Ok(Err(message)) => {
-                state.push_entry(EntryBody::Error { message });
-            }
-            Err(payload) => {
-                let message = panic_message(payload);
-                state.push_entry(EntryBody::Error { message });
-            }
-        }
-        let (turns, cost_usd, first_output) = match totals_result {
-            Ok(values) => values,
-            Err(message) => {
-                state.push_entry(EntryBody::Error { message });
-                (0, None, None)
-            }
-        };
         let finished = Instant::now();
-        let seconds = Some(round_tenth(finished.saturating_duration_since(started)));
-        let first_output_seconds =
-            first_output.map(|at| round_tenth(at.saturating_duration_since(started)));
-        state.push_entry(EntryBody::Idle {
-            turns,
-            cost_usd,
-            seconds,
-            first_output_seconds,
-        });
-        state.busy = false;
+        {
+            let mut state = shared.lock_state();
+            let seen_recently = state.last_seen.is_some_and(|at| {
+                at >= started && finished.saturating_duration_since(at) <= SEEN_GRACE_WINDOW
+            });
+            state.surface_state = if seen_recently {
+                SurfaceState::Idle
+            } else {
+                SurfaceState::Replied
+            };
+            state.current_doing = None;
+        }
+        sync_activity_hook(&shared);
+
+        {
+            let mut state = shared.lock_state();
+            match outcome {
+                Ok(Ok(())) => {}
+                Ok(Err(message)) => {
+                    state.push_entry(EntryBody::Error { message });
+                }
+                Err(payload) => {
+                    let message = panic_message(payload);
+                    state.push_entry(EntryBody::Error { message });
+                }
+            }
+            let (turns, cost_usd, first_output) = match totals_result {
+                Ok(values) => values,
+                Err(message) => {
+                    state.push_entry(EntryBody::Error { message });
+                    (0, None, None)
+                }
+            };
+            let seconds = Some(round_tenth(finished.saturating_duration_since(started)));
+            let first_output_seconds =
+                first_output.map(|at| round_tenth(at.saturating_duration_since(started)));
+            state.push_entry(EntryBody::Idle {
+                turns,
+                cost_usd,
+                seconds,
+                first_output_seconds,
+            });
+            state.busy = false;
+        }
         shared.log_cv.notify_all();
     }
 }

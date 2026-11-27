@@ -12,7 +12,7 @@ use blyte_agent::sandbox::surface_token_path_for_id;
 use blyte_cli::http::Request;
 use blyte_cli::serve::{generate_token, route, Surface, TOKEN_HEADER};
 use blyte_cli::session::{EntryBody, PromptRunner, Session};
-use blyte_cli::surface_registry::{registry_dir, write_entry, RegistryEntry};
+use blyte_cli::surface_registry::{registry_dir, write_entry, RegistryEntry, SurfaceState};
 use blyte_cli::surfaces_cmd::{surface_url, surfaces_payload};
 
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
@@ -139,6 +139,7 @@ fn make_entry(
         port,
         started_at,
         doing: doing.to_string(),
+        state: SurfaceState::Idle,
     }
 }
 
@@ -194,7 +195,7 @@ fn surfaces_payload_lists_two_live_entries_sorted_by_name_with_urls_and_current(
     let srv_z = MockHealthServer::start("s00000000000000bb");
     let srv_a = MockHealthServer::start("s00000000000000aa");
 
-    let entry_z = make_entry(
+    let mut entry_z = make_entry(
         "s00000000000000bb",
         "zeta",
         &root_z,
@@ -203,6 +204,7 @@ fn surfaces_payload_lists_two_live_entries_sorted_by_name_with_urls_and_current(
         100,
         "fix billing retries",
     );
+    entry_z.state = SurfaceState::Working;
     let entry_a = make_entry(
         "s00000000000000aa",
         "alpha",
@@ -231,6 +233,7 @@ fn surfaces_payload_lists_two_live_entries_sorted_by_name_with_urls_and_current(
     assert_eq!(list[0]["root"], root_a.to_string_lossy().as_ref());
     assert_eq!(list[0]["branch"], "main");
     assert_eq!(list[0]["doing"], "idle");
+    assert_eq!(list[0]["state"], "idle");
     assert_eq!(list[0]["current"], false);
     assert_eq!(
         list[0]["url"],
@@ -243,6 +246,7 @@ fn surfaces_payload_lists_two_live_entries_sorted_by_name_with_urls_and_current(
     assert_eq!(list[1]["root"], root_z.to_string_lossy().as_ref());
     assert!(list[1]["branch"].is_null());
     assert_eq!(list[1]["doing"], "fix billing retries");
+    assert_eq!(list[1]["state"], "working");
     assert_eq!(list[1]["current"], true);
     assert_eq!(
         list[1]["url"],
@@ -500,4 +504,71 @@ fn api_surfaces_route_checks_token_returns_payload_and_errors_on_missing_current
         list[1]["url"],
         format!("http://127.0.0.1:{}/#token=tok-beta-secret", srv_b.port)
     );
+}
+
+#[test]
+fn surfaces_payload_carries_all_four_states() {
+    let state = tempfile::tempdir().unwrap();
+    let _guard = EnvGuard::set_state_root(state.path());
+    let reg = tempfile::tempdir().unwrap();
+    let roots = tempfile::tempdir().unwrap();
+
+    let s1 = MockHealthServer::start("s00000000000000a1");
+    let s2 = MockHealthServer::start("s00000000000000a2");
+    let s3 = MockHealthServer::start("s00000000000000a3");
+    let s4 = MockHealthServer::start("s00000000000000a4");
+
+    let mut e1 = make_entry(
+        "s00000000000000a1",
+        "a-idle",
+        &roots.path().join("r1"),
+        Some("main"),
+        s1.port,
+        100,
+        "idle",
+    );
+    e1.state = SurfaceState::Idle;
+    let mut e2 = make_entry(
+        "s00000000000000a2",
+        "b-working",
+        &roots.path().join("r2"),
+        Some("main"),
+        s2.port,
+        200,
+        "work",
+    );
+    e2.state = SurfaceState::Working;
+    let mut e3 = make_entry(
+        "s00000000000000a3",
+        "c-approval",
+        &roots.path().join("r3"),
+        Some("main"),
+        s3.port,
+        300,
+        "deploy",
+    );
+    e3.state = SurfaceState::Approval;
+    let mut e4 = make_entry(
+        "s00000000000000a4",
+        "d-replied",
+        &roots.path().join("r4"),
+        Some("main"),
+        s4.port,
+        400,
+        "idle",
+    );
+    e4.state = SurfaceState::Replied;
+
+    for e in [&e1, &e2, &e3, &e4] {
+        write_entry(reg.path(), e).unwrap();
+        write_token(&e.id, &format!("tok-{}", e.name));
+    }
+
+    let payload = surfaces_payload(reg.path(), &e1.id, &[]).unwrap();
+    let list = payload["surfaces"].as_array().unwrap();
+    assert_eq!(list.len(), 4);
+    assert_eq!(list[0]["state"], "idle");
+    assert_eq!(list[1]["state"], "working");
+    assert_eq!(list[2]["state"], "approval");
+    assert_eq!(list[3]["state"], "replied");
 }

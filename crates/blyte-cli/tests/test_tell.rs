@@ -13,7 +13,9 @@ use blyte_cli::repl::ReplConfig;
 use blyte_cli::serve::run_with_runner;
 use blyte_cli::session::{peer_prompt, EntryBody, PromptRunner};
 use blyte_cli::surface_dir::{list_records_in, surfaces_dir};
-use blyte_cli::surface_registry::{entry_path, registry_dir, write_entry, RegistryEntry};
+use blyte_cli::surface_registry::{
+    entry_path, registry_dir, write_entry, RegistryEntry, SurfaceState,
+};
 use blyte_cli::tell::{run_tell, tell, SurfacePeerTools, TellOutcome};
 
 const WAIT: Duration = Duration::from_secs(30);
@@ -278,6 +280,7 @@ fn tell_a_stale_entry_is_an_error() {
         port: dead_port,
         started_at: 1_700_000_000,
         doing: "idle".to_string(),
+        state: SurfaceState::Idle,
     };
     write_entry(&reg_dir, &entry).unwrap();
     assert!(entry_path(&reg_dir, stale_id).exists());

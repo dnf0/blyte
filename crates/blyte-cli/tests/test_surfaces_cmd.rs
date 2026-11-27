@@ -10,7 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use blyte_agent::sandbox::surface_token_path_for_id;
-use blyte_cli::surface_registry::{write_entry, RegistryEntry};
+use blyte_cli::surface_registry::{write_entry, RegistryEntry, SurfaceState};
 use blyte_cli::surfaces_cmd::{run_open, run_surfaces};
 
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
@@ -124,6 +124,7 @@ fn make_entry(
         port,
         started_at,
         doing: doing.to_string(),
+        state: SurfaceState::Idle,
     }
 }
 
@@ -144,7 +145,7 @@ fn run_surfaces_prints_aligned_table_in_started_at_order() {
     let server_a = MockHealthServer::start("s00000000000000aa");
     let server_b = MockHealthServer::start("s00000000000000bb");
 
-    let later = make_entry(
+    let mut later = make_entry(
         "s00000000000000bb",
         "payments-api",
         "/tmp/work/payments",
@@ -153,6 +154,7 @@ fn run_surfaces_prints_aligned_table_in_started_at_order() {
         200,
         "add retry backoff",
     );
+    later.state = SurfaceState::Working;
     let earlier = make_entry(
         "s00000000000000aa",
         "web",
@@ -174,11 +176,101 @@ fn run_surfaces_prints_aligned_table_in_started_at_order() {
     let stdout = String::from_utf8(out).unwrap();
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 3, "{stdout}");
-    assert_eq!(lines[0], "NAME          REPOSITORY  BRANCH         DOING");
-    assert_eq!(lines[1], "web           frontend    main           idle");
+    assert_eq!(
+        lines[0],
+        "NAME          REPOSITORY  BRANCH         STATE    DOING"
+    );
+    assert_eq!(
+        lines[1],
+        "web           frontend    main           idle     idle"
+    );
     assert_eq!(
         lines[2],
-        "payments-api  payments    feat/webhooks  add retry backoff"
+        "payments-api  payments    feat/webhooks  working  add retry backoff"
+    );
+}
+
+#[test]
+fn run_surfaces_table_prints_all_four_state_wordings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let s1 = MockHealthServer::start("s00000000000000a1");
+    let s2 = MockHealthServer::start("s00000000000000a2");
+    let s3 = MockHealthServer::start("s00000000000000a3");
+    let s4 = MockHealthServer::start("s00000000000000a4");
+
+    let mut e1 = make_entry(
+        "s00000000000000a1",
+        "one",
+        "/tmp/r1",
+        "main",
+        s1.port,
+        100,
+        "run deploy",
+    );
+    e1.state = SurfaceState::Approval;
+    let mut e2 = make_entry(
+        "s00000000000000a2",
+        "two",
+        "/tmp/r2",
+        "main",
+        s2.port,
+        200,
+        "idle",
+    );
+    e2.state = SurfaceState::Replied;
+    let mut e3 = make_entry(
+        "s00000000000000a3",
+        "three",
+        "/tmp/r3",
+        "main",
+        s3.port,
+        300,
+        "fix bug",
+    );
+    e3.state = SurfaceState::Working;
+    let mut e4 = make_entry(
+        "s00000000000000a4",
+        "four",
+        "/tmp/r4",
+        "main",
+        s4.port,
+        400,
+        "idle",
+    );
+    e4.state = SurfaceState::Idle;
+
+    for e in [&e1, &e2, &e3, &e4] {
+        write_entry(tmp.path(), e).unwrap();
+    }
+
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let code = run_surfaces(tmp.path(), false, &mut out, &mut err);
+    assert_eq!(code, 0);
+    assert!(err.is_empty());
+
+    let stdout = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 5, "{stdout}");
+    assert_eq!(
+        lines[0],
+        "NAME   REPOSITORY  BRANCH  STATE                      DOING"
+    );
+    assert_eq!(
+        lines[1],
+        "one    r1          main    waiting on you (approval)  run deploy"
+    );
+    assert_eq!(
+        lines[2],
+        "two    r2          main    waiting on you (replied)   idle"
+    );
+    assert_eq!(
+        lines[3],
+        "three  r3          main    working                    fix bug"
+    );
+    assert_eq!(
+        lines[4],
+        "four   r4          main    idle                       idle"
     );
 }
 

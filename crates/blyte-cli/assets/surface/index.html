@@ -299,6 +299,19 @@
       border-color: var(--brand-rust);
     }
 
+    .surface-switcher-dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--brand-rust);
+      flex-shrink: 0;
+    }
+
+    .surface-switcher-dot[hidden] {
+      display: none;
+    }
+
     .surface-switcher-list {
       position: absolute;
       top: calc(100% + 6px);
@@ -389,6 +402,35 @@
       background: var(--brand-rust-soft);
       border: 1px solid var(--brand-rust);
       color: var(--brand-rust);
+    }
+
+    .surface-switcher-state-badge {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+
+    .surface-switcher-state-waiting {
+      background: var(--brand-rust);
+      border: 1px solid var(--brand-rust);
+      color: #fff;
+    }
+
+    .surface-switcher-state-detail {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--brand-rust);
+    }
+
+    .surface-switcher-state-working {
+      background: var(--color-page);
+      border: 1px solid var(--color-line-dark);
+      color: var(--color-muted);
+      font-weight: 500;
     }
 
     .surface-switcher-root {
@@ -2938,7 +2980,7 @@
             <span class="brand-word">blyte</span>
           </span>
           <div id="surface-switcher-wrap" class="surface-switcher-wrap">
-            <button id="surface-switcher" class="repo-name" type="button" aria-haspopup="listbox" aria-expanded="false"></button>
+            <button id="surface-switcher" class="repo-name" type="button" aria-haspopup="listbox" aria-expanded="false"><span class="surface-switcher-label"></span><span id="surface-switcher-dot" class="surface-switcher-dot" role="img" aria-label="another surface is waiting on you" hidden></span></button>
             <div id="surface-switcher-list" class="surface-switcher-list" role="listbox" aria-label="Running surfaces" hidden></div>
           </div>
           <span id="no-repo-badge" class="no-repo-badge" hidden></span>
@@ -3031,14 +3073,19 @@
     const IN_PROGRESS_GROUP = "in progress";
     const RETRY_DELAYS_MS = [1000, 2000, 4000, 8000];
     const RUNS_POLL_MS = 5000;
+    const SURFACES_POLL_MS = 15000;
+    const VALID_SURFACE_STATES = new Set(["idle", "working", "approval", "replied"]);
 
     let sessionState = null;
     let modelsList = [];
     let sessionBusy = false;
+    let waitingReplyUnseen = false;
+    let pendingApprovalFromSession = false;
     let lastSeqSeen = 0;
     let initialEventsLoaded = false;
     let surfaceSwitcherOpen = false;
     let surfaceSwitcherReqId = 0;
+    let surfacesPollTimer = null;
 
     const seenSeqs = new Set();
     const logEntries = [];
@@ -3303,6 +3350,10 @@
       if (requestsPollTimer !== null) {
         clearInterval(requestsPollTimer);
         requestsPollTimer = null;
+      }
+      if (surfacesPollTimer !== null) {
+        clearInterval(surfacesPollTimer);
+        surfacesPollTimer = null;
       }
     }
 
@@ -3626,7 +3677,23 @@
       updateReviewTabCounter(state.undecidedArrived.length);
     }
 
-    function formatSurfaceTitle(surfaceName, busy) {
+    function isPageVisible() {
+      return typeof document !== "undefined" && document.visibilityState === "visible";
+    }
+
+    function hasPendingApproval() {
+      for (const rec of approvalsById.values()) {
+        if (rec && rec.answer === null) return true;
+      }
+      return pendingApprovalFromSession;
+    }
+
+    function isCurrentSurfaceWaiting() {
+      return hasPendingApproval() || waitingReplyUnseen;
+    }
+
+    function formatSurfaceTitle(surfaceName, busy, waiting) {
+      if (waiting) return surfaceName + ": waiting on you - blyte";
       return busy ? surfaceName + ": working - blyte" : surfaceName + " - blyte";
     }
 
@@ -3636,7 +3703,38 @@
         ? surfaceName
         : (sessionState && typeof sessionState.surface_name === "string" ? sessionState.surface_name : "");
       if (name) {
-        document.title = formatSurfaceTitle(name, sessionBusy);
+        document.title = formatSurfaceTitle(name, sessionBusy, isCurrentSurfaceWaiting());
+      }
+    }
+
+    function reportSessionSeen() {
+      if (pollingStopped || !isPageVisible() || sessionBusy || typeof fetch !== "function") {
+        return;
+      }
+      const headers = {};
+      if (surfaceToken) {
+        headers[TOKEN_HEADER] = surfaceToken;
+      }
+      Promise.resolve(fetch("/api/session/seen", { method: "POST", headers })).then((res) => {
+        if (res && res.status === 403) {
+          clearSurfaceToken();
+        }
+      }).catch(() => {});
+    }
+
+    function handleVisibilityChange() {
+      if (!isPageVisible()) {
+        return;
+      }
+      if (!sessionBusy) {
+        if (waitingReplyUnseen) {
+          waitingReplyUnseen = false;
+          updateDocumentTitle();
+        }
+        reportSessionSeen();
+      }
+      if (!pollingStopped) {
+        refreshSurfacesInBackground();
       }
     }
 
@@ -3647,6 +3745,20 @@
       const sendBtn = document.getElementById("conversation-send");
       if (sendBtn) sendBtn.textContent = sessionBusy ? "Queue" : "Send";
       updateDocumentTitle();
+    }
+
+    function isSurfaceWaiting(s) {
+      return Boolean(s && (s.state === "approval" || s.state === "replied"));
+    }
+
+    function updateSwitcherWaitingDot(surfaces) {
+      if (typeof document === "undefined") return;
+      const dotEl = document.getElementById("surface-switcher-dot");
+      if (!dotEl) return;
+      const list = Array.isArray(surfaces) ? surfaces : [];
+      const otherWaiting = list.some(s => s && !s.current && isSurfaceWaiting(s));
+      dotEl.setAttribute("aria-label", "another surface is waiting on you");
+      dotEl.hidden = !otherWaiting;
     }
 
     function validateSurfaces(data) {
@@ -3662,6 +3774,9 @@
           if (typeof s[f] !== "string") {
             return "/api/surfaces: surfaces[" + i + "] missing or invalid field " + f;
           }
+        }
+        if (typeof s.state !== "string" || !VALID_SURFACE_STATES.has(s.state)) {
+          return "/api/surfaces: surfaces[" + i + "] missing or invalid field state";
         }
         if (typeof s.current !== "boolean") {
           return "/api/surfaces: surfaces[" + i + "] missing or invalid field current";
@@ -3713,7 +3828,9 @@
     }
 
     function renderSurfaceList(container, surfaces, stopped) {
-      const list = Array.isArray(surfaces) ? surfaces : [];
+      const list = Array.isArray(surfaces)
+        ? surfaces.slice().sort((a, b) => (isSurfaceWaiting(b) ? 1 : 0) - (isSurfaceWaiting(a) ? 1 : 0))
+        : [];
       const stoppedList = Array.isArray(stopped) ? stopped : [];
       container.textContent = "";
 
@@ -3724,6 +3841,7 @@
         const nameStr = s && s.name != null ? String(s.name) : "";
         const rootStr = s && s.root != null ? String(s.root) : "";
         const doingStr = s && s.doing != null ? String(s.doing) : "";
+        const stateStr = s && typeof s.state === "string" ? s.state : "idle";
 
         let row;
         if (isCurrent) {
@@ -3775,6 +3893,23 @@
           badgeEl.className = "surface-switcher-badge";
           badgeEl.textContent = "current";
           head.appendChild(badgeEl);
+        }
+
+        if (stateStr === "approval" || stateStr === "replied") {
+          const stateBadge = document.createElement("span");
+          stateBadge.className = "surface-switcher-state-badge surface-switcher-state-waiting";
+          stateBadge.textContent = "waiting on you";
+          head.appendChild(stateBadge);
+
+          const detailEl = document.createElement("span");
+          detailEl.className = "surface-switcher-state-detail";
+          detailEl.textContent = stateStr === "approval" ? "needs your approval" : "replied";
+          head.appendChild(detailEl);
+        } else if (stateStr === "working") {
+          const stateBadge = document.createElement("span");
+          stateBadge.className = "surface-switcher-state-badge surface-switcher-state-working";
+          stateBadge.textContent = "working";
+          head.appendChild(stateBadge);
         }
 
         row.appendChild(head);
@@ -3949,7 +4084,49 @@
         list.innerHTML = renderSurfaceListError(err);
         return;
       }
+      updateSwitcherWaitingDot(data.surfaces);
       renderSurfaceList(list, data.surfaces, data.stopped);
+    }
+
+    async function refreshSurfacesInBackground() {
+      if (pollingStopped || !isPageVisible() || typeof fetch !== "function") {
+        return;
+      }
+      const headers = {};
+      if (surfaceToken) {
+        headers[TOKEN_HEADER] = surfaceToken;
+      }
+      let res;
+      try {
+        res = await fetch("/api/surfaces", { headers });
+      } catch (_) {
+        return;
+      }
+      if (pollingStopped) return;
+      if (res.status === 403) {
+        stopAllPolling();
+        clearSurfaceToken();
+        return;
+      }
+      if (!res.ok) {
+        return;
+      }
+      let data;
+      try {
+        data = await res.json();
+      } catch (_) {
+        return;
+      }
+      if (validateSurfaces(data)) {
+        return;
+      }
+      updateSwitcherWaitingDot(data.surfaces);
+      if (surfaceSwitcherOpen && typeof document !== "undefined") {
+        const list = document.getElementById("surface-switcher-list");
+        if (list) {
+          renderSurfaceList(list, data.surfaces, data.stopped);
+        }
+      }
     }
 
     function renderModelsSelect() {
@@ -3979,10 +4156,24 @@
       sessionState = data;
       if (syncBusy) {
         sessionBusy = data.busy;
+        pendingApprovalFromSession = data.state === "approval";
+        waitingReplyUnseen = data.state === "replied";
+        if (isPageVisible() && !sessionBusy) {
+          waitingReplyUnseen = false;
+        }
       }
       if (typeof document === "undefined") return;
       const switcherEl = document.getElementById("surface-switcher");
-      if (switcherEl) switcherEl.textContent = data.repo;
+      if (switcherEl) {
+        const labelEl = typeof switcherEl.querySelector === "function"
+          ? switcherEl.querySelector(".surface-switcher-label")
+          : null;
+        if (labelEl) {
+          labelEl.textContent = data.repo;
+        } else {
+          switcherEl.textContent = data.repo;
+        }
+      }
       const repoEl = document.getElementById("repo-name");
       if (repoEl) repoEl.textContent = data.repo;
       const noRepoEl = document.getElementById("no-repo-badge");
@@ -4580,6 +4771,7 @@
         errEl.textContent = "";
         errEl.hidden = true;
       }
+      updateDocumentTitle();
     }
 
     function appendConversationError(msg) {
@@ -4817,7 +5009,9 @@
       return node;
     }
 
-    function applyLogEntries(entries) {
+    function applyLogEntries(entries, options) {
+      const isReplay = Boolean(options && options.isReplay);
+      const wasBusyBeforeReplay = isReplay && sessionBusy;
       const threadEl = document.getElementById("conversation-thread");
       const activityEl = document.getElementById("activity");
       const atBottom = threadEl
@@ -4930,6 +5124,7 @@
         }
 
         if (isPlainObject(entry) && entry.kind === "approval_requested" && typeof entry.id === "string" && entry.id && typeof entry.command === "string" && typeof entry.reason === "string" && (!hasOwn(entry, "publish") || entry.publish === undefined || entry.publish === null || isValidPublishDetails(entry.publish)) && hasValidSeq && isTimestamp(entry.ts)) {
+          pendingApprovalFromSession = false;
           approvalsById.set(entry.id, {
             seq: entry.seq,
             command: entry.command,
@@ -4940,15 +5135,19 @@
           });
           insertEntryHtml(threadEl, entry.seq, renderEntry(entry));
           sawPendingApproval = true;
+          updateDocumentTitle();
           continue;
         }
 
         if (isPlainObject(entry) && entry.kind === "approval_answered" && typeof entry.id === "string" && entry.id && typeof entry.command === "string" && (entry.answer === "yes" || entry.answer === "no") && hasValidSeq && isTimestamp(entry.ts)) {
+          pendingApprovalFromSession = false;
           if (approvalsById.has(entry.id)) {
             markApprovalCardAnswered(threadEl, entry.id, entry.answer);
             insertEntryHtml(threadEl, entry.seq, renderEntry(entry, { matched: true }));
+            updateDocumentTitle();
             continue;
           }
+          updateDocumentTitle();
         }
 
         insertEntryHtml(threadEl, hasValidSeq ? entry.seq : null, renderEntry(entry));
@@ -4971,6 +5170,9 @@
             finalizeReply(threadEl, activeReply);
             activeReply = nextReply;
           }
+          if (!isReplay) {
+            waitingReplyUnseen = false;
+          }
           sessionBusy = true;
           updateWorkingState();
         } else if (
@@ -4991,12 +5193,16 @@
               finalizeReply(threadEl, activeReply);
               activeReply = nextReply;
             }
+            if (!isReplay) {
+              waitingReplyUnseen = false;
+            }
             sessionBusy = true;
             updateWorkingState();
           }
         } else if (entry.kind === "error" && typeof entry.message === "string") {
           finalizeReply(threadEl, activeReply);
         } else if (entry.kind === "idle" && typeof entry.turns === "number") {
+          pendingApprovalFromSession = false;
           finalizeReply(threadEl, activeReply);
           activeReply = queuedReplies.length > 0 ? queuedReplies.shift() : null;
           if (queuedUserSeqs.length > 0) {
@@ -5009,11 +5215,34 @@
               }
             }
             sessionBusy = true;
+            if (!isReplay) {
+              waitingReplyUnseen = false;
+            }
           } else {
             sessionBusy = false;
+            if (!isReplay) {
+              if (isPageVisible()) {
+                waitingReplyUnseen = false;
+                reportSessionSeen();
+              } else {
+                waitingReplyUnseen = true;
+              }
+            }
           }
           updateWorkingState();
         }
+      }
+      if (isReplay) {
+        pendingApprovalFromSession = false;
+        if (wasBusyBeforeReplay && !sessionBusy) {
+          if (isPageVisible()) {
+            waitingReplyUnseen = false;
+            reportSessionSeen();
+          } else {
+            waitingReplyUnseen = true;
+          }
+        }
+        updateDocumentTitle();
       }
       if (threadEl) {
         if (threadEl.children.length === 0) {
@@ -8040,6 +8269,8 @@
         });
       }
 
+      document.addEventListener("visibilitychange", handleVisibilityChange);
+
       document.addEventListener("click", (e) => {
         if (!surfaceSwitcherOpen) return;
         const wrap = document.getElementById("surface-switcher-wrap");
@@ -8442,7 +8673,7 @@
             await new Promise(resolve => setTimeout(resolve, 2000));
             continue;
           }
-          applyLogEntries(data.entries);
+          applyLogEntries(data.entries, { isReplay: !initialEventsLoaded });
           if (data.last_seq > lastSeqSeen) {
             lastSeqSeen = data.last_seq;
           }
@@ -8475,6 +8706,9 @@
         return;
       }
       applySessionState(data, true);
+      if (isPageVisible() && !sessionBusy) {
+        reportSessionSeen();
+      }
     }
 
     async function loadModels() {
@@ -8511,6 +8745,10 @@
       if (requestsPollTimer === null) {
         fetchRequests();
         requestsPollTimer = setInterval(fetchRequests, RUNS_POLL_MS);
+      }
+      if (surfacesPollTimer === null) {
+        refreshSurfacesInBackground();
+        surfacesPollTimer = setInterval(refreshSurfacesInBackground, SURFACES_POLL_MS);
       }
       pollEvents();
     }

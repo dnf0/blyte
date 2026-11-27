@@ -1269,9 +1269,12 @@ const assert = require("node:assert");
 
   const runsTimers = intervalCalls.filter(c => c.fn === fetchRuns);
   const requestsTimers = intervalCalls.filter(c => c.fn === fetchRequests);
+  const surfacesTimers = intervalCalls.filter(c => c.fn === refreshSurfacesInBackground);
   assert.strictEqual(runsTimers.length, 1);
   assert.strictEqual(requestsTimers.length, 1);
-  assert.strictEqual(intervalCalls.length, 2);
+  assert.strictEqual(surfacesTimers.length, 1);
+  assert.strictEqual(surfacesTimers[0].ms, 15000);
+  assert.strictEqual(intervalCalls.length, 3);
   assert.strictEqual(eventFetches, 1);
 
   eventResolvers.shift()({
@@ -3808,6 +3811,7 @@ const runningSurface = {
   root: "/tmp/repo",
   branch: "main",
   doing: "idle",
+  state: "idle",
   current: true,
   url: "http://127.0.0.1:4100/#token=t1",
   error: null,
@@ -3991,4 +3995,325 @@ assert.ok(
 );
 "#;
     run_surface_script(harness);
+}
+
+#[test]
+fn surface_waiting_title_badges_sort_dot_seen_and_validation() {
+    let html = load_surface_html();
+    assert!(
+        html.contains(r#"id="surface-switcher-dot""#)
+            && html.contains(r#"aria-label="another surface is waiting on you""#),
+        "expected #surface-switcher-dot with waiting aria-label"
+    );
+
+    let harness = format!(
+        "{}\n{}",
+        review_queue_test_prelude(),
+        r#"
+(async () => {
+  assert.strictEqual(formatSurfaceTitle("demo", false, false), "demo - blyte");
+  assert.strictEqual(formatSurfaceTitle("demo", true, false), "demo: working - blyte");
+  assert.strictEqual(formatSurfaceTitle("demo", true, true), "demo: waiting on you - blyte");
+  assert.strictEqual(formatSurfaceTitle("demo", false, true), "demo: waiting on you - blyte");
+
+  for (const st of ["idle", "working", "approval", "replied"]) {
+    assert.strictEqual(
+      validateSurfaces({
+        surfaces: [{
+          id: "s1",
+          name: "alpha",
+          root: "/tmp/a",
+          branch: "main",
+          doing: "idle",
+          state: st,
+          current: true,
+          url: "http://127.0.0.1:4100/#token=t1",
+          error: null,
+        }],
+        stopped: [],
+      }),
+      null
+    );
+  }
+
+  const missingStateErr = validateSurfaces({
+    surfaces: [{
+      id: "s1",
+      name: "alpha",
+      root: "/tmp/a",
+      branch: "main",
+      doing: "idle",
+      current: true,
+      url: "http://127.0.0.1:4100/#token=t1",
+      error: null,
+    }],
+    stopped: [],
+  });
+  assert.strictEqual(typeof missingStateErr, "string");
+  assert.ok(missingStateErr.includes("state"), missingStateErr);
+
+  const badStateErr = validateSurfaces({
+    surfaces: [{
+      id: "s1",
+      name: "alpha",
+      root: "/tmp/a",
+      branch: "main",
+      doing: "idle",
+      state: "x",
+      current: true,
+      url: "http://127.0.0.1:4100/#token=t1",
+      error: null,
+    }],
+    stopped: [],
+  });
+  assert.strictEqual(typeof badStateErr, "string");
+  assert.ok(badStateErr.includes("state"), badStateErr);
+
+  function makeDomEl(tag) {
+    const attrs = new Map();
+    const listeners = new Map();
+    return {
+      tagName: tag.toUpperCase(),
+      className: "",
+      type: "",
+      disabled: false,
+      dataset: {},
+      children: [],
+      _text: "",
+      get textContent() { return this._text; },
+      set textContent(v) {
+        this._text = String(v);
+        if (this._text === "") this.children = [];
+      },
+      setAttribute(k, v) { attrs.set(k, String(v)); },
+      getAttribute(k) { return attrs.has(k) ? attrs.get(k) : null; },
+      appendChild(child) { this.children.push(child); return child; },
+      addEventListener(ev, fn) {
+        if (!listeners.has(ev)) listeners.set(ev, []);
+        listeners.get(ev).push(fn);
+      },
+      listeners,
+    };
+  }
+
+  function collectNodes(root, out = []) {
+    for (const child of root.children) {
+      out.push(child);
+      collectNodes(child, out);
+    }
+    return out;
+  }
+
+  document.createElement = (tag) => {
+    if (tag === "template") {
+      return {
+        content: { firstElementChild: null },
+        set innerHTML(h) {
+          this.content.firstElementChild = {
+            html: h,
+            querySelector() { return null; },
+            querySelectorAll() { return []; },
+          };
+        },
+      };
+    }
+    return makeDomEl(tag);
+  };
+
+  const listEl = makeDomEl("div");
+  renderSurfaceList(listEl, [
+    {
+      id: "s-idle",
+      name: "alpha",
+      root: "/tmp/a",
+      branch: "main",
+      doing: "idle",
+      state: "idle",
+      current: false,
+      url: "http://127.0.0.1:4101/#token=t1",
+      error: null,
+    },
+    {
+      id: "s-replied",
+      name: "beta",
+      root: "/tmp/b",
+      branch: "main",
+      doing: "idle",
+      state: "replied",
+      current: false,
+      url: "http://127.0.0.1:4102/#token=t2",
+      error: null,
+    },
+    {
+      id: "s-working",
+      name: "gamma",
+      root: "/tmp/c",
+      branch: "main",
+      doing: "running tests",
+      state: "working",
+      current: true,
+      url: "http://127.0.0.1:4103/#token=t3",
+      error: null,
+    },
+    {
+      id: "s-approval",
+      name: "delta",
+      root: "/tmp/d",
+      branch: "main",
+      doing: "deploy",
+      state: "approval",
+      current: false,
+      url: "http://127.0.0.1:4104/#token=t4",
+      error: null,
+    },
+  ], []);
+
+  const orderedIds = listEl.children.map(r => r.getAttribute("data-surface-id"));
+  assert.deepStrictEqual(orderedIds, ["s-replied", "s-approval", "s-idle", "s-working"]);
+
+  const repliedTexts = collectNodes(listEl.children[0]).map(n => n.textContent);
+  assert.ok(repliedTexts.includes("waiting on you"), repliedTexts.join("|"));
+  assert.ok(repliedTexts.includes("replied"), repliedTexts.join("|"));
+
+  const approvalTexts = collectNodes(listEl.children[1]).map(n => n.textContent);
+  assert.ok(approvalTexts.includes("waiting on you"), approvalTexts.join("|"));
+  assert.ok(approvalTexts.includes("needs your approval"), approvalTexts.join("|"));
+
+  const idleTexts = collectNodes(listEl.children[2]).filter(
+    n => n.className && n.className.includes("surface-switcher-state")
+  );
+  assert.strictEqual(idleTexts.length, 0);
+
+  const workingTexts = collectNodes(listEl.children[3]).filter(
+    n => n.className && n.className.includes("surface-switcher-state")
+  ).map(n => n.textContent);
+  assert.deepStrictEqual(workingTexts, ["working"]);
+
+  updateSwitcherWaitingDot([
+    { id: "s1", current: true, state: "approval" },
+    { id: "s2", current: false, state: "idle" },
+    { id: "s3", current: false, state: "working" },
+  ]);
+  assert.strictEqual(elements["surface-switcher-dot"].hidden, true);
+  assert.strictEqual(
+    elements["surface-switcher-dot"].getAttribute("aria-label"),
+    "another surface is waiting on you"
+  );
+
+  updateSwitcherWaitingDot([
+    { id: "s1", current: true, state: "idle" },
+    { id: "s2", current: false, state: "replied" },
+  ]);
+  assert.strictEqual(elements["surface-switcher-dot"].hidden, false);
+
+  updateSwitcherWaitingDot([
+    { id: "s1", current: true, state: "idle" },
+    { id: "s2", current: false, state: "approval" },
+  ]);
+  assert.strictEqual(elements["surface-switcher-dot"].hidden, false);
+
+  updateSwitcherWaitingDot([
+    { id: "s1", current: true, state: "replied" },
+    { id: "s2", current: false, state: "working" },
+  ]);
+  assert.strictEqual(elements["surface-switcher-dot"].hidden, true);
+
+  surfaceToken = "tok-seen-test";
+  const seenCalls = [];
+  let sessionPayload = {
+    session_id: "sess-1",
+    surface_name: "demo",
+    repo: "demo",
+    repository: true,
+    started_at: 1700000000,
+    model: "gemini-4-neon",
+    effort: null,
+    effort_supported: false,
+    busy: false,
+    queued: 0,
+    last_seq: 0,
+    state: "replied",
+  };
+  global.fetch = async (url, opts) => {
+    if (url === "/api/session/seen") {
+      seenCalls.push({ url, method: opts && opts.method, headers: opts && opts.headers });
+      return { ok: true, status: 204 };
+    }
+    if (url === "/api/session") {
+      return { ok: true, status: 200, async json() { return sessionPayload; } };
+    }
+    if (url === "/api/surfaces") {
+      return { ok: true, status: 200, async json() { return { surfaces: [], stopped: [] }; } };
+    }
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  document.visibilityState = "hidden";
+  await loadInitialSession();
+  assert.strictEqual(seenCalls.length, 0);
+  assert.strictEqual(document.title, "demo: waiting on you - blyte");
+
+  document.visibilityState = "visible";
+  handleVisibilityChange();
+  assert.strictEqual(seenCalls.length, 1);
+  assert.strictEqual(seenCalls[0].method, "POST");
+  assert.strictEqual(seenCalls[0].headers["X-Blyte-Token"], "tok-seen-test");
+  assert.strictEqual(document.title, "demo - blyte");
+
+  await loadInitialSession();
+  assert.strictEqual(seenCalls.length, 2);
+
+  sessionPayload = Object.assign({}, sessionPayload, { busy: true, state: "working" });
+  await loadInitialSession();
+  assert.strictEqual(seenCalls.length, 2);
+  assert.strictEqual(document.title, "demo: working - blyte");
+
+  handleVisibilityChange();
+  assert.strictEqual(seenCalls.length, 2);
+
+  const thread = document.getElementById("conversation-thread");
+  thread.insertAdjacentHTML = () => {};
+  thread.appendChild = () => {};
+  const activity = document.getElementById("activity-list");
+  activity.appendChild = () => {};
+  const ts = 1700000100;
+  applyLogEntries([
+    { seq: 1, ts, kind: "approval_requested", id: "approval-1", command: "deploy", reason: "prod" },
+  ]);
+  assert.strictEqual(document.title, "demo: waiting on you - blyte");
+
+  applyLogEntries([
+    { seq: 2, ts, kind: "approval_answered", id: "approval-1", command: "deploy", answer: "yes" },
+  ]);
+  assert.strictEqual(document.title, "demo: working - blyte");
+
+  document.visibilityState = "hidden";
+  applyLogEntries([
+    { seq: 3, ts, kind: "idle", turns: 1, cost_usd: 0.0, seconds: 0.5 },
+  ]);
+  assert.strictEqual(seenCalls.length, 2);
+  assert.strictEqual(document.title, "demo: waiting on you - blyte");
+
+  document.visibilityState = "visible";
+  handleVisibilityChange();
+  assert.strictEqual(seenCalls.length, 3);
+  assert.strictEqual(document.title, "demo - blyte");
+
+  applyLogEntries([
+    { seq: 4, ts, kind: "user_message", text: "second", reports: [], queued: false, attachments: [], pastes: [] },
+  ]);
+  assert.strictEqual(document.title, "demo: working - blyte");
+
+  applyLogEntries([
+    { seq: 5, ts, kind: "idle", turns: 1, cost_usd: 0.0, seconds: 0.5 },
+  ]);
+  assert.strictEqual(seenCalls.length, 4);
+  assert.strictEqual(document.title, "demo - blyte");
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"#
+    );
+    run_surface_script(&harness);
 }

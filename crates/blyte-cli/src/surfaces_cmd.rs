@@ -226,7 +226,7 @@ pub fn format_surfaces_table(entries: &[RegistryEntry], current_id: Option<&str>
         return "no surfaces are running\n".to_string();
     }
 
-    let rows: Vec<(String, String, &str, &str)> = entries
+    let rows: Vec<(String, String, &str, &str, &str)> = entries
         .iter()
         .map(|entry| {
             let name = if current_id == Some(entry.id.as_str()) {
@@ -238,6 +238,7 @@ pub fn format_surfaces_table(entries: &[RegistryEntry], current_id: Option<&str>
                 name,
                 repository_name(&entry.root),
                 entry.branch.as_deref().unwrap_or("-"),
+                entry.state.display_label(),
                 entry.doing.as_str(),
             )
         })
@@ -261,17 +262,23 @@ pub fn format_surfaces_table(entries: &[RegistryEntry], current_id: Option<&str>
         .max()
         .unwrap_or(0)
         .max("BRANCH".len());
+    let state_w = rows
+        .iter()
+        .map(|row| row.3.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("STATE".len());
 
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "{:<name_w$}  {:<repo_w$}  {:<branch_w$}  DOING",
-        "NAME", "REPOSITORY", "BRANCH"
+        "{:<name_w$}  {:<repo_w$}  {:<branch_w$}  {:<state_w$}  DOING",
+        "NAME", "REPOSITORY", "BRANCH", "STATE"
     );
-    for (name, repo, branch, doing) in rows {
+    for (name, repo, branch, state, doing) in rows {
         let _ = writeln!(
             out,
-            "{name:<name_w$}  {repo:<repo_w$}  {branch:<branch_w$}  {doing}"
+            "{name:<name_w$}  {repo:<repo_w$}  {branch:<branch_w$}  {state:<state_w$}  {doing}"
         );
     }
     out
@@ -352,6 +359,7 @@ pub fn surfaces_payload(
                 "root": entry.root.to_string_lossy(),
                 "branch": entry.branch,
                 "doing": entry.doing,
+                "state": entry.state,
                 "current": entry.id == current_id,
                 "url": url,
                 "error": error,

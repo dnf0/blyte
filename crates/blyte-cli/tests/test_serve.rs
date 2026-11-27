@@ -22,7 +22,9 @@ use blyte_cli::session::{peer_prompt, EntryBody, PromptRunner, Session};
 use blyte_cli::surface_dir::{
     list_records_in, new_surface_id, surface_dir, surfaces_dir, write_record_in, SurfaceRecord,
 };
-use blyte_cli::surface_registry::{entry_path, registry_dir, write_entry, RegistryEntry};
+use blyte_cli::surface_registry::{
+    entry_path, registry_dir, write_entry, RegistryEntry, SurfaceState,
+};
 
 const WAIT: Duration = Duration::from_secs(30);
 
@@ -348,6 +350,7 @@ fn session_info_shape() {
         "busy",
         "queued",
         "last_seq",
+        "state",
     ]
     .into_iter()
     .collect();
@@ -363,6 +366,7 @@ fn session_info_shape() {
     assert_eq!(obj.get("busy").unwrap(), false);
     assert_eq!(obj.get("queued").unwrap(), 0);
     assert_eq!(obj.get("last_seq").unwrap(), 0);
+    assert_eq!(obj.get("state").unwrap(), "idle");
 }
 
 #[test]
@@ -4004,6 +4008,7 @@ fn stale_registry_entry_does_not_block_name_and_is_removed() {
         port: dead_port,
         started_at: 1_700_000_000,
         doing: "idle".to_string(),
+        state: SurfaceState::Idle,
     };
     write_entry(&reg_dir, &stale_entry).unwrap();
     assert!(entry_path(&reg_dir, stale_id).exists());

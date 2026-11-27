@@ -9,6 +9,35 @@ use crate::surface_dir::{probe, validate_surface_name, Liveness};
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SurfaceState {
+    Idle,
+    Working,
+    Approval,
+    Replied,
+}
+
+impl SurfaceState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Working => "working",
+            Self::Approval => "approval",
+            Self::Replied => "replied",
+        }
+    }
+
+    pub fn display_label(&self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Working => "working",
+            Self::Approval => "waiting on you (approval)",
+            Self::Replied => "waiting on you (replied)",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegistryEntry {
     pub id: String,
@@ -19,6 +48,7 @@ pub struct RegistryEntry {
     pub port: u16,
     pub started_at: u64,
     pub doing: String,
+    pub state: SurfaceState,
 }
 
 pub fn state_dir() -> Result<PathBuf, String> {

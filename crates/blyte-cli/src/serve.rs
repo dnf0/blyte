@@ -199,6 +199,7 @@ fn session_response(surface: &Surface) -> Response {
             "busy": info.busy,
             "queued": info.queued,
             "last_seq": info.last_seq,
+            "state": info.state,
         }),
     )
 }
@@ -545,6 +546,11 @@ fn handle_post_effort(surface: &Surface, req: &Request) -> Response {
         return json_error(400, e);
     }
     session_response(surface)
+}
+
+fn handle_post_seen(surface: &Surface) -> Response {
+    surface.session.mark_seen();
+    Response::text(204, "")
 }
 
 fn handle_post_approval(surface: &Surface, id: &str, req: &Request) -> Response {
@@ -1158,6 +1164,12 @@ pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
                 return method_not_allowed(req);
             }
             handle_post_effort(surface, req)
+        }
+        "/api/session/seen" => {
+            if req.method != "POST" {
+                return method_not_allowed(req);
+            }
+            handle_post_seen(surface)
         }
         "/api/runs/changed" => {
             if req.method != "POST" {
@@ -2203,6 +2215,7 @@ where
         port: actual_port,
         started_at,
         doing: "idle".to_string(),
+        state: crate::surface_registry::SurfaceState::Idle,
     };
     if let Err(e) = crate::surface_registry::write_entry(&registry_dir, &registry_entry) {
         let _ = writeln!(err, "blyte: {e}");
@@ -2214,7 +2227,7 @@ where
     };
     let hook_dir = registry_dir.clone();
     let hook_entry = registry_entry.clone();
-    session.set_activity_hook(Box::new(move |prompt| {
+    session.set_activity_hook(Box::new(move |prompt, state| {
         let doing = match prompt {
             Some(text) => {
                 let line = crate::surface_registry::first_line(text);
@@ -2238,6 +2251,7 @@ where
         let entry = crate::surface_registry::RegistryEntry {
             branch,
             doing,
+            state,
             ..hook_entry.clone()
         };
         if let Err(e) = crate::surface_registry::write_entry(&hook_dir, &entry) {

@@ -8,7 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use blyte_cli::surface_dir::{is_running, probe, Liveness, SurfaceRecord};
-use blyte_cli::surface_registry::{entry_path, live_entries, write_entry, RegistryEntry};
+use blyte_cli::surface_registry::{
+    entry_path, live_entries, write_entry, RegistryEntry, SurfaceState,
+};
 
 fn dead_pid() -> u32 {
     let mut child = Command::new("true").spawn().unwrap();
@@ -224,6 +226,7 @@ fn live_entries_keeps_a_stalled_entry_and_removes_a_dead_one() {
         port: silent.port,
         started_at: 100,
         doing: "idle".to_string(),
+        state: SurfaceState::Idle,
     };
     let dead = RegistryEntry {
         id: "s00000000000000b2".to_string(),
@@ -234,6 +237,7 @@ fn live_entries_keeps_a_stalled_entry_and_removes_a_dead_one() {
         port: silent.port,
         started_at: 200,
         doing: "idle".to_string(),
+        state: SurfaceState::Idle,
     };
 
     write_entry(dir, &stalled).unwrap();
