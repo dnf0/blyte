@@ -2816,6 +2816,8 @@ const assert = require("node:assert");
       value: "",
       selectionStart: 0,
       selectionEnd: 0,
+      style: {},
+      scrollHeight: 0,
       hidden: false,
       disabled: false,
       innerHTML: "",
@@ -2846,6 +2848,7 @@ const assert = require("node:assert");
 
   const docListeners = new Map();
   global.window = {
+    innerHeight: 1000,
     addEventListener() {},
   };
   global.document = {
@@ -3419,4 +3422,327 @@ fn surface_switcher_fetch_errors_navigation_and_working_title_updates() {
 "#
     );
     run_surface_script(&harness);
+}
+
+#[test]
+fn composer_uses_textarea_and_multiline_styles() {
+    let html = load_surface_html();
+    assert!(
+        html.contains("<textarea id=\"conversation-input\""),
+        "surface page must use <textarea id=\"conversation-input\""
+    );
+    assert!(
+        !html.contains("<input type=\"text\" id=\"conversation-input\""),
+        "surface page must not use <input type=\"text\" id=\"conversation-input\""
+    );
+    assert!(
+        html.contains(".composer textarea {"),
+        "surface page must define .composer textarea CSS rule"
+    );
+    assert!(
+        !html.contains(".composer input[type=\"text\"]"),
+        "surface page must replace .composer input[type=\"text\"] CSS rule"
+    );
+    let composer_start = html
+        .find(".composer {")
+        .expect("surface page must define .composer CSS rule");
+    let composer_rest = &html[composer_start..];
+    let composer_end = composer_rest
+        .find('}')
+        .expect(".composer CSS rule must close");
+    let composer_rule = &composer_rest[..composer_end];
+    assert!(
+        composer_rule.contains("align-items: flex-end;"),
+        ".composer rule must align items to flex-end: {composer_rule}"
+    );
+    let user_msg_start = html
+        .find(".msg-line.user {")
+        .expect("surface page must define .msg-line.user CSS rule");
+    let user_msg_rest = &html[user_msg_start..];
+    let user_msg_end = user_msg_rest
+        .find('}')
+        .expect(".msg-line.user CSS rule must close");
+    let user_msg_rule = &user_msg_rest[..user_msg_end];
+    assert!(
+        user_msg_rule.contains("white-space: pre-wrap;"),
+        ".msg-line.user rule must preserve newlines with white-space: pre-wrap: {user_msg_rule}"
+    );
+}
+
+#[test]
+fn composer_keydown_submit_resize_and_multiline_user_message() {
+    let harness = r#"
+const assert = require("node:assert");
+
+(async () => {
+  let requestSubmitCalls = 0;
+  const heightHistory = [];
+  const styleObj = {
+    _height: "",
+    overflowY: "",
+    get height() { return this._height; },
+    set height(v) {
+      this._height = v;
+      heightHistory.push(v);
+    },
+  };
+  const elements = {
+    "conversation-form": {
+      requestSubmit() { requestSubmitCalls += 1; },
+      addEventListener() {},
+    },
+    "conversation-input": {
+      value: "",
+      style: styleObj,
+      scrollHeight: 100,
+      addEventListener() {},
+    },
+    "conversation-send": { disabled: false },
+    "composer-error": { textContent: "", hidden: true },
+    "attached-reports": { hidden: true, innerHTML: "" },
+  };
+
+  global.window = {
+    innerHeight: 1000,
+    addEventListener() {},
+  };
+  global.document = {
+    getElementById(id) { return elements[id] || null; },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+  };
+
+  function fireKeydown(eventProps) {
+    let prevented = false;
+    const beforeSubmit = requestSubmitCalls;
+    handleComposerKeydown(Object.assign(
+      { preventDefault() { prevented = true; } },
+      eventProps
+    ));
+    return {
+      prevented,
+      submits: requestSubmitCalls - beforeSubmit,
+    };
+  }
+
+  assert.deepStrictEqual(
+    fireKeydown({ key: "Enter", shiftKey: false }),
+    { prevented: true, submits: 1 }
+  );
+  assert.deepStrictEqual(
+    fireKeydown({ key: "Enter", shiftKey: true }),
+    { prevented: false, submits: 0 }
+  );
+  assert.deepStrictEqual(
+    fireKeydown({ key: "Enter", isComposing: true }),
+    { prevented: false, submits: 0 }
+  );
+  assert.deepStrictEqual(
+    fireKeydown({ key: "Enter", keyCode: 229 }),
+    { prevented: false, submits: 0 }
+  );
+  assert.deepStrictEqual(
+    fireKeydown({ key: "Enter", metaKey: true }),
+    { prevented: false, submits: 0 }
+  );
+  assert.deepStrictEqual(
+    fireKeydown({ key: "Enter", ctrlKey: true }),
+    { prevented: false, submits: 0 }
+  );
+  assert.deepStrictEqual(
+    fireKeydown({ key: "Enter", altKey: true }),
+    { prevented: false, submits: 0 }
+  );
+  assert.deepStrictEqual(
+    fireKeydown({ key: "a" }),
+    { prevented: false, submits: 0 }
+  );
+
+  heightHistory.length = 0;
+  elements["conversation-input"].scrollHeight = 100;
+  global.window.innerHeight = 1000;
+  resizeComposer();
+  assert.strictEqual(elements["conversation-input"].style.height, "100px");
+  assert.strictEqual(elements["conversation-input"].style.overflowY, "hidden");
+  assert.deepStrictEqual(heightHistory, ["auto", "100px"]);
+
+  heightHistory.length = 0;
+  elements["conversation-input"].scrollHeight = 900;
+  global.window.innerHeight = 1000;
+  resizeComposer();
+  assert.strictEqual(elements["conversation-input"].style.height, "400px");
+  assert.strictEqual(elements["conversation-input"].style.overflowY, "auto");
+  assert.deepStrictEqual(heightHistory, ["auto", "400px"]);
+
+  const calls = [];
+  global.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return {
+      ok: true,
+      status: 200,
+      async json() { return { seq: 1 }; },
+    };
+  };
+  surfaceToken = "test-token";
+
+  elements["conversation-input"].value = "line one\nline two";
+  elements["conversation-input"].scrollHeight = 80;
+  heightHistory.length = 0;
+  await submitMessage();
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(calls[0].url, "/api/session/messages");
+  assert.strictEqual(JSON.parse(calls[0].options.body).text, "line one\nline two");
+  assert.strictEqual(elements["conversation-input"].value, "");
+  assert.deepStrictEqual(heightHistory, ["auto", "80px"]);
+
+  calls.length = 0;
+  elements["conversation-input"].value = "\n \n";
+  await submitMessage();
+  assert.strictEqual(calls.length, 0);
+
+  const renderedUser = renderEntry({
+    seq: 42,
+    ts: 1000,
+    kind: "user_message",
+    text: "a\nb",
+    reports: [],
+    queued: false,
+  });
+  assert.ok(renderedUser.includes('class="entry msg-line user"'), renderedUser);
+  assert.ok(renderedUser.includes("<div>a\nb</div>"), renderedUser);
+
+  delete elements["conversation-form"];
+  assert.throws(
+    () => fireKeydown({ key: "Enter", shiftKey: false }),
+    /missing #conversation-form/
+  );
+
+  delete elements["conversation-input"];
+  assert.throws(
+    () => resizeComposer(),
+    /missing #conversation-input/
+  );
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn composer_bind_events_wires_keydown_input_paste_and_window_resize() {
+    let harness = r#"
+const assert = require("node:assert");
+
+(async () => {
+  const elements = {};
+  function makeStub(id) {
+    const classes = new Set();
+    const listeners = new Map();
+    return {
+      id,
+      value: "",
+      selectionStart: 0,
+      selectionEnd: 0,
+      style: {},
+      scrollHeight: 90,
+      hidden: false,
+      disabled: false,
+      innerHTML: "",
+      textContent: "",
+      requestSubmitCalls: 0,
+      requestSubmit() { this.requestSubmitCalls += 1; },
+      classList: {
+        add(c) { classes.add(c); },
+        remove(c) { classes.delete(c); },
+        contains(c) { return classes.has(c); },
+        toggle(c, force) {
+          if (force === undefined) {
+            if (classes.has(c)) classes.delete(c); else classes.add(c);
+          } else if (force) classes.add(c); else classes.delete(c);
+        },
+      },
+      listeners,
+      addEventListener(type, fn) {
+        if (!listeners.has(type)) listeners.set(type, []);
+        listeners.get(type).push(fn);
+      },
+      setSelectionRange(start, end) {
+        this.selectionStart = start;
+        this.selectionEnd = end;
+      },
+      closest() { return null; },
+      querySelector() { return null; },
+      querySelectorAll() { return []; },
+    };
+  }
+
+  const windowListeners = new Map();
+  global.window = {
+    innerHeight: 1000,
+    addEventListener(type, fn) {
+      if (!windowListeners.has(type)) windowListeners.set(type, []);
+      windowListeners.get(type).push(fn);
+    },
+  };
+  global.document = {
+    getElementById(id) {
+      if (!elements[id]) elements[id] = makeStub(id);
+      return elements[id];
+    },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    addEventListener() {},
+  };
+
+  bindEvents();
+
+  const input = elements["conversation-input"];
+  const form = elements["conversation-form"];
+
+  const keydownHandlers = input.listeners.get("keydown") || [];
+  assert.strictEqual(keydownHandlers.length, 1);
+  let prevented = false;
+  keydownHandlers[0]({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault() { prevented = true; },
+  });
+  assert.strictEqual(prevented, true);
+  assert.strictEqual(form.requestSubmitCalls, 1);
+
+  input.scrollHeight = 140;
+  const inputHandlers = input.listeners.get("input") || [];
+  assert.strictEqual(inputHandlers.length, 1);
+  inputHandlers[0]();
+  assert.strictEqual(input.style.height, "140px");
+  assert.strictEqual(input.style.overflowY, "hidden");
+
+  input.scrollHeight = 220;
+  const pasteHandlers = input.listeners.get("paste") || [];
+  assert.strictEqual(pasteHandlers.length, 1);
+  pasteHandlers[0]({
+    preventDefault() {},
+    clipboardData: {
+      items: [],
+      files: [],
+      getData(t) { return t === "text/plain" ? "1\n2\n3\n4\n5" : ""; },
+    },
+  });
+  assert.strictEqual(input.style.height, "220px");
+
+  input.scrollHeight = 500;
+  global.window.innerHeight = 800;
+  const resizeHandlers = windowListeners.get("resize") || [];
+  assert.strictEqual(resizeHandlers.length, 1);
+  resizeHandlers[0]();
+  assert.strictEqual(input.style.height, "320px");
+  assert.strictEqual(input.style.overflowY, "auto");
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"#;
+    run_surface_script(harness);
 }

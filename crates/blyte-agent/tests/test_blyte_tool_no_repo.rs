@@ -482,13 +482,20 @@ fn background_dispatch_outside_repository_writes_to_run_store_not_folder() {
         "expected {} to exist",
         out_file.display()
     );
-    assert!(
-        std::fs::read_to_string(&out_file)
-            .unwrap()
-            .contains("dispatched-bg"),
-        "{}",
-        std::fs::read_to_string(&out_file).unwrap()
-    );
+    // The command runs in the background: wait for its output rather than
+    // reading the file the moment it exists.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let text = std::fs::read_to_string(&out_file).unwrap();
+        if text.contains("dispatched-bg") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no output from the background command after 60 s: {text:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     assert!(!root.path().join(".wt").exists());
 }
 
