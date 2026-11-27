@@ -39,7 +39,8 @@ Seatbelt also denies writes to program directories, tool configuration, and blyt
 the granted trees:
 
 - `~/.cargo/bin`, `~/.cargo/config`, `~/.cargo/config.toml`, `~/.cargo/credentials`,
-  `~/.cargo/credentials.toml`;
+  `~/.cargo/credentials.toml`, and `~/.cargo/env`, `~/.cargo/env.fish`, `~/.cargo/env.nu` (the
+  files shells load at start);
 - `~/.local/bin`, `~/.local/lib`, `~/.local/state/blyte`, `~/.local/share/uv/tools`,
   `~/.local/share/mise`, `~/.local/share/pipx`, `~/.local/share/keyrings`;
 - `~/.gradle/init.d`, `~/.m2/settings.xml`;
@@ -56,7 +57,7 @@ existing toolchains continue to work because the caches (`~/.cargo/registry`, `~
 On Linux, Landlock can only *allow* paths and cannot carve deny rules out of an allowed directory.
 `~/.rustup`, `~/go/bin` (only `~/go/pkg` is granted), `~/.local/bin`, `~/.local/lib`, and
 `~/.local/state/blyte` are still read-only because they are omitted from the allow-list. However,
-subpaths inside granted trees — `~/.cargo/bin`, `~/.cargo/config*`, `~/.cargo/credentials*`,
+subpaths inside granted trees — `~/.cargo/bin`, `~/.cargo/config*`, `~/.cargo/credentials*`, `~/.cargo/env*`,
 `~/.local/share/uv/tools`, `~/.local/share/mise`, `~/.local/share/pipx`,
 `~/.local/share/keyrings`, `~/.gradle/init.d`, `~/.m2/settings.xml`, and
 `<git common dir>/hooks` and `<git common dir>/config` — remain writable on Linux.
