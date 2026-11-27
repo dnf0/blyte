@@ -345,7 +345,7 @@ fn run_scratch_workspace_allows_report_write_but_keeps_state_dir_and_dotenv_prot
         .join("folders")
         .join("0123456789abcdef")
         .join("runs")
-        .join("R1");
+        .join("R1.scratch");
     std::fs::create_dir_all(&scratch).unwrap();
     let _guard = EnvGuard::set(Some(home.path()), None, Some(&custom_state));
 
@@ -444,4 +444,70 @@ fn run_scratch_workspace_allows_report_write_but_keeps_state_dir_and_dotenv_prot
             "non-scratch runs dir must not be re-allowed after state dir deny"
         );
     }
+}
+
+#[test]
+fn is_run_scratch_workspace_matches_only_named_scratch_folders() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = tmp.path().join("state");
+    let runs = state_dir
+        .join("folders")
+        .join("0123456789abcdef")
+        .join("runs");
+
+    for rejected in [
+        runs.join("T1"),
+        runs.join("T1.before"),
+        runs.join("T1.after"),
+        runs.join(".scratch"),
+        runs.join("T1.scratch").join("sub"),
+    ] {
+        assert!(
+            !blyte_agent::sandbox::is_run_scratch_workspace(&rejected, &state_dir),
+            "expected false for {}",
+            rejected.display()
+        );
+    }
+
+    for accepted in [runs.join("T1.scratch"), runs.join("T1.before.scratch")] {
+        assert!(
+            blyte_agent::sandbox::is_run_scratch_workspace(&accepted, &state_dir),
+            "expected true for {}",
+            accepted.display()
+        );
+    }
+}
+
+#[test]
+fn write_tool_refuses_write_from_run_rooted_at_before_dir() {
+    let home = tempfile::tempdir().unwrap();
+    let custom_state = home.path().join("custom_state");
+    let before_dir = custom_state
+        .join("folders")
+        .join("0123456789abcdef")
+        .join("runs")
+        .join("T1.before");
+    std::fs::create_dir_all(&before_dir).unwrap();
+    std::fs::write(before_dir.join("a.txt"), "original\n").unwrap();
+    let _guard = EnvGuard::set(Some(home.path()), None, Some(&custom_state));
+
+    let shell = LocalShell::new();
+    let fs = LocalFs;
+    let out = execute(
+        &before_dir,
+        &shell,
+        &fs,
+        "write",
+        &json!({ "path": "a.txt", "content": "overwritten\n" }),
+    );
+    assert!(out.is_error, "{}", out.content);
+    assert!(
+        out.content.contains("blyte's own files"),
+        "expected state dir refusal, got: {}",
+        out.content
+    );
+    assert_eq!(
+        std::fs::read_to_string(before_dir.join("a.txt")).unwrap(),
+        "original\n"
+    );
 }

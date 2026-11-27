@@ -1038,7 +1038,7 @@ fn research_run_reads_notes_and_writes_verified_report() {
 
     let summary: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON summary");
     let store = env.run_store();
-    let scratch_dir = store.join("R1");
+    let scratch_dir = store.join("R1.scratch");
     let expected_report = store.join("R1.report.md");
 
     assert_eq!(summary["outcome"], "verified");
@@ -1384,7 +1384,7 @@ fn research_run_unverified_report_gets_banner_and_restart_reuses_scratch() {
         "expected unverified banner in --report-to file: {dest_report}"
     );
 
-    let scratch = store.join("R_RESTART");
+    let scratch = store.join("R_RESTART.scratch");
     std::fs::create_dir_all(&scratch).unwrap();
     let init = Command::new("git")
         .args(["init", "-q"])
@@ -1614,5 +1614,169 @@ fn research_run_copy_failure_and_empty_report_leave_report_to_unmutated() {
         store_report.matches("> **Not verified.**").count(),
         1,
         "store report should have banner exactly once: {store_report}"
+    );
+}
+
+#[test]
+fn research_run_with_dotted_before_id_leaves_saved_originals_intact() {
+    if let Err(reason) = sandbox_can_apply() {
+        eprintln!(
+            "skipping research_run_with_dotted_before_id_leaves_saved_originals_intact: {reason}"
+        );
+        return;
+    }
+
+    let env = TestEnv::new();
+    std::fs::write(env.folder.join("a.txt"), "original content\n").unwrap();
+
+    let port1 = start_scripted_server(vec![
+        write_tool_turn("a.txt", "modified content\n"),
+        stop_turn("updated a.txt"),
+    ]);
+    let out1 = env.blyte(
+        &["dispatch", "T1", env.task_file.to_str().unwrap()],
+        Some(port1),
+    );
+    assert_eq!(
+        out1.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out1.stdout),
+        String::from_utf8_lossy(&out1.stderr)
+    );
+
+    let store = env.run_store();
+    assert_eq!(
+        std::fs::read_to_string(store.join("T1.before").join("a.txt")).unwrap(),
+        "original content\n"
+    );
+
+    let (port2, _requests) = start_recording_server(vec![
+        write_tool_turn("a.txt", "clobbered content\n"),
+        write_tool_turn("report.md", "# Findings\n\nWrote a.txt in scratch.\n"),
+        stop_turn("done"),
+    ]);
+    let out2 = env.blyte(
+        &[
+            "dispatch",
+            "T1.before",
+            env.task_file.to_str().unwrap(),
+            "--research",
+        ],
+        Some(port2),
+    );
+    assert_eq!(
+        out2.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out2.stdout),
+        String::from_utf8_lossy(&out2.stderr)
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(store.join("T1.before").join("a.txt")).unwrap(),
+        "original content\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(store.join("T1.before.scratch").join("a.txt")).unwrap(),
+        "clobbered content\n"
+    );
+}
+
+#[test]
+fn research_run_with_dotted_before_id_uses_scratch_suffix_without_touching_before_dir() {
+    let env = TestEnv::new();
+    let store = env.run_store();
+    let before_dir = store.join("T1.before");
+    std::fs::create_dir_all(&before_dir).unwrap();
+    std::fs::write(before_dir.join("a.txt"), "original content\n").unwrap();
+
+    let (port, _requests) = start_recording_server(vec![
+        write_tool_turn("a.txt", "clobbered content\n"),
+        write_tool_turn("report.md", "# Findings\n\nWrote a.txt in scratch.\n"),
+        stop_turn("done"),
+    ]);
+    let out = env.blyte(
+        &[
+            "dispatch",
+            "T1.before",
+            env.task_file.to_str().unwrap(),
+            "--research",
+            "--sandbox",
+            "off",
+        ],
+        Some(port),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(before_dir.join("a.txt")).unwrap(),
+        "original content\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(store.join("T1.before.scratch").join("a.txt")).unwrap(),
+        "clobbered content\n"
+    );
+}
+
+#[test]
+fn research_run_refuses_preexisting_scratch_without_start_record() {
+    let env = TestEnv::new();
+    let store = env.run_store();
+    let foreign_dir = store.join("R_FOREIGN.scratch");
+    std::fs::create_dir_all(&foreign_dir).unwrap();
+    std::fs::write(foreign_dir.join("keep.txt"), "foreign\n").unwrap();
+
+    let out = env.blyte(
+        &[
+            "dispatch",
+            "R_FOREIGN",
+            env.task_file.to_str().unwrap(),
+            "--research",
+        ],
+        None,
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let expected = format!(
+        "error: {} exists and does not belong to run R_FOREIGN",
+        foreign_dir.display()
+    );
+    assert!(
+        stderr.contains(&expected),
+        "expected {expected:?} in stderr: {stderr}"
+    );
+    assert!(!store.join("R_FOREIGN.start.json").exists());
+    assert!(!store.join("R_FOREIGN.task.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(foreign_dir.join("keep.txt")).unwrap(),
+        "foreign\n"
+    );
+
+    let foreign_file = store.join("R_FILE.scratch");
+    std::fs::write(&foreign_file, "not a dir\n").unwrap();
+    let out_file = env.blyte(
+        &[
+            "dispatch",
+            "R_FILE",
+            env.task_file.to_str().unwrap(),
+            "--research",
+        ],
+        None,
+    );
+    assert_eq!(out_file.status.code(), Some(2));
+    let stderr_file = String::from_utf8_lossy(&out_file.stderr);
+    let expected_file = format!(
+        "error: {} exists and does not belong to run R_FILE",
+        foreign_file.display()
+    );
+    assert!(
+        stderr_file.contains(&expected_file),
+        "expected {expected_file:?} in stderr: {stderr_file}"
     );
 }

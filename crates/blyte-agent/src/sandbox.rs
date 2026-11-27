@@ -548,7 +548,8 @@ pub fn is_protected_read(path: &Path) -> Result<bool, String> {
     is_protected_read_with(path, &protected)
 }
 
-pub(crate) fn is_run_scratch_workspace(workspace_root: &Path, state_dir: &Path) -> bool {
+/// Reports whether `workspace_root` is a non-repository research scratch folder under `state_dir`.
+pub fn is_run_scratch_workspace(workspace_root: &Path, state_dir: &Path) -> bool {
     let Ok(rel) = workspace_root.strip_prefix(state_dir) else {
         return false;
     };
@@ -573,7 +574,10 @@ pub(crate) fn is_run_scratch_workspace(workspace_root: &Path, state_dir: &Path) 
     };
     p0 == "folders"
         && p2 == "runs"
-        && !p3.is_empty()
+        && p3
+            .to_str()
+            .and_then(|s| s.strip_suffix(".scratch"))
+            .is_some_and(|prefix| !prefix.is_empty())
         && p1.to_str().is_some_and(|s| {
             s.len() == 16 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
         })

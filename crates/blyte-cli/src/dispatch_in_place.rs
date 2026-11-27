@@ -291,7 +291,7 @@ pub fn run(args: &DispatchArgs) -> i32 {
     let diff_path = store.join(format!("{}.diff", args.id));
     let before_dir = store.join(format!("{}.before", args.id));
     let after_dir = store.join(format!("{}.after", args.id));
-    let scratch_dir = store.join(&args.id);
+    let scratch_dir = store.join(format!("{}.scratch", args.id));
     let research_report_path = store.join(format!("{}.report.md", args.id));
 
     if summary_path.exists() {
@@ -302,6 +302,23 @@ pub fn run(args: &DispatchArgs) -> i32 {
         return 2;
     }
     let is_restart = start_path.exists();
+    if args.research && !is_restart {
+        match std::fs::symlink_metadata(&scratch_dir) {
+            Ok(_) => {
+                eprintln!(
+                    "error: {} exists and does not belong to run {}",
+                    scratch_dir.display(),
+                    args.id
+                );
+                return 2;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                eprintln!("error: cannot inspect {}: {e}", scratch_dir.display());
+                return 2;
+            }
+        }
+    }
 
     let _lock = if args.research {
         None
