@@ -1482,6 +1482,13 @@ pub fn run_with_hooks(
     )
 }
 
+pub type RunnerFactory = Box<
+    dyn FnOnce(
+        &ReplConfig,
+        Arc<dyn blyte_agent::approval::Approver>,
+    ) -> Result<(Box<dyn PromptRunner>, Option<PathBuf>), String>,
+>;
+
 pub fn run_with_runner(
     args: &SurfaceArgs,
     config: ReplConfig,
@@ -1498,7 +1505,27 @@ pub fn run_with_runner(
         err,
         opener,
         move || stop.load(Ordering::Relaxed),
-        Some(runner),
+        Some(Box::new(|_, _| Ok((runner, None)))),
+    )
+}
+
+pub fn run_with_runner_factory(
+    args: &SurfaceArgs,
+    config: ReplConfig,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    opener: &mut dyn FnMut(&str),
+    stop: Arc<AtomicBool>,
+    factory: RunnerFactory,
+) -> i32 {
+    run_inner(
+        args,
+        config,
+        out,
+        err,
+        opener,
+        move || stop.load(Ordering::Relaxed),
+        Some(factory),
     )
 }
 
@@ -1576,7 +1603,7 @@ fn run_inner<S>(
     err: &mut dyn Write,
     opener: &mut dyn FnMut(&str),
     should_stop: S,
-    custom_runner: Option<Box<dyn PromptRunner>>,
+    custom_runner: Option<RunnerFactory>,
 ) -> i32
 where
     S: Fn() -> bool,
@@ -1875,16 +1902,13 @@ where
         let _ = writeln!(err, "blyte: {e}");
         return 1;
     }
-    let attachments_dir = crate::attachments::attachments_dir(&surface_record_dir);
-    if let Err(e) = std::fs::create_dir_all(&attachments_dir) {
-        let _ = writeln!(
-            err,
-            "blyte: failed to create {}: {e}",
-            attachments_dir.display()
-        );
-        return 1;
-    }
-    let attachments_dir = std::fs::canonicalize(&attachments_dir).unwrap_or(attachments_dir);
+    let attachments_dir = match prepare_attachments_dir(&surface_record_dir) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            return 1;
+        }
+    };
     let mut read_roots = blyte_agent::tools::read_roots();
     if !read_roots.iter().any(|p| p == &attachments_dir) {
         read_roots.push(attachments_dir.clone());
@@ -1924,7 +1948,11 @@ where
     let session =
         match Session::try_start_with_log_io(model, Some(entries_log_path), err, |approver| {
             match custom_runner {
-                Some(r) => Ok(r),
+                Some(factory) => {
+                    let (runner, tmpdir) = factory(&config, approver)?;
+                    _private_tmp_guard = tmpdir.map(|path| PrivateTmpDirGuard { path });
+                    Ok(runner)
+                }
                 None => {
                     let runner = AgentRunner::try_new(&config, approver)?;
                     _private_tmp_guard = runner.private_tmpdir().map(|path| PrivateTmpDirGuard {
@@ -2025,5 +2053,64 @@ where
             let _ = writeln!(err, "blyte: server error: {e}");
             1
         }
+    }
+}
+
+fn canonicalize_attachments_dir(attachments_dir: &Path) -> Result<PathBuf, String> {
+    std::fs::canonicalize(attachments_dir).map_err(|e| {
+        format!(
+            "failed to canonicalize attachments directory {}: {e}",
+            attachments_dir.display()
+        )
+    })
+}
+
+fn prepare_attachments_dir(surface_record_dir: &Path) -> Result<PathBuf, String> {
+    let attachments_dir = crate::attachments::attachments_dir(surface_record_dir);
+    std::fs::create_dir_all(&attachments_dir)
+        .map_err(|e| format!("failed to create {}: {e}", attachments_dir.display()))?;
+    canonicalize_attachments_dir(&attachments_dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonicalize_attachments_dir_errors_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist").join("attachments");
+        let err = canonicalize_attachments_dir(&missing).unwrap_err();
+        assert!(
+            err.contains(&missing.display().to_string()),
+            "expected error to name missing path, got: {err}"
+        );
+        assert!(err.contains("canonicalize"), "unexpected error: {err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonicalize_attachments_dir_errors_on_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let dangling = dir.path().join("attachments");
+        std::os::unix::fs::symlink(dir.path().join("missing-target"), &dangling).unwrap();
+        let err = canonicalize_attachments_dir(&dangling).unwrap_err();
+        assert!(
+            err.contains(&dangling.display().to_string()),
+            "expected error to name symlink path, got: {err}"
+        );
+        assert!(err.contains("canonicalize"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn prepare_attachments_dir_errors_when_attachments_path_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = crate::attachments::attachments_dir(dir.path());
+        std::fs::write(&blocker, b"not a dir").unwrap();
+        let err = prepare_attachments_dir(dir.path()).unwrap_err();
+        assert!(
+            err.contains(&blocker.display().to_string()),
+            "expected error to name path, got: {err}"
+        );
     }
 }

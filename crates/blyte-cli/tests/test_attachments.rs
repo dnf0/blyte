@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{BaseCheck, Budget, Runner};
+use blyte_agent::sandbox;
 use blyte_agent::shell::{LocalShell, Output, Shell};
 use blyte_agent::state::State;
 use blyte_cli::attachments::{
@@ -17,8 +18,9 @@ use blyte_cli::attachments::{
 };
 use blyte_cli::cli::SurfaceArgs;
 use blyte_cli::repl::ReplConfig;
-use blyte_cli::serve::run_with_runner;
-use blyte_cli::session::{Entry, EntryBody, Paste, PromptRunner, Session};
+use blyte_cli::serve::{run_with_runner, run_with_runner_factory};
+use blyte_cli::session::{AgentRunner, Entry, EntryBody, Paste, PromptRunner, Session};
+use blyte_cli::task_runner::{build_local_shell, build_sandbox_profile, TaskConfig};
 use blyte_provider::{Message, Provider, ProviderError, Request, Response, UserPart};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -50,6 +52,8 @@ impl Drop for StateDirGuard {
             None => std::env::remove_var("XDG_STATE_HOME"),
         }
         blyte_agent::tools::set_read_roots(self.prev_roots.clone());
+        blyte_agent::tools::set_write_scope(None);
+        blyte_agent::tools::set_approval(None);
     }
 }
 
@@ -872,6 +876,69 @@ fn the_file_name_is_sanitised() {
     assert_eq!(loaded_bytes, png);
 }
 
+fn start_surface_with_agent_runner(root: &Path) -> (RunningSurface, TaskConfig) {
+    let out_buf = Arc::new(Mutex::new(Vec::new()));
+    let err_buf = Arc::new(Mutex::new(Vec::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let captured_task_cfg: Arc<Mutex<Option<TaskConfig>>> = Arc::new(Mutex::new(None));
+    let root_bg = root.to_path_buf();
+    let out_bg = Arc::clone(&out_buf);
+    let err_bg = Arc::clone(&err_buf);
+    let stop_bg = Arc::clone(&stop);
+    let captured_bg = Arc::clone(&captured_task_cfg);
+    let args = default_surface_args();
+    let handle = std::thread::spawn(move || {
+        let cfg = default_repl_config(root_bg);
+        let mut out = SharedBuf(out_bg);
+        let mut err = SharedBuf(err_bg);
+        let mut opener = |_: &str| {};
+        run_with_runner_factory(
+            &args,
+            cfg,
+            &mut out,
+            &mut err,
+            &mut opener,
+            stop_bg,
+            Box::new(move |cfg, approver| {
+                let runner = AgentRunner::try_new(cfg, approver)?;
+                let task_cfg = runner.task_config_for_prompt("check attachment");
+                *captured_bg.lock().unwrap() = Some(task_cfg);
+                let tmpdir = runner.private_tmpdir().map(Path::to_path_buf);
+                Ok((Box::new(runner) as Box<dyn PromptRunner>, tmpdir))
+            }),
+        )
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (_name, port, token) = loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for printed surface URL; stderr={}",
+            String::from_utf8_lossy(&err_buf.lock().unwrap())
+        );
+        let stdout = String::from_utf8(out_buf.lock().unwrap().clone()).unwrap();
+        if let Some(parsed) = stdout.lines().find_map(parse_surface_ready_line) {
+            break parsed;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+
+    let task_cfg = captured_task_cfg
+        .lock()
+        .unwrap()
+        .take()
+        .expect("AgentRunner factory did not run");
+    (
+        RunningSurface {
+            port,
+            token,
+            stop,
+            handle: Some(handle),
+        },
+        task_cfg,
+    )
+}
+
 #[test]
 fn a_saved_attachment_is_inside_the_read_roots() {
     for is_git in [true, false] {
@@ -882,8 +949,7 @@ fn a_saved_attachment_is_inside_the_read_roots() {
             init_git_repo(root.path());
         }
 
-        let (runner, _) = ScriptedAgentRunner::new(root.path().to_path_buf());
-        let surface = start_surface(root.path(), Box::new(runner));
+        let (surface, task_cfg) = start_surface_with_agent_runner(root.path());
 
         let upload = post_attachment(&surface, "spec.txt", b"attachment content\n");
         assert_eq!(upload.status, 200, "{}", upload.text());
@@ -898,6 +964,14 @@ fn a_saved_attachment_is_inside_the_read_roots() {
             "expected saved attachment under read_roots (is_git={is_git}); roots={roots:?}"
         );
         let saved_path = saved.unwrap();
+        let saved_dir = saved_path.parent().unwrap();
+        assert!(
+            task_cfg.allow_read.iter().any(|p| p == saved_dir),
+            "expected AgentRunner allow_read to contain {} (is_git={is_git}); allow_read={:?}",
+            saved_dir.display(),
+            task_cfg.allow_read
+        );
+
         let out = blyte_agent::tools::execute(
             root.path(),
             &LocalShell,
@@ -911,5 +985,51 @@ fn a_saved_attachment_is_inside_the_read_roots() {
             "unexpected read output: {}",
             out.content
         );
+
+        match build_sandbox_profile(&task_cfg).unwrap() {
+            sandbox::Profile::Seatbelt(sbpl) => {
+                assert!(
+                    sbpl.contains(&format!(
+                        "(allow file-read-data (subpath \"{}\"))",
+                        saved_dir.display()
+                    )),
+                    "expected sandbox profile to allow reading {} (is_git={is_git}): {sbpl}",
+                    saved_dir.display()
+                );
+            }
+            sandbox::Profile::LandlockConfined { read, .. } => {
+                assert!(
+                    read.iter().any(|p| p == saved_dir),
+                    "expected Landlock read list to contain {} (is_git={is_git}): {read:?}",
+                    saved_dir.display()
+                );
+            }
+            sandbox::Profile::Landlock(_) | sandbox::Profile::LandlockOffline(_) => {}
+        }
+
+        if sandbox::available() {
+            let shell = build_local_shell(&task_cfg).unwrap();
+            let probe = shell
+                .exec(
+                    &format!("cat '{}'", saved_path.display()),
+                    root.path(),
+                    Duration::from_secs(30),
+                )
+                .unwrap();
+            if !(probe.exit_code == 71 && probe.merged().contains("Operation not permitted")) {
+                assert_eq!(
+                    probe.exit_code,
+                    0,
+                    "sandboxed shell failed to read {} (is_git={is_git}): {}",
+                    saved_path.display(),
+                    probe.merged()
+                );
+                assert!(
+                    probe.stdout.contains("attachment content"),
+                    "unexpected sandboxed shell output (is_git={is_git}): {}",
+                    probe.stdout
+                );
+            }
+        }
     }
 }

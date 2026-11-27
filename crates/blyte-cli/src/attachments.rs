@@ -69,6 +69,10 @@ pub fn attachments_dir(record_dir: &Path) -> PathBuf {
 }
 
 pub fn store(dir: &Path, name: &str, bytes: &[u8]) -> Result<Meta, String> {
+    store_with_lock(&STORE_LOCK, dir, name, bytes)
+}
+
+fn store_with_lock(lock: &Mutex<()>, dir: &Path, name: &str, bytes: &[u8]) -> Result<Meta, String> {
     let sanitised = sanitise_name(name)?;
     if bytes.is_empty() {
         return Err(format!("{sanitised} is empty"));
@@ -79,7 +83,9 @@ pub fn store(dir: &Path, name: &str, bytes: &[u8]) -> Result<Meta, String> {
         ));
     }
 
-    let _guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = lock
+        .lock()
+        .map_err(|_| format!("attachment store lock is poisoned while storing {sanitised}"))?;
     let dest_dir = attachments_dir(dir);
     fs::create_dir_all(&dest_dir)
         .map_err(|e| format!("failed to create {}: {e}", dest_dir.display()))?;
@@ -169,7 +175,13 @@ pub fn load_with_path(dir: &Path, id: &str) -> Result<(Meta, PathBuf, Vec<u8>), 
     let Some((name, path)) = matched else {
         return Err(format!("unknown attachment id: {id}"));
     };
-    let bytes = match File::open(&path).and_then(|mut f| {
+    let abs_path = fs::canonicalize(&path).map_err(|e| {
+        format!(
+            "failed to canonicalize attachment {id} at {}: {e}",
+            path.display()
+        )
+    })?;
+    let bytes = match File::open(&abs_path).and_then(|mut f| {
         let mut buf = Vec::new();
         std::io::Read::read_to_end(&mut f, &mut buf)?;
         Ok(buf)
@@ -177,7 +189,6 @@ pub fn load_with_path(dir: &Path, id: &str) -> Result<(Meta, PathBuf, Vec<u8>), 
         Ok(b) => b,
         Err(e) => return Err(format!("attachment {id} is missing or unreadable: {e}")),
     };
-    let abs_path = fs::canonicalize(&path).unwrap_or(path);
     let (mime_type, image) = mime_type_for(&bytes);
     let meta = Meta {
         id: id.to_string(),
@@ -315,5 +326,33 @@ mod tests {
         let (loaded, bytes) = load(dir.path(), "a10").unwrap();
         assert_eq!(loaded, m3);
         assert_eq!(bytes, b"three");
+    }
+
+    #[test]
+    fn store_errors_when_lock_is_poisoned() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = std::sync::Arc::new(Mutex::new(()));
+        let lock_bg = std::sync::Arc::clone(&lock);
+        let _ = std::thread::spawn(move || {
+            let _guard = lock_bg.lock().unwrap();
+            panic!("poison test lock");
+        })
+        .join();
+        let err = store_with_lock(&lock, dir.path(), "note.txt", b"hello").unwrap_err();
+        assert!(err.contains("poisoned"), "unexpected error: {err}");
+        assert!(err.contains("note.txt"), "unexpected error: {err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_with_path_errors_when_canonicalize_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = attachments_dir(dir.path());
+        fs::create_dir_all(&dest).unwrap();
+        let dangling = dest.join("a1-dangling.txt");
+        std::os::unix::fs::symlink(dir.path().join("does-not-exist.txt"), &dangling).unwrap();
+        let err = load_with_path(dir.path(), "a1").unwrap_err();
+        assert!(err.contains("a1"), "unexpected error: {err}");
+        assert!(err.contains("canonicalize"), "unexpected error: {err}");
     }
 }

@@ -632,6 +632,10 @@ impl AgentRunner {
     pub fn private_tmpdir(&self) -> Option<&std::path::Path> {
         self.repl.private_tmpdir()
     }
+
+    pub fn task_config_for_prompt(&self, prompt: &str) -> crate::task_runner::TaskConfig {
+        self.repl.task_config_for_prompt(prompt)
+    }
 }
 
 impl PromptRunner for AgentRunner {
