@@ -566,6 +566,16 @@ pub trait PromptRunner: Send + 'static {
         model: &str,
         emit: &(dyn Fn(EntryBody) + Sync),
     ) -> Result<(), String>;
+
+    fn run_with_first_output(
+        &mut self,
+        prompt: &str,
+        model: &str,
+        emit: &(dyn Fn(EntryBody) + Sync),
+        _on_first_output: &(dyn Fn(Instant) + Sync),
+    ) -> Result<(), String> {
+        self.run(prompt, model, emit)
+    }
 }
 
 pub struct AgentRunner {
@@ -603,6 +613,16 @@ impl PromptRunner for AgentRunner {
         model: &str,
         emit: &(dyn Fn(EntryBody) + Sync),
     ) -> Result<(), String> {
+        self.run_with_first_output(prompt, model, emit, &|_| {})
+    }
+
+    fn run_with_first_output(
+        &mut self,
+        prompt: &str,
+        model: &str,
+        emit: &(dyn Fn(EntryBody) + Sync),
+        on_first_output: &(dyn Fn(Instant) + Sync),
+    ) -> Result<(), String> {
         self.repl.model = model.to_string();
         self.repl.state.brief.goal = prompt.to_string();
         if let Some(ref gate) = self.repl.gate {
@@ -611,6 +631,9 @@ impl PromptRunner for AgentRunner {
         let task_config = self.repl.task_config_for_prompt(prompt);
         let pricing = blyte_provider::pricing(model);
         let on_event = |event: &blyte_agent::run::Event<'_>| match event {
+            blyte_agent::run::Event::FirstOutput { at } => {
+                on_first_output(*at);
+            }
             blyte_agent::run::Event::Turn { n, text, usage } => {
                 emit(EntryBody::Turn {
                     n: *n,
@@ -1084,10 +1107,28 @@ pub struct Session {
     guard: Arc<SessionGuard>,
 }
 
+#[derive(Debug)]
 struct TurnTotals {
     turns: u32,
     cost_usd: Option<f64>,
     first_output: Option<Instant>,
+}
+
+impl TurnTotals {
+    fn record_first_output(&mut self, at: Instant) {
+        self.first_output = Some(match self.first_output {
+            Some(prev) => prev.min(at),
+            None => at,
+        });
+    }
+}
+
+fn lock_turn_totals(
+    totals: &Mutex<TurnTotals>,
+) -> Result<std::sync::MutexGuard<'_, TurnTotals>, String> {
+    totals
+        .lock()
+        .map_err(|_| "turn totals mutex is poisoned".to_string())
 }
 
 impl Session {
@@ -1517,25 +1558,34 @@ fn worker_loop(mut runner: Box<dyn PromptRunner>, shared: Arc<Shared>) {
             cost_usd: Some(0.0),
             first_output: None,
         });
+        let record_first_output = |at: Instant| {
+            let mut t = match lock_turn_totals(&totals) {
+                Ok(guard) => guard,
+                Err(err) => panic!("{err}"),
+            };
+            t.record_first_output(at);
+        };
         let emit_shared = Arc::clone(&shared);
         let emit = |body: EntryBody| {
             match &body {
                 EntryBody::Turn { cost_usd, .. } => {
-                    let mut t = totals.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut t = match lock_turn_totals(&totals) {
+                        Ok(guard) => guard,
+                        Err(err) => panic!("{err}"),
+                    };
                     t.turns += 1;
                     match (t.cost_usd, cost_usd) {
                         (Some(acc), Some(c)) => t.cost_usd = Some(acc + c),
                         _ => t.cost_usd = None,
                     }
-                    if t.first_output.is_none() {
-                        t.first_output = Some(Instant::now());
-                    }
+                    t.record_first_output(Instant::now());
                 }
                 EntryBody::ToolStarted { .. } => {
-                    let mut t = totals.lock().unwrap_or_else(|e| e.into_inner());
-                    if t.first_output.is_none() {
-                        t.first_output = Some(Instant::now());
-                    }
+                    let mut t = match lock_turn_totals(&totals) {
+                        Ok(guard) => guard,
+                        Err(err) => panic!("{err}"),
+                    };
+                    t.record_first_output(Instant::now());
                 }
                 _ => {}
             }
@@ -1546,15 +1596,13 @@ fn worker_loop(mut runner: Box<dyn PromptRunner>, shared: Arc<Shared>) {
 
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             let _req_guard = RequestGuard::enter(msg.request_id, msg.peer);
-            runner.run(&msg.prompt, &effective_model, &emit)
+            runner.run_with_first_output(&msg.prompt, &effective_model, &emit, &record_first_output)
         }));
 
         call_activity_hook(&shared, None);
 
-        let (turns, cost_usd, first_output) = {
-            let t = totals.lock().unwrap_or_else(|e| e.into_inner());
-            (t.turns, t.cost_usd, t.first_output)
-        };
+        let totals_result =
+            lock_turn_totals(&totals).map(|t| (t.turns, t.cost_usd, t.first_output));
 
         let mut state = shared.lock_state();
         match outcome {
@@ -1567,6 +1615,13 @@ fn worker_loop(mut runner: Box<dyn PromptRunner>, shared: Arc<Shared>) {
                 state.push_entry(EntryBody::Error { message });
             }
         }
+        let (turns, cost_usd, first_output) = match totals_result {
+            Ok(values) => values,
+            Err(message) => {
+                state.push_entry(EntryBody::Error { message });
+                (0, None, None)
+            }
+        };
         let finished = Instant::now();
         let seconds = Some(round_tenth(finished.saturating_duration_since(started)));
         let first_output_seconds =
@@ -1637,4 +1692,30 @@ fn now_millis() -> u128 {
 fn new_session_prefix() -> String {
     let seq = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("r{}-{}-{}", now_millis(), std::process::id(), seq)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lock_turn_totals_fails_when_mutex_is_poisoned() {
+        let totals = Arc::new(Mutex::new(TurnTotals {
+            turns: 0,
+            cost_usd: Some(0.0),
+            first_output: None,
+        }));
+        let poisoned = Arc::clone(&totals);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("intentional poison");
+        })
+        .join();
+
+        let err = lock_turn_totals(&totals).unwrap_err();
+        assert!(
+            err.contains("turn totals") && err.contains("poisoned"),
+            "unexpected error: {err}"
+        );
+    }
 }

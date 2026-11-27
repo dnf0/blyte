@@ -1989,21 +1989,102 @@ fn seq_zero_stops_the_start() {
     assert_eq!(std::fs::read_to_string(&log_path).unwrap(), raw);
 }
 
+struct TimedStreamingRunner {
+    steps: VecDeque<TimedStep>,
+}
+
+enum TimedStep {
+    StreamedTurn {
+        delay_to_first_delta: Duration,
+        delay_after_first_delta: Duration,
+        entries: Vec<EntryBody>,
+    },
+    ToolBeforeTurn {
+        delay_to_tool: Duration,
+        delay_after_tool: Duration,
+        tool_started: Box<EntryBody>,
+        after: Vec<EntryBody>,
+    },
+    ErrorWithoutOutput {
+        delay: Duration,
+        message: String,
+    },
+}
+
+impl PromptRunner for TimedStreamingRunner {
+    fn run(
+        &mut self,
+        prompt: &str,
+        model: &str,
+        emit: &(dyn Fn(EntryBody) + Sync),
+    ) -> Result<(), String> {
+        self.run_with_first_output(prompt, model, emit, &|_| {})
+    }
+
+    fn run_with_first_output(
+        &mut self,
+        _prompt: &str,
+        _model: &str,
+        emit: &(dyn Fn(EntryBody) + Sync),
+        on_first_output: &(dyn Fn(Instant) + Sync),
+    ) -> Result<(), String> {
+        match self.steps.pop_front().expect("unexpected extra prompt") {
+            TimedStep::StreamedTurn {
+                delay_to_first_delta,
+                delay_after_first_delta,
+                entries,
+            } => {
+                std::thread::sleep(delay_to_first_delta);
+                on_first_output(Instant::now());
+                std::thread::sleep(delay_after_first_delta);
+                for body in entries {
+                    emit(body);
+                }
+                Ok(())
+            }
+            TimedStep::ToolBeforeTurn {
+                delay_to_tool,
+                delay_after_tool,
+                tool_started,
+                after,
+            } => {
+                std::thread::sleep(delay_to_tool);
+                emit(*tool_started);
+                std::thread::sleep(delay_after_tool);
+                for body in after {
+                    emit(body);
+                }
+                Ok(())
+            }
+            TimedStep::ErrorWithoutOutput { delay, message } => {
+                std::thread::sleep(delay);
+                Err(message)
+            }
+        }
+    }
+}
+
 #[test]
 fn idle_entry_records_how_long_the_reply_took() {
-    let (runner, _) = ScriptedRunner::new(vec![
-        ScriptAction::Ok(vec![EntryBody::Turn {
-            n: 1,
-            text: "done".into(),
-            input_tokens: 100,
-            output_tokens: 50,
-            cost_usd: Some(0.01),
-        }]),
-        ScriptAction::Err {
-            emit: Vec::new(),
-            message: "no output".into(),
-        },
-    ]);
+    let runner = TimedStreamingRunner {
+        steps: VecDeque::from([
+            TimedStep::StreamedTurn {
+                delay_to_first_delta: Duration::from_millis(150),
+                delay_after_first_delta: Duration::from_millis(250),
+                entries: vec![EntryBody::Turn {
+                    n: 1,
+                    text: "done".into(),
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    cost_usd: Some(0.01),
+                }],
+            },
+            TimedStep::ErrorWithoutOutput {
+                delay: Duration::from_millis(150),
+                message: "no output".into(),
+            },
+        ]),
+    };
 
     let session = Session::start(Box::new(runner), "gemini-4-neon".into());
     session.submit("first", Vec::new()).unwrap();
@@ -2014,12 +2095,9 @@ fn idle_entry_records_how_long_the_reply_took() {
             first_output_seconds: Some(f),
             ..
         } => {
-            assert!(s >= 0.0, "expected seconds >= 0.0, got {s}");
-            assert!(f >= 0.0, "expected first_output_seconds >= 0.0, got {f}");
-            assert!(
-                f <= s,
-                "expected first_output_seconds ({f}) <= seconds ({s})"
-            );
+            assert!(s >= 0.3, "expected seconds >= 0.3, got {s}");
+            assert!(f >= 0.1, "expected first_output_seconds >= 0.1, got {f}");
+            assert!(f < s, "expected first_output_seconds ({f}) < seconds ({s})");
         }
         ref other => panic!("expected Idle with reply timings, got {other:?}"),
     }
@@ -2032,11 +2110,55 @@ fn idle_entry_records_how_long_the_reply_took() {
             first_output_seconds: None,
             ..
         } => {
-            assert!(s >= 0.0, "expected seconds >= 0.0, got {s}");
+            assert!(s >= 0.1, "expected seconds >= 0.1, got {s}");
         }
         ref other => {
             panic!("expected Idle with seconds and no first_output_seconds, got {other:?}")
         }
+    }
+}
+
+#[test]
+fn idle_entry_records_first_output_on_tool_started() {
+    let runner = TimedStreamingRunner {
+        steps: VecDeque::from([TimedStep::ToolBeforeTurn {
+            delay_to_tool: Duration::from_millis(150),
+            delay_after_tool: Duration::from_millis(250),
+            tool_started: Box::new(EntryBody::ToolStarted {
+                name: "read".into(),
+                input: "Cargo.toml".into(),
+            }),
+            after: vec![
+                EntryBody::ToolFinished {
+                    name: "read".into(),
+                    summary: "ok".into(),
+                    is_error: false,
+                },
+                EntryBody::Turn {
+                    n: 1,
+                    text: "checked".into(),
+                    input_tokens: 100,
+                    output_tokens: 40,
+                    cost_usd: Some(0.01),
+                },
+            ],
+        }]),
+    };
+
+    let session = Session::start(Box::new(runner), "gemini-4-neon".into());
+    session.submit("inspect", Vec::new()).unwrap();
+    let entries = wait_for_entries(&session, 5);
+    match entries[4].body {
+        EntryBody::Idle {
+            seconds: Some(s),
+            first_output_seconds: Some(f),
+            ..
+        } => {
+            assert!(s >= 0.3, "expected seconds >= 0.3, got {s}");
+            assert!(f >= 0.1, "expected first_output_seconds >= 0.1, got {f}");
+            assert!(f < s, "expected first_output_seconds ({f}) < seconds ({s})");
+        }
+        ref other => panic!("expected Idle with tool-start first_output timing, got {other:?}"),
     }
 }
 
