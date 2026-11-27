@@ -258,6 +258,48 @@ fn read_worktree_git_data(
             ));
         }
         sha
+    } else if is_research {
+        match run_git(wt, &["rev-list", "--max-parents=0", "HEAD"]) {
+            WtGit::WorktreeGone => return Ok(None),
+            WtGit::IoErr(e) => {
+                return Err(format!(
+                    "could not run git rev-list --max-parents=0 HEAD in {}: {e}",
+                    wt.display()
+                ));
+            }
+            WtGit::Output(o) if o.status.success() => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let trimmed = stdout.trim();
+                let lines: Vec<&str> = trimmed.lines().collect();
+                match lines.as_slice() {
+                    [only] => only.trim().to_string(),
+                    [] => {
+                        return Err(format!(
+                            "cannot find the first commit of research run {id} in {}: git rev-list --max-parents=0 HEAD printed no commit",
+                            wt.display()
+                        ));
+                    }
+                    _ => {
+                        return Err(format!(
+                            "cannot find the first commit of research run {id} in {}: git rev-list --max-parents=0 HEAD printed more than one line: {trimmed}",
+                            wt.display()
+                        ));
+                    }
+                }
+            }
+            WtGit::Output(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                let detail = if stderr.is_empty() {
+                    format!("exit {}", o.status)
+                } else {
+                    stderr
+                };
+                return Err(format!(
+                    "cannot find the first commit of research run {id} in {}: {detail}",
+                    wt.display()
+                ));
+            }
+        }
     } else {
         let root_head = Command::new("git")
             .args(["rev-parse", "HEAD"])
@@ -1396,6 +1438,142 @@ mod tests {
             .expect("expected error for corrupt summary json");
         assert!(
             err.contains(&summary_path.display().to_string()),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn research_review_errors_on_rev_list_io_err_empty_and_multiline() {
+        let (d, _head) = init_repo();
+        let wt = d.path().join(".wt/R2");
+        std::fs::create_dir_all(&wt).unwrap();
+        git(&wt, &["init", "-q"]);
+        git(
+            &wt,
+            &[
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "research",
+                "--no-gpg-sign",
+            ],
+        );
+        std::fs::write(
+            d.path().join(".wt/R2.start.json"),
+            serde_json::json!({ "id": "R2", "research": true, "base_sha": serde_json::Value::Null })
+                .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join(".wt/R2.report.json"),
+            serde_json::json!({ "outcome": "budget_exhausted", "turns": 1 }).to_string(),
+        )
+        .unwrap();
+
+        let io_runner = |dir: &Path, args: &[&str]| -> WtGit {
+            if args == ["rev-list", "--max-parents=0", "HEAD"] {
+                WtGit::IoErr(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "git binary missing",
+                ))
+            } else {
+                run_git_in_wt(dir, args)
+            }
+        };
+        let io_err = compute_review_res_with_runner(d.path(), "R2", false, None, None, &io_runner)
+            .err()
+            .expect("expected IoErr")
+            .into_message();
+        assert!(
+            io_err.contains("rev-list --max-parents=0 HEAD"),
+            "got: {io_err}"
+        );
+        assert!(io_err.contains(&wt.display().to_string()), "got: {io_err}");
+        assert!(io_err.contains("git binary missing"), "got: {io_err}");
+
+        let empty_runner = |dir: &Path, args: &[&str]| -> WtGit {
+            if args == ["rev-list", "--max-parents=0", "HEAD"] {
+                let mut out = Command::new("sh").args(["-c", "exit 0"]).output().unwrap();
+                out.stdout.clear();
+                out.stderr.clear();
+                WtGit::Output(out)
+            } else {
+                run_git_in_wt(dir, args)
+            }
+        };
+        let empty_err =
+            compute_review_res_with_runner(d.path(), "R2", false, None, None, &empty_runner)
+                .err()
+                .expect("expected empty output error")
+                .into_message();
+        assert!(empty_err.contains("research run R2"), "got: {empty_err}");
+        assert!(
+            empty_err.contains(&wt.display().to_string()),
+            "got: {empty_err}"
+        );
+
+        let multi_runner = |dir: &Path, args: &[&str]| -> WtGit {
+            if args == ["rev-list", "--max-parents=0", "HEAD"] {
+                let out = Command::new("sh")
+                    .args(["-c", "printf 'aaaa1111\\nbbbb2222\\n'"])
+                    .output()
+                    .unwrap();
+                WtGit::Output(out)
+            } else {
+                run_git_in_wt(dir, args)
+            }
+        };
+        let multi_err =
+            compute_review_res_with_runner(d.path(), "R2", false, None, None, &multi_runner)
+                .err()
+                .expect("expected multi-line output error")
+                .into_message();
+        assert!(multi_err.contains("research run R2"), "got: {multi_err}");
+        assert!(
+            multi_err.contains(&wt.display().to_string()),
+            "got: {multi_err}"
+        );
+        assert!(multi_err.contains("aaaa1111"), "got: {multi_err}");
+        assert!(multi_err.contains("bbbb2222"), "got: {multi_err}");
+    }
+
+    #[test]
+    fn research_review_with_base_sha_still_checks_recorded_base_sha() {
+        let (d, _head) = init_repo();
+        let wt = d.path().join(".wt/R3");
+        std::fs::create_dir_all(&wt).unwrap();
+        git(&wt, &["init", "-q"]);
+        git(
+            &wt,
+            &[
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "research",
+                "--no-gpg-sign",
+            ],
+        );
+        let missing = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        std::fs::write(
+            d.path().join(".wt/R3.start.json"),
+            serde_json::json!({ "id": "R3", "research": true, "base_sha": missing }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join(".wt/R3.report.json"),
+            serde_json::json!({ "outcome": "budget_exhausted", "turns": 1 }).to_string(),
+        )
+        .unwrap();
+
+        let err = compute_review(d.path(), "R3", false)
+            .err()
+            .expect("expected missing base_sha error");
+        assert!(
+            err.contains(&format!(
+                "run R3 started from {missing}, which is not in this repository"
+            )),
             "got: {err}"
         );
     }
