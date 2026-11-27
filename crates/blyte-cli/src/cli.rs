@@ -609,6 +609,24 @@ pub struct Cli {
     #[arg(long)]
     pub no_gate_slot: bool,
 
+    #[arg(
+        long = "snapshot-dir",
+        hide = true,
+        value_name = "DIR",
+        requires = "snapshot_manifest",
+        conflicts_with_all = ["container", "converse"]
+    )]
+    pub snapshot_dir: Option<PathBuf>,
+
+    #[arg(
+        long = "snapshot-manifest",
+        hide = true,
+        value_name = "FILE",
+        requires = "snapshot_dir",
+        conflicts_with_all = ["container", "converse"]
+    )]
+    pub snapshot_manifest: Option<PathBuf>,
+
     /// Whether this is a research run: periodically remind the model to keep report.md updated
     #[arg(long)]
     pub research: bool,

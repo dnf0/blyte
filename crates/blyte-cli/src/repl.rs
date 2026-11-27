@@ -210,6 +210,7 @@ impl ReplSession {
             base_check_dir: None,
             converse: self.converse,
             dispatch_cmd: self.dispatch_cmd.clone(),
+            in_place: None,
         }
     }
 }

@@ -22,6 +22,13 @@ pub struct Progress {
     pub usage: blyte_provider::Usage,
 }
 
+/// Saved-originals configuration for an in-place run (`--snapshot-dir`, `--snapshot-manifest`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InPlace {
+    pub before_dir: PathBuf,
+    pub manifest: PathBuf,
+}
+
 /// Execution parameters for running an autonomous solver task to completion.
 #[derive(Debug, Clone)]
 pub struct TaskConfig {
@@ -72,6 +79,8 @@ pub struct TaskConfig {
     pub converse: bool,
     /// Command to run on the host when the conversation model delegates work via the `dispatch` tool (`--dispatch-cmd`).
     pub dispatch_cmd: Option<String>,
+    /// Saved-originals configuration when editing the workspace folder in place.
+    pub in_place: Option<InPlace>,
 }
 
 impl From<&crate::cli::Cli> for TaskConfig {
@@ -87,6 +96,14 @@ impl From<&crate::cli::Cli> for TaskConfig {
             None => "on".into(),
         };
 
+        let in_place = match (&cli.snapshot_dir, &cli.snapshot_manifest) {
+            (Some(before_dir), Some(manifest)) => Some(InPlace {
+                before_dir: before_dir.clone(),
+                manifest: manifest.clone(),
+            }),
+            _ => None,
+        };
+
         Self {
             prompt: cli.prompt.clone().unwrap_or_default(),
             gate: cli.gate.clone(),
@@ -95,7 +112,7 @@ impl From<&crate::cli::Cli> for TaskConfig {
             container: cli.container.clone(),
             max_turns: cli.max_turns,
             max_gates: cli.max_gates,
-            rollback: cli.rollback,
+            rollback: cli.rollback && in_place.is_none(),
             root,
             container_workdir: cli.container_workdir.clone(),
             max_seconds: cli.max_seconds,
@@ -112,6 +129,7 @@ impl From<&crate::cli::Cli> for TaskConfig {
             base_check_dir: cli.base_check_dir.clone(),
             converse: cli.converse,
             dispatch_cmd: cli.dispatch_cmd.clone(),
+            in_place,
         }
     }
 }
@@ -134,7 +152,7 @@ fn build_sandbox_for_root(
     config: &TaskConfig,
     root: &Path,
 ) -> Result<(blyte_agent::sandbox::Profile, Option<PathBuf>), String> {
-    if config.converse {
+    if config.converse || config.in_place.is_some() {
         let sandbox = blyte_agent::sandbox::conversation_sandbox_net(
             root,
             &config.allow_read,
@@ -270,6 +288,7 @@ impl BackgroundBaseCheck {
         deadline: Option<std::time::Instant>,
     ) -> Result<Self, String> {
         let cancel = Arc::new(blyte_agent::shell::CancelHandle::new());
+        check_in_place_sandbox(config)?;
         let shell: Box<dyn blyte_agent::shell::Shell + Send> = match &config.container {
             Some(cid) => Box::new(blyte_agent::shell::CancellableContainerShell {
                 inner: blyte_agent::shell::ContainerShell {
@@ -395,9 +414,37 @@ impl Drop for BackgroundBaseCheck {
     }
 }
 
+pub fn check_in_place_sandbox(config: &TaskConfig) -> Result<(), String> {
+    if config.in_place.is_some() {
+        if config.container.is_some() {
+            return Err(
+                "in-place runs need the sandbox: --container cannot be used with in-place runs"
+                    .into(),
+            );
+        }
+        if config.sandbox != "on" {
+            return Err(format!(
+                "in-place runs need the sandbox: --sandbox is '{}'",
+                config.sandbox
+            ));
+        }
+        if !blyte_agent::sandbox::available() {
+            return Err("in-place runs need the sandbox: sandbox is unavailable".into());
+        }
+    }
+    Ok(())
+}
+
 pub fn build_local_shell(
     config: &TaskConfig,
 ) -> Result<blyte_agent::shell::PersistentShell, String> {
+    Ok(build_local_shell_with_tmpdir(config)?.0)
+}
+
+fn build_local_shell_with_tmpdir(
+    config: &TaskConfig,
+) -> Result<(blyte_agent::shell::PersistentShell, Option<PathBuf>), String> {
+    check_in_place_sandbox(config)?;
     if config.sandbox == "on" {
         if blyte_agent::sandbox::available() {
             let (profile, tmpdir) = build_sandbox_for_root(config, &config.root)?;
@@ -423,30 +470,35 @@ pub fn build_local_shell(
             }
             let shell =
                 blyte_agent::shell::PersistentShell::local_sandboxed(config.root.clone(), profile)
-                    .with_tmpdir(tmpdir);
+                    .with_tmpdir(tmpdir.clone());
             if config.converse {
                 let root = config.root.clone();
                 let allow_read = config.allow_read.clone();
                 let network = config.network == "on";
-                Ok(shell.with_profile_builder(Arc::new(move || {
-                    blyte_agent::sandbox::conversation_profile_for_open_edits(
-                        &root,
-                        &allow_read,
-                        network,
-                    )
-                })))
+                Ok((
+                    shell.with_profile_builder(Arc::new(move || {
+                        blyte_agent::sandbox::conversation_profile_for_open_edits(
+                            &root,
+                            &allow_read,
+                            network,
+                        )
+                    })),
+                    tmpdir,
+                ))
             } else {
-                Ok(shell)
+                Ok((shell, tmpdir))
             }
         } else {
             eprintln!("warning: sandbox unavailable; running unsandboxed");
-            Ok(blyte_agent::shell::PersistentShell::local(
-                config.root.clone(),
+            Ok((
+                blyte_agent::shell::PersistentShell::local(config.root.clone()),
+                None,
             ))
         }
     } else {
-        Ok(blyte_agent::shell::PersistentShell::local(
-            config.root.clone(),
+        Ok((
+            blyte_agent::shell::PersistentShell::local(config.root.clone()),
+            None,
         ))
     }
 }
@@ -839,6 +891,7 @@ fn run_task_with_event_callback(
     on_event: &dyn Fn(&blyte_agent::run::Event<'_>),
 ) -> Result<(blyte_agent::run::Outcome, blyte_agent::run::RunReport), String> {
     check_network_mode(config)?;
+    check_in_place_sandbox(config)?;
     let started = std::time::Instant::now();
     let _one_shot_tmp_guard = if config.converse {
         if std::env::var("BLYTE_SESSION")
@@ -929,6 +982,16 @@ fn run_task_with_event_callback(
     // and `export` carry over). Container files go through a session too. Each falls back to a
     // process per command if a session cannot start.
     let local_fs = blyte_agent::fs::LocalFs;
+    let snapshot_fs = match &config.in_place {
+        Some(in_place) => Some(blyte_agent::snapshot_fs::SnapshotFs::new(
+            blyte_agent::fs::LocalFs,
+            config.root.clone(),
+            in_place.before_dir.clone(),
+            in_place.manifest.clone(),
+        )?),
+        None => None,
+    };
+    let mut _in_place_tmp_guard = TempDirGuard(None);
     let (persistent, session_fs, root) = match &config.container {
         Some(cid) => (
             blyte_agent::shell::PersistentShell::container(
@@ -955,14 +1018,18 @@ fn run_task_with_event_callback(
                     withheld.join(", ")
                 );
             }
-            let shell = build_local_shell(config)?;
+            let (shell, tmpdir) = build_local_shell_with_tmpdir(config)?;
+            if config.in_place.is_some() {
+                _in_place_tmp_guard.0 = tmpdir;
+            }
             (shell, None, config.root.clone())
         }
     };
     let shell: &dyn blyte_agent::shell::Shell = &persistent;
-    let fs: &dyn blyte_agent::fs::Fs = match &session_fs {
-        Some(f) => f,
-        None => &local_fs,
+    let fs: &dyn blyte_agent::fs::Fs = match (&session_fs, &snapshot_fs) {
+        (Some(f), _) => f,
+        (None, Some(f)) => f,
+        (None, None) => &local_fs,
     };
 
     let usage_path = crate::usage_log::default_path();
@@ -1023,14 +1090,20 @@ fn run_task_with_event_callback(
             max_gate_attempts: config.max_gates as u32,
             max_duration,
         },
-        rollback: config.rollback,
+        rollback: config.rollback && config.in_place.is_none(),
         on_event: Some(&runner_on_event),
         research: config.research,
         claim_check: config.claim_check,
         base_check,
     };
 
-    let (outcome, report) = runner.run(state);
+    let (mut outcome, report) = runner.run(state);
+    if config.in_place.is_some()
+        && state.brief.verification_cmd.trim().is_empty()
+        && matches!(outcome, blyte_agent::run::Outcome::Verified)
+    {
+        outcome = blyte_agent::run::Outcome::Finished;
+    }
     drop(bg_base_check);
 
     if let Some(path) = &usage_path {
@@ -1185,6 +1258,7 @@ mod tests {
             base_check_dir: None,
             converse: false,
             dispatch_cmd: None,
+            in_place: None,
         }
     }
 

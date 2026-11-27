@@ -113,6 +113,7 @@ fn make_config(root: PathBuf, model: &str) -> TaskConfig {
         base_check_dir: None,
         converse: false,
         dispatch_cmd: None,
+        in_place: None,
     }
 }
 

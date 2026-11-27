@@ -35,6 +35,7 @@ fn config() -> TaskConfig {
         base_check_dir: None,
         converse: false,
         dispatch_cmd: None,
+        in_place: None,
     }
 }
 
