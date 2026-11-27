@@ -1,3 +1,9 @@
+## v0.72.0 (2026-11-27)
+
+### Feat
+
+- **surface**: a multi-line chat box that sends on Return and grows as you type (#450)
+
 ## v0.71.0 (2026-11-27)
 
 ### Feat
