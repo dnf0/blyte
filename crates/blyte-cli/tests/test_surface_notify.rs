@@ -19,7 +19,7 @@ struct StateHomeGuard {
 
 impl StateHomeGuard {
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = repo_dir();
         let prev = std::env::var_os("XDG_STATE_HOME");
         std::env::set_var("XDG_STATE_HOME", dir.path());
         Self { prev, _dir: dir }
@@ -40,6 +40,18 @@ fn write_file(path: &Path, content: &str) {
         std::fs::create_dir_all(parent).unwrap();
     }
     std::fs::write(path, content).unwrap();
+}
+
+/// A temporary git repository: its run records live in `.wt`.
+fn repo_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let status = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "git init failed");
+    dir
 }
 
 fn write_start_record(root: &Path, id: &str, surface: Option<&str>) {
@@ -108,7 +120,7 @@ fn spawn_single_response_listener(
 fn start_record_with_null_surface_is_no_surface() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _state = StateHomeGuard::new();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = repo_dir();
     write_start_record(dir.path(), "T1", None);
 
     let outcome = notify_runs_changed(dir.path(), "T1");
@@ -123,7 +135,7 @@ fn start_record_with_null_surface_is_no_surface() {
 fn missing_start_record_is_failed() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _state = StateHomeGuard::new();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = repo_dir();
 
     let outcome = notify_runs_changed(dir.path(), "T_MISSING");
     match outcome {
@@ -141,7 +153,7 @@ fn missing_start_record_is_failed() {
 fn a_running_surface_is_told() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _state = StateHomeGuard::new();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = repo_dir();
     let sid = "s0123456789abcdef";
     let token = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
     let (port, recorded, handle) = spawn_single_response_listener("HTTP/1.1 202 Accepted", "{}");
@@ -179,7 +191,7 @@ fn a_running_surface_is_told() {
 fn two_surfaces_only_the_owner_is_told() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _state = StateHomeGuard::new();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = repo_dir();
 
     let sid1 = "s1111111111111111";
     let sid2 = "s2222222222222222";
@@ -221,7 +233,7 @@ fn two_surfaces_only_the_owner_is_told() {
 fn start_record_naming_missing_surface_directory_is_failed() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _state = StateHomeGuard::new();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = repo_dir();
     let sid = "sdeadbeefcafebabe";
     write_start_record(dir.path(), "T_NODIR", Some(sid));
 
@@ -241,7 +253,7 @@ fn start_record_naming_missing_surface_directory_is_failed() {
 fn record_present_without_token_file_is_no_surface() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _state = StateHomeGuard::new();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = repo_dir();
     let sid = "sabcdef0123456789";
     write_start_record(dir.path(), "T_STOPPED", Some(sid));
     write_surface_files(dir.path(), sid, "demo", 12345, None);
@@ -254,7 +266,7 @@ fn record_present_without_token_file_is_no_surface() {
 fn a_dead_surface_is_reported_not_fatal() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _state = StateHomeGuard::new();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = repo_dir();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let dead_port = listener.local_addr().unwrap().port();
     drop(listener);
@@ -297,7 +309,7 @@ fn a_dead_surface_is_reported_not_fatal() {
 fn an_unreadable_surface_file_is_reported() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _state = StateHomeGuard::new();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = repo_dir();
     let sid = "saaaa1111bbbb2222";
     write_start_record(dir.path(), "T3", Some(sid));
     let surface_path = dir
@@ -327,7 +339,7 @@ fn an_unreadable_surface_file_is_reported() {
 fn a_wrong_token_is_reported() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _state = StateHomeGuard::new();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = repo_dir();
     let sid = "scccc3333dddd4444";
     let secret_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     let (port, _recorded, handle) =

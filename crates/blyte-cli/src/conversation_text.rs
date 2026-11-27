@@ -9,7 +9,9 @@ pub const REFERENCE_DISPATCH_TOOL: &str =
 pub const DEFAULT_PROCESS: &str = include_str!("../assets/conversation/process.md");
 
 pub const SANDBOX_ON_PARAGRAPH: &str = "The shell is sandboxed: the shell and the write tools can write only in `.wt/tasks` and temporary directories,\ncannot read credentials and have no network. The shell and the write tools can also write in the worktree of an\nopen edit started with `blyte edit-start`, until it finishes; `git commit` there is not possible (`edit-finish`\ncommits). A command that must leave the sandbox (for example a package install) takes `unsandboxed` with a reason and\nruns only when the user approves, and a write or edit outside those directories also needs the user's approval.\nTo publish a request, use the `publish` tool; it runs only when the user approves it on the page.";
+pub const SANDBOX_ON_NO_REPO_PARAGRAPH: &str = "The shell is sandboxed: the shell and the write tools can write only in temporary directories, cannot read\ncredentials and have no network. Files in this folder are read-only without the user's approval, and writes are\nrefused while an in-place run is editing it. To hand work off, call `blyte` with `dispatch` and the `task`\nargument (do not write task files yourself). A command that must leave the sandbox (for example a package\ninstall) takes `unsandboxed` with a reason and runs only when the user approves, and a write or edit in the\nfolder also needs the user's approval.";
 pub const SANDBOX_OFF_PARAGRAPH: &str = "The shell is not sandboxed.";
+pub const SANDBOX_OFF_NO_REPO_PARAGRAPH: &str = "The shell is not sandboxed. Writes to this folder are refused while an in-place run is editing it; hand work\noff with `blyte` (`dispatch` and the `task` argument).";
 
 pub fn sandbox_start_line(sandbox_on: bool, allowed_in_advance: usize) -> String {
     if sandbox_on {
@@ -45,10 +47,12 @@ pub fn build_with_sandbox(
         );
         (REFERENCE, Some(sandbox_off_process.as_str()))
     };
-    let sandbox_paragraph = if sandbox_on {
-        SANDBOX_ON_PARAGRAPH
-    } else {
-        SANDBOX_OFF_PARAGRAPH
+    let is_repo = blyte_agent::sandbox::is_git_repository(root);
+    let sandbox_paragraph = match (sandbox_on, is_repo) {
+        (true, true) => SANDBOX_ON_PARAGRAPH,
+        (true, false) => SANDBOX_ON_NO_REPO_PARAGRAPH,
+        (false, true) => SANDBOX_OFF_PARAGRAPH,
+        (false, false) => SANDBOX_OFF_NO_REPO_PARAGRAPH,
     };
     let reference = format!("{}\n\n{sandbox_paragraph}", base_reference.trim());
     let user_path = user_rules_path();

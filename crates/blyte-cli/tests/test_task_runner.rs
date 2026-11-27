@@ -103,6 +103,7 @@ fn test_run_task_missing_api_key_returns_clear_error() {
         base_check_dir: None,
         converse: false,
         dispatch_cmd: None,
+        in_place: None,
     };
 
     let result = run_task(config);
@@ -147,6 +148,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         base_check_dir: None,
         converse: false,
         dispatch_cmd: None,
+        in_place: None,
     };
 
     let err = run_task(anthropic_config).unwrap_err();
@@ -180,6 +182,7 @@ fn test_run_task_missing_api_key_for_specified_provider() {
         base_check_dir: None,
         converse: false,
         dispatch_cmd: None,
+        in_place: None,
     };
 
     let err = run_task(ollama_config).unwrap_err();
@@ -224,6 +227,7 @@ fn test_run_task_with_state_and_writer_preserves_state() {
         base_check_dir: None,
         converse: false,
         dispatch_cmd: None,
+        in_place: None,
     };
 
     let mut state = blyte_agent::state::State::new("custom goal", "echo 1");
@@ -359,6 +363,7 @@ fn test_run_task_with_state_and_events_emits_turn() {
         base_check_dir: None,
         converse: false,
         dispatch_cmd: None,
+        in_place: None,
     };
 
     let mut state = blyte_agent::state::State::new("say done", "");

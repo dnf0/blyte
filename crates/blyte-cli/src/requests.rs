@@ -359,17 +359,21 @@ fn check_request_ownership(
     }
 }
 
-pub fn owned_run_ids(surface: &Surface) -> Result<HashSet<String>, String> {
-    let wt_dir = surface.root.join(".wt");
-    let entries = list_start_files(&wt_dir)?;
+pub fn owned_run_ids_in(records_dir: &Path, surface_id: &str) -> Result<HashSet<String>, String> {
+    let entries = list_start_files(records_dir)?;
     let mut ids = HashSet::new();
     for path in entries {
-        let info = parse_start_file(&wt_dir, &path)?;
-        if info.surface.as_deref() == Some(surface.surface_id.as_str()) {
+        let info = parse_start_file(records_dir, &path)?;
+        if info.surface.as_deref() == Some(surface_id) {
             ids.insert(info.id);
         }
     }
     Ok(ids)
+}
+
+pub fn owned_run_ids(surface: &Surface) -> Result<HashSet<String>, String> {
+    let wt_dir = surface.root.join(".wt");
+    owned_run_ids_in(&wt_dir, &surface.surface_id)
 }
 
 pub fn request_owner_check(surface: &Surface, request: &str) -> Result<(), RequestActionError> {
@@ -390,17 +394,20 @@ pub fn request_owner_check(surface: &Surface, request: &str) -> Result<(), Reque
     }
 }
 
-pub(crate) fn run_owner_check(surface: &Surface, run_id: &str) -> Result<(), RequestActionError> {
-    let wt_dir = surface.root.join(".wt");
-    let path = wt_dir.join(format!("{run_id}.start.json"));
+pub(crate) fn run_owner_check_in(
+    records_dir: &Path,
+    surface_id: &str,
+    run_id: &str,
+) -> Result<(), RequestActionError> {
+    let path = records_dir.join(format!("{run_id}.start.json"));
     if !path.exists() {
         return Err(RequestActionError::NotOwned(format!(
             "run {run_id} was not started by a surface"
         )));
     }
-    let info = parse_start_file(&wt_dir, &path).map_err(RequestActionError::Internal)?;
+    let info = parse_start_file(records_dir, &path).map_err(RequestActionError::Internal)?;
     match info.surface.as_deref() {
-        Some(owner) if owner == surface.surface_id => Ok(()),
+        Some(owner) if owner == surface_id => Ok(()),
         Some(_) => Err(RequestActionError::NotOwned(format!(
             "run {run_id} belongs to another surface"
         ))),
@@ -408,6 +415,11 @@ pub(crate) fn run_owner_check(surface: &Surface, run_id: &str) -> Result<(), Req
             "run {run_id} was not started by a surface"
         ))),
     }
+}
+
+pub(crate) fn run_owner_check(surface: &Surface, run_id: &str) -> Result<(), RequestActionError> {
+    let wt_dir = surface.root.join(".wt");
+    run_owner_check_in(&wt_dir, &surface.surface_id, run_id)
 }
 
 pub fn run_request_id(root: &Path, run_id: &str) -> Result<Option<String>, String> {

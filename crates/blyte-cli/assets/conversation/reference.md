@@ -3,15 +3,19 @@ These are facts about blyte's commands. They say what each command does, not how
 ### Dispatching a task
 
 The `blyte` tool runs blyte's own commands (`dispatch`, `wait`, `status`, `review`, `plan`, `init`,
-`clean`, `edit-start`, `edit-finish`) on the host in the repository's main checkout. Commands below
-are written as command lines; the words after `blyte` are passed as `args`. Both `blyte` and
-`publish` need a git repository; when the folder is not a git repository they refuse without
-creating files, and work once `git init` has been run.
+`clean`, `edit-start`, `edit-finish`) on the host. Commands below are written as command lines;
+the words after `blyte` are passed as `args`. When the folder is not a git repository, `blyte`
+allows `dispatch`, `wait`, `status` and `review` and refuses the rest (and `publish` refuses).
+In that folder, runs edit the folder in place one at a time, research runs also work, review a
+run's changes with `blyte review <id>`, and the user can reverse them with `blyte undo <id>`
+(for the user to run, not the tool).
 
 `blyte dispatch <id> <task.md>` starts one implementer on one task, in its own git worktree at
-`.wt/<id>` on a branch `wip/<id>`. The implementer sees only the task text and the repository. A
-dispatch takes minutes. Task and question files go in `.wt/tasks/<name>.md`; writes elsewhere need
-the user's approval.
+`.wt/<id>` on a branch `wip/<id>` (or in place when the folder is not a repository). Passing
+`task` to the `blyte` tool writes the task text to the tasks directory and passes that path for
+you, instead of a task file path. The implementer sees only the task text and the workspace. A
+dispatch takes minutes. In a repository, task and question files go in `.wt/tasks/<name>.md`;
+writes elsewhere need the user's approval.
 
 - `--plan <plan.md> --plan-task "Task <ID>"` takes the task from the plan section headed
   `### Task <ID>: …`, with no task file. Dispatch refuses a heading it cannot find. The implementer

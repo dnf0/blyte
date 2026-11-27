@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use blyte_agent::sandbox::validate_surface_id;
+use blyte_agent::sandbox::{is_git_repository, validate_surface_id};
 use serde::{Deserialize, Serialize};
 
 const PROBE_TIMEOUT: Duration = Duration::from_millis(300);
@@ -178,7 +178,38 @@ pub fn folder_store(state_dir: &Path, root: &Path) -> Result<PathBuf, String> {
     Ok(store_dir)
 }
 
-fn existing_folder_store(state_dir: &Path, root: &Path) -> Result<Option<PathBuf>, String> {
+pub fn run_store(state_dir: &Path, root: &Path) -> Result<PathBuf, String> {
+    if is_git_repository(root) {
+        return Ok(root.join(".wt"));
+    }
+    let dir = folder_store(state_dir, root)?.join("runs");
+    ensure_dir_0700(&dir)?;
+    Ok(dir)
+}
+
+pub fn tasks_dir(state_dir: &Path, root: &Path) -> Result<PathBuf, String> {
+    if is_git_repository(root) {
+        return Ok(root.join(".wt").join("tasks"));
+    }
+    let dir = folder_store(state_dir, root)?.join("tasks");
+    ensure_dir_0700(&dir)?;
+    Ok(dir)
+}
+
+pub fn in_place_lock_path(state_dir: &Path, root: &Path) -> Result<PathBuf, String> {
+    if is_git_repository(root) {
+        return Err(format!(
+            "in-place runs are for folders that are not git repositories: {}",
+            root.display()
+        ));
+    }
+    Ok(folder_store(state_dir, root)?.join("in-place.lock"))
+}
+
+pub(crate) fn existing_folder_store(
+    state_dir: &Path,
+    root: &Path,
+) -> Result<Option<PathBuf>, String> {
     let canonical = match root.canonicalize() {
         Ok(c) => c,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),

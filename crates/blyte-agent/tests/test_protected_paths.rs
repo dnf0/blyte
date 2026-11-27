@@ -388,7 +388,7 @@ fn read_refuses_the_surface_token_folder() {
 }
 
 #[test]
-fn write_into_blyte_state_asks_for_approval() {
+fn write_into_blyte_state_is_refused() {
     let home = tempfile::tempdir().unwrap();
     let _guard = EnvGuard::set(Some(home.path()), None, None);
 
@@ -418,17 +418,12 @@ fn write_into_blyte_state_asks_for_approval() {
         &json!({ "path": ".local/state/blyte/x", "content": "nope\n" }),
     );
     assert!(refused.is_error, "{}", refused.content);
-    assert!(
-        refused
-            .content
-            .contains("inside blyte's own state or configuration"),
-        "{}",
-        refused.content
+    assert_eq!(
+        refused.content,
+        "write: .local/state/blyte/x is protected (blyte's own files); blyte does not write there"
     );
     assert!(!home.path().join(".local/state/blyte/x").exists());
-    let calls = approver.take_calls();
-    assert_eq!(calls.len(), 1, "{calls:?}");
-    assert_eq!(calls[0].1, "inside blyte's own state or configuration");
+    assert!(approver.take_calls().is_empty());
 
     let allowed = execute(
         home.path(),
@@ -446,7 +441,7 @@ fn write_into_blyte_state_asks_for_approval() {
 }
 
 #[test]
-fn write_into_blyte_config_asks_for_approval() {
+fn write_into_blyte_config_is_refused() {
     let home = tempfile::tempdir().unwrap();
     let _guard = EnvGuard::set(Some(home.path()), None, None);
 
@@ -476,17 +471,12 @@ fn write_into_blyte_config_asks_for_approval() {
         &json!({ "path": ".config/blyte/config.toml", "content": "nope\n" }),
     );
     assert!(refused.is_error, "{}", refused.content);
-    assert!(
-        refused
-            .content
-            .contains("inside blyte's own state or configuration"),
-        "{}",
-        refused.content
+    assert_eq!(
+        refused.content,
+        "write: .config/blyte/config.toml is protected (blyte's own files); blyte does not write there"
     );
     assert!(!home.path().join(".config/blyte/config.toml").exists());
-    let calls = approver.take_calls();
-    assert_eq!(calls.len(), 1, "{calls:?}");
-    assert_eq!(calls[0].1, "inside blyte's own state or configuration");
+    assert!(approver.take_calls().is_empty());
 
     let allowed = execute(
         home.path(),
@@ -512,7 +502,7 @@ fn protected_read_paths_without_home_keeps_non_home_entries_only() {
 }
 
 #[test]
-fn write_into_custom_blyte_state_dir_asks_for_approval() {
+fn write_into_custom_blyte_state_dir_is_refused() {
     let home = tempfile::tempdir().unwrap();
     let custom_state = home.path().join("custom_state");
     let xdg_state = home.path().join("xdg_state");
@@ -542,9 +532,12 @@ fn write_into_custom_blyte_state_dir_asks_for_approval() {
         &json!({ "path": "custom_state/x", "content": "nope\n" }),
     );
     assert!(refused_custom.is_error, "{}", refused_custom.content);
-    let calls = approver.take_calls();
-    assert_eq!(calls.len(), 1, "{calls:?}");
-    assert_eq!(calls[0].1, "inside blyte's own state or configuration");
+    assert_eq!(
+        refused_custom.content,
+        "write: custom_state/x is protected (blyte's own files); blyte does not write there"
+    );
+    assert!(!custom_state.join("x").exists());
+    assert!(approver.take_calls().is_empty());
 
     let refused_xdg = execute(
         home.path(),
@@ -554,9 +547,12 @@ fn write_into_custom_blyte_state_dir_asks_for_approval() {
         &json!({ "path": "xdg_state/blyte/y", "content": "nope\n" }),
     );
     assert!(refused_xdg.is_error, "{}", refused_xdg.content);
-    let calls = approver.take_calls();
-    assert_eq!(calls.len(), 1, "{calls:?}");
-    assert_eq!(calls[0].1, "inside blyte's own state or configuration");
+    assert_eq!(
+        refused_xdg.content,
+        "write: xdg_state/blyte/y is protected (blyte's own files); blyte does not write there"
+    );
+    assert!(!xdg_state.join("blyte/y").exists());
+    assert!(approver.take_calls().is_empty());
 }
 
 #[cfg(unix)]

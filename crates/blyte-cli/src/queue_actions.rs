@@ -1006,15 +1006,14 @@ fn ensure_checks_with_hook(
     Ok(true)
 }
 
-pub fn set_hold(root: &Path, id: &str, note: &str, now: u64) -> Result<(), String> {
+pub fn set_hold_in(records_dir: &Path, id: &str, note: &str, now: u64) -> Result<(), String> {
     let trimmed = note.trim();
     if trimmed.is_empty() {
         return Err(format!("a note is required to hold run {id}"));
     }
-    let wt_dir = root.join(".wt");
-    std::fs::create_dir_all(&wt_dir)
-        .map_err(|e| format!("error creating directory {}: {e}", wt_dir.display()))?;
-    let hold_path = wt_dir.join(format!("{id}.hold.json"));
+    std::fs::create_dir_all(records_dir)
+        .map_err(|e| format!("error creating directory {}: {e}", records_dir.display()))?;
+    let hold_path = records_dir.join(format!("{id}.hold.json"));
     let hold = Hold {
         note: trimmed.to_string(),
         ts: now,
@@ -1025,8 +1024,12 @@ pub fn set_hold(root: &Path, id: &str, note: &str, now: u64) -> Result<(), Strin
         .map_err(|e| format!("error writing {}: {e}", hold_path.display()))
 }
 
-pub fn clear_hold(root: &Path, id: &str) -> Result<(), String> {
-    let hold_path = root.join(".wt").join(format!("{id}.hold.json"));
+pub fn set_hold(root: &Path, id: &str, note: &str, now: u64) -> Result<(), String> {
+    set_hold_in(&root.join(".wt"), id, note, now)
+}
+
+pub fn clear_hold_in(records_dir: &Path, id: &str) -> Result<(), String> {
+    let hold_path = records_dir.join(format!("{id}.hold.json"));
     match std::fs::remove_file(&hold_path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1034,8 +1037,12 @@ pub fn clear_hold(root: &Path, id: &str) -> Result<(), String> {
     }
 }
 
-pub fn read_hold(root: &Path, id: &str) -> Result<Option<Hold>, String> {
-    let hold_path = root.join(".wt").join(format!("{id}.hold.json"));
+pub fn clear_hold(root: &Path, id: &str) -> Result<(), String> {
+    clear_hold_in(&root.join(".wt"), id)
+}
+
+pub fn read_hold_in(records_dir: &Path, id: &str) -> Result<Option<Hold>, String> {
+    let hold_path = records_dir.join(format!("{id}.hold.json"));
     let raw = match std::fs::read_to_string(&hold_path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1044,6 +1051,124 @@ pub fn read_hold(root: &Path, id: &str) -> Result<Option<Hold>, String> {
     serde_json::from_str::<Hold>(&raw)
         .map(Some)
         .map_err(|e| format!("could not parse {}: {e}", hold_path.display()))
+}
+
+pub fn read_hold(root: &Path, id: &str) -> Result<Option<Hold>, String> {
+    read_hold_in(&root.join(".wt"), id)
+}
+
+pub fn decide_in_place(
+    records_dir: &Path,
+    id: &str,
+    action: Action,
+    note: Option<&str>,
+    now: u64,
+) -> Result<Decision, String> {
+    let summary_path = records_dir.join(format!("{id}.json"));
+    let start_path = records_dir.join(format!("{id}.start.json"));
+    let summary_raw = match std::fs::read_to_string(&summary_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if start_path.exists() {
+                return Err(format!("run {id} has not finished"));
+            }
+            return Err(format!("unknown run: {id}"));
+        }
+        Err(e) => {
+            return Err(format!("error reading {}: {e}", summary_path.display()));
+        }
+    };
+    let summary: serde_json::Value = serde_json::from_str(&summary_raw)
+        .map_err(|e| format!("could not parse {}: {e}", summary_path.display()))?;
+    let outcome = summary
+        .get("outcome")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("{} has no outcome", summary_path.display()))?;
+    let start_raw = std::fs::read_to_string(&start_path)
+        .map_err(|e| format!("error reading {}: {e}", start_path.display()))?;
+    let start_val: serde_json::Value = serde_json::from_str(&start_raw)
+        .map_err(|e| format!("could not parse {}: {e}", start_path.display()))?;
+    let start_research = crate::in_place_review::parse_research_flag(&start_val, &start_path)?;
+    let is_research = start_research || records_dir.join(format!("{id}.report.md")).exists();
+
+    let trimmed_note: Option<String> = note
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    let conversation_message = match action {
+        Action::Accept => {
+            if is_research {
+                return Err(format!("run {id} is a research run; mark it read"));
+            }
+            if !matches!(outcome, "verified" | "finished") {
+                return Err(format!(
+                    "run {id} is {outcome}, not finished or verified; it cannot be accepted"
+                ));
+            }
+            crate::in_place_review::record_verdict_at(
+                records_dir,
+                id,
+                ReviewVerdict::Accepted,
+                trimmed_note.as_deref().unwrap_or(""),
+                now,
+            )?;
+            clear_hold_in(records_dir, id)?;
+            None
+        }
+        Action::SendBack => {
+            let Some(ref text) = trimmed_note else {
+                return Err(format!("a note is required to send back run {id}"));
+            };
+            clear_hold_in(records_dir, id)?;
+            Some(format!(
+                "Send back run {id}: {text} Draft a follow-up task for me to confirm."
+            ))
+        }
+        Action::Redo => {
+            crate::in_place_review::record_verdict_at(
+                records_dir,
+                id,
+                ReviewVerdict::Redone,
+                trimmed_note.as_deref().unwrap_or(""),
+                now,
+            )?;
+            clear_hold_in(records_dir, id)?;
+            let msg = match trimmed_note.as_deref() {
+                Some(text) => format!("Redo run {id}. Reason: {text}"),
+                None => format!("Redo run {id}."),
+            };
+            Some(msg)
+        }
+        Action::Hold => {
+            let Some(ref text) = trimmed_note else {
+                return Err(format!("a note is required to hold run {id}"));
+            };
+            set_hold_in(records_dir, id, text, now)?;
+            None
+        }
+        Action::MarkRead => {
+            if !is_research {
+                return Err(format!("run {id} is not a research run"));
+            }
+            crate::in_place_review::record_verdict_at(
+                records_dir,
+                id,
+                ReviewVerdict::Accepted,
+                "read",
+                now,
+            )?;
+            clear_hold_in(records_dir, id)?;
+            None
+        }
+    };
+
+    Ok(Decision {
+        run: id.to_string(),
+        action,
+        note: trimmed_note,
+        conversation_message,
+    })
 }
 
 pub fn decide(

@@ -6,15 +6,22 @@ use std::time::{Duration, Instant, SystemTime};
 const PARTIAL_WRITE_WINDOW: Duration = Duration::from_secs(2);
 
 pub fn run(ids: &[String], any: bool, timeout_secs: u64) -> i32 {
-    let root = match crate::clean::find_repo_root() {
-        Ok(r) => r,
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+    let records_dir = match crate::dispatch_in_place::records_dir_for(&cwd) {
+        Ok(d) => d,
         Err(e) => {
             eprintln!("error: {e}");
             return 2;
         }
     };
     wait_in(
-        &root.join(".wt"),
+        &records_dir,
         ids,
         any,
         Duration::from_secs(timeout_secs),

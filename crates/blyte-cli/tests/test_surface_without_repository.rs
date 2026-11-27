@@ -293,7 +293,7 @@ fn starts_in_a_plain_folder_and_writes_nothing_into_it() {
     let (code, stderr) = running.stop_and_join();
     assert_eq!(code, 0, "stderr={stderr}");
     let expected_notice = format!(
-        "blyte: {} is not a git repository: runs, combining and publishing are off until it is one",
+        "blyte: {} is not a git repository: runs edit this folder in place; combining and publishing are off",
         canonical.display()
     );
     assert!(
@@ -788,10 +788,10 @@ fn push_route_answers_409_without_a_repository() {
         Some(&running.token),
         None,
     );
-    assert_eq!(diff_status, 409, "body={diff_body}");
+    assert_eq!(diff_status, 404, "body={diff_body}");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&diff_body).unwrap(),
-        expected
+        serde_json::json!({ "error": "unknown run: T1" })
     );
 
     let (dec_status, dec_body) = http_request(
@@ -801,10 +801,10 @@ fn push_route_answers_409_without_a_repository() {
         Some(&running.token),
         Some(r#"{"action":"accept"}"#),
     );
-    assert_eq!(dec_status, 409, "body={dec_body}");
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&dec_body).unwrap(),
-        expected
+    assert_eq!(dec_status, 400, "body={dec_body}");
+    assert!(
+        dec_body.contains("unknown run: T1"),
+        "expected unknown run error, got: {dec_body}"
     );
 
     let (runs_status, runs_body) =
@@ -854,7 +854,7 @@ fn a_broken_repository_is_still_an_error() {
     assert_eq!(code, 1);
     let stderr = String::from_utf8(err).unwrap();
     assert!(
-        !stderr.contains("runs, combining and publishing are off"),
+        !stderr.contains("runs edit this folder in place; combining and publishing are off"),
         "broken repo must not start without a repository; stderr={stderr}"
     );
     assert!(

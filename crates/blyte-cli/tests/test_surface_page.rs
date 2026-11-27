@@ -2250,7 +2250,10 @@ fn header_shows_not_a_git_repository_when_session_repository_is_false() {
         "{}\n{}",
         review_queue_test_prelude(),
         r#"
-assert.strictEqual(renderNoRepoNotice(false), "not a git repository");
+assert.strictEqual(
+  renderNoRepoNotice(false),
+  "not a git repository: runs edit this folder in place; combining and publishing are off"
+);
 assert.strictEqual(renderNoRepoNotice(true), "");
 assert.strictEqual(renderNoRepoNotice(undefined), "");
 
@@ -2268,7 +2271,10 @@ applySessionState({
   last_seq: 0,
 }, true);
 assert.strictEqual(elements["repo-name"].textContent, "notes");
-assert.strictEqual(elements["no-repo-badge"].innerHTML, "not a git repository");
+assert.strictEqual(
+  elements["no-repo-badge"].innerHTML,
+  "not a git repository: runs edit this folder in place; combining and publishing are off"
+);
 assert.strictEqual(elements["no-repo-badge"].hidden, false);
 
 applySessionState({
@@ -2597,6 +2603,170 @@ applyLogEntries([
 );
 "#;
     run_surface_script(harness);
+}
+
+#[test]
+fn undo_button_renders_only_for_finished_not_undone_in_place_run_with_changed_files() {
+    let html = load_surface_html();
+    assert!(
+        !html.contains("window.confirm("),
+        "undo confirmation must happen in the page, not via a browser dialog"
+    );
+    let harness = format!(
+        "{}\n{}",
+        review_queue_test_prelude(),
+        r##"
+function baseRun(overrides) {
+  return Object.assign({
+    key: "notes/T1",
+    id: "T1",
+    repo: "notes",
+    title: "Edit notes",
+    task: "edit notes",
+    outcome: "finished",
+    research: false,
+    checks_recorded: true,
+    combined: false,
+    started_at: 1700000000,
+    finished_at: 1700000060,
+    turns: 2,
+    cost_usd: 0.01,
+    plan_file: null,
+    plan_task: null,
+    final_message: "done",
+    group: null,
+    verdict: null,
+    verdict_notes: null,
+    verdict_ts: null,
+    report: null,
+    card: "clean",
+    flags: [],
+    changed_files: ["notes.txt"],
+    commits: [],
+    hold: null,
+  }, overrides);
+}
+
+const inPlaceClean = baseRun({ key: "notes/T1", id: "T1", in_place: true, undone: false });
+const inPlaceException = baseRun({
+  key: "notes/T2",
+  id: "T2",
+  card: "exception",
+  outcome: "failed",
+  flags: ["outcome failed: review in depth"],
+  in_place: true,
+  undone: false,
+});
+const inPlaceUndone = baseRun({ key: "notes/T3", id: "T3", in_place: true, undone: true });
+const inPlaceNoChanges = baseRun({ key: "notes/T4", id: "T4", in_place: true, undone: false, changed_files: [] });
+const inPlaceResearch = baseRun({
+  key: "notes/R1",
+  id: "R1",
+  research: true,
+  card: "research",
+  report: "# Report",
+  in_place: true,
+  undone: false,
+  changed_files: ["notes.txt"],
+});
+const repoRun = baseRun({ key: "repo/T5", id: "T5", changed_files: ["README.md"] });
+
+const payloadErr = validateRuns({
+  generated_at: 1700000100,
+  repo: "notes",
+  running: [],
+  runs: [inPlaceClean, inPlaceException, inPlaceUndone, inPlaceNoChanges, inPlaceResearch, repoRun],
+  skipped: [],
+});
+assert.strictEqual(payloadErr, null, "validateRuns should accept in_place and undone flags");
+
+assert.ok(renderRunCard(inPlaceClean).includes('data-undo-run="notes/T1"'), "clean in-place run with changes gets Undo button");
+assert.ok(renderRunCard(inPlaceException).includes('data-undo-run="notes/T2"'), "exception in-place run with changes gets Undo button");
+assert.ok(!renderRunCard(inPlaceUndone).includes("data-undo-run"), "undone in-place run has no Undo button");
+assert.ok(!renderRunCard(inPlaceNoChanges).includes("data-undo-run"), "in-place run without changed files has no Undo button");
+assert.ok(!renderRunCard(inPlaceResearch).includes("data-undo-run"), "research run has no Undo button");
+assert.ok(!renderRunCard(repoRun).includes("data-undo-run"), "repository run has no Undo button");
+
+pendingUndoConfirm.add(inPlaceClean.key);
+const confirmHtml = renderRunCard(inPlaceClean);
+assert.ok(confirmHtml.includes('data-undo-confirm="notes/T1"'), "in-page undo confirmation should render");
+assert.ok(confirmHtml.includes('data-confirm-undo="notes/T1"'), "confirm button should render");
+assert.ok(confirmHtml.includes('data-cancel-undo="notes/T1"'), "cancel button should render");
+pendingUndoConfirm.delete(inPlaceClean.key);
+
+undoResults.set(inPlaceClean.key, { ok: true, message: "restored notes.txt" });
+assert.ok(renderRunCard(inPlaceClean).includes("restored notes.txt"), "undo result lines should render");
+undoResults.set(inPlaceClean.key, { ok: false, message: "changed since run T1 ended: notes.txt" });
+assert.ok(renderRunCard(inPlaceClean).includes("changed since run T1 ended: notes.txt"), "undo refusal should render");
+"##
+    );
+    run_surface_script(&harness);
+}
+
+#[test]
+fn post_undo_records_error_and_closes_confirm_on_network_failure() {
+    let harness = format!(
+        "{}\n{}",
+        review_queue_test_prelude(),
+        r##"
+(async () => {
+  const inPlaceClean = {
+    key: "notes/T1",
+    id: "T1",
+    repo: "notes",
+    title: "Edit notes",
+    task: "edit notes",
+    outcome: "finished",
+    research: false,
+    checks_recorded: true,
+    combined: false,
+    started_at: 1700000000,
+    finished_at: 1700000060,
+    turns: 2,
+    cost_usd: 0.01,
+    plan_file: null,
+    plan_task: null,
+    final_message: "done",
+    group: null,
+    verdict: null,
+    verdict_notes: null,
+    verdict_ts: null,
+    report: null,
+    card: "clean",
+    flags: [],
+    changed_files: ["notes.txt"],
+    commits: [],
+    hold: null,
+    in_place: true,
+    undone: false,
+  };
+  liveRuns = {
+    generated_at: 1700000100,
+    repo: "notes",
+    running: [],
+    runs: [inPlaceClean],
+    skipped: [],
+  };
+  surfaceToken = "test-token";
+  pendingUndoConfirm.add(inPlaceClean.key);
+  fetchWithRetry = async () => {
+    throw new Error("network down");
+  };
+  const ok = await postUndo(inPlaceClean.key);
+  assert.strictEqual(ok, false);
+  assert.strictEqual(pendingUndoConfirm.has(inPlaceClean.key), false);
+  assert.strictEqual(undoInFlight.has(inPlaceClean.key), false);
+  const result = undoResults.get(inPlaceClean.key);
+  assert.ok(result && result.ok === false, "undoResults should record error");
+  assert.ok(result.message.includes("network down"), "message=" + result.message);
+  assert.ok(renderRunCard(inPlaceClean).includes("network down"));
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"##
+    );
+    run_surface_script(&harness);
 }
 
 #[test]

@@ -8,7 +8,7 @@ use crate::cli::{DispatchArgs, ReviewArgs};
 
 pub const DEFAULT_MAX_COST_USD: f64 = 25.0;
 
-fn resolve_max_cost(flag: Option<f64>, config: Option<f64>) -> f64 {
+pub(crate) fn resolve_max_cost(flag: Option<f64>, config: Option<f64>) -> f64 {
     match flag.or(config) {
         Some(v) => v,
         None => DEFAULT_MAX_COST_USD,
@@ -134,7 +134,7 @@ pub fn dispatch_outcome(report_outcome: &str, commits: usize) -> &'static str {
 
 pub fn exit_code(outcome: &str) -> i32 {
     match outcome {
-        "verified" => 0,
+        "verified" | "finished" => 0,
         "no_changes" => 4,
         "blocked" => 5,
         _ => 1,
@@ -316,42 +316,44 @@ pub struct DispatchSummary {
     pub fix_round: Option<crate::fix_round::FixRoundSummary>,
 }
 
-struct ImplementerConfig<'a> {
-    current_exe: &'a Path,
-    worktree_dir: &'a Path,
-    root: &'a Path,
-    id: &'a str,
-    gate: &'a str,
-    env: &'a std::collections::BTreeMap<String, String>,
-    model: Option<&'a str>,
-    max_seconds: u64,
-    max_turns: u32,
-    max_cost: f64,
-    fold_budget: Option<usize>,
-    sandbox: &'a str,
-    network: &'a str,
-    config_allow_read: &'a [PathBuf],
-    cli_allow_read: &'a [PathBuf],
-    pass_env: &'a [String],
-    research: bool,
-    no_claim_check: bool,
-    left_out: &'a [(String, String)],
+pub(crate) struct ImplementerConfig<'a> {
+    pub(crate) current_exe: &'a Path,
+    pub(crate) worktree_dir: &'a Path,
+    pub(crate) root: &'a Path,
+    pub(crate) id: &'a str,
+    pub(crate) gate: &'a str,
+    pub(crate) env: &'a std::collections::BTreeMap<String, String>,
+    pub(crate) model: Option<&'a str>,
+    pub(crate) max_seconds: u64,
+    pub(crate) max_turns: u32,
+    pub(crate) max_cost: f64,
+    pub(crate) fold_budget: Option<usize>,
+    pub(crate) sandbox: &'a str,
+    pub(crate) network: &'a str,
+    pub(crate) config_allow_read: &'a [PathBuf],
+    pub(crate) cli_allow_read: &'a [PathBuf],
+    pub(crate) pass_env: &'a [String],
+    pub(crate) research: bool,
+    pub(crate) no_claim_check: bool,
+    pub(crate) left_out: &'a [(String, String)],
+    pub(crate) snapshot_dir: Option<&'a Path>,
+    pub(crate) snapshot_manifest: Option<&'a Path>,
 }
 
-struct PassReport {
-    report_outcome: String,
-    error: Option<String>,
-    final_message: Option<String>,
-    turns: u32,
-    report_turns: Option<u64>,
-    gate_attempts: u32,
-    gate_failures: Vec<String>,
-    cost_usd: Option<f64>,
-    model: Option<String>,
-    seconds: u64,
-    sandbox: String,
-    base_check_passed: Option<bool>,
-    base_check_seconds: Option<f64>,
+pub(crate) struct PassReport {
+    pub(crate) report_outcome: String,
+    pub(crate) error: Option<String>,
+    pub(crate) final_message: Option<String>,
+    pub(crate) turns: u32,
+    pub(crate) report_turns: Option<u64>,
+    pub(crate) gate_attempts: u32,
+    pub(crate) gate_failures: Vec<String>,
+    pub(crate) cost_usd: Option<f64>,
+    pub(crate) model: Option<String>,
+    pub(crate) seconds: u64,
+    pub(crate) sandbox: String,
+    pub(crate) base_check_passed: Option<bool>,
+    pub(crate) base_check_seconds: Option<f64>,
 }
 
 fn open_pass_log(log_path: &Path, append_header: Option<&str>) -> Result<std::fs::File, String> {
@@ -386,7 +388,7 @@ fn open_pass_log(log_path: &Path, append_header: Option<&str>) -> Result<std::fs
     }
 }
 
-fn run_implementer_pass<F>(
+pub(crate) fn run_implementer_pass<F>(
     cfg: &ImplementerConfig<'_>,
     log_path: &Path,
     append_log_header: Option<&str>,
@@ -455,6 +457,11 @@ where
     } else if let Some(base_wt_dir) = base_check_dir {
         cmd.arg("--base-check");
         cmd.arg("--base-check-dir").arg(base_wt_dir);
+    }
+
+    if let (Some(before_dir), Some(manifest)) = (cfg.snapshot_dir, cfg.snapshot_manifest) {
+        cmd.arg("--snapshot-dir").arg(before_dir);
+        cmd.arg("--snapshot-manifest").arg(manifest);
     }
 
     cmd.arg("--");
@@ -533,7 +540,10 @@ pub fn load_gate_drift(
     Ok(GateDriftCheck { left_out, warning })
 }
 
-fn parse_pass_report(report_path: &Path, default_sandbox: &str) -> Result<PassReport, String> {
+pub(crate) fn parse_pass_report(
+    report_path: &Path,
+    default_sandbox: &str,
+) -> Result<PassReport, String> {
     let raw = std::fs::read_to_string(report_path)
         .map_err(|e| format!("missing report {}: {e}", report_path.display()))?;
     let rec: serde_json::Value = serde_json::from_str(&raw)
@@ -592,7 +602,7 @@ fn parse_pass_report(report_path: &Path, default_sandbox: &str) -> Result<PassRe
     })
 }
 
-fn pass_report_from_error(err_msg: String, default_sandbox: &str) -> PassReport {
+pub(crate) fn pass_report_from_error(err_msg: String, default_sandbox: &str) -> PassReport {
     PassReport {
         report_outcome: "error".to_string(),
         error: Some(err_msg),
@@ -978,7 +988,7 @@ impl Drop for BaseWorktreeGuard {
     }
 }
 
-fn copy_report_file(
+pub(crate) fn copy_report_file(
     scratch_report: &Path,
     dest: &Path,
     research_sources: Option<&str>,
@@ -1002,6 +1012,69 @@ fn copy_report_file(
     Ok(())
 }
 
+pub(crate) fn research_gate() -> (String, &'static str) {
+    ("test -s report.md".to_string(), "research")
+}
+
+pub(crate) fn research_budgets(args: &DispatchArgs) -> (u64, u32) {
+    (
+        args.max_seconds.unwrap_or(1800),
+        args.max_turns.unwrap_or(300),
+    )
+}
+
+pub(crate) fn research_outcome(report_outcome: &str) -> &'static str {
+    match report_outcome {
+        "verified" => "verified",
+        "gate_failed" => "gate_failed",
+        "budget_exhausted" => "budget_exhausted",
+        "blocked" => "blocked",
+        _ => "error",
+    }
+}
+
+pub(crate) fn create_research_scratch_dir(worktree_dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(worktree_dir).map_err(|e| {
+        format!(
+            "error creating scratch directory {}: {e}",
+            worktree_dir.display()
+        )
+    })?;
+    let init_out = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(worktree_dir)
+        .output()
+        .map_err(|e| format!("error: failed to execute git init: {e}"))?;
+    if !init_out.status.success() {
+        return Err(format!(
+            "error: git init failed: {}",
+            String::from_utf8_lossy(&init_out.stderr)
+        ));
+    }
+    let commit_out = Command::new("git")
+        .args([
+            "-c",
+            "user.name=blyte",
+            "-c",
+            "user.email=blyte@local",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "research",
+        ])
+        .current_dir(worktree_dir)
+        .output()
+        .map_err(|e| format!("error: failed to execute git commit: {e}"))?;
+    if !commit_out.status.success() {
+        return Err(format!(
+            "error: git commit failed: {}",
+            String::from_utf8_lossy(&commit_out.stderr)
+        ));
+    }
+    Ok(())
+}
+
 fn copy_research_reports(
     scratch_report: &Path,
     research_report_path: &Path,
@@ -1013,6 +1086,62 @@ fn copy_research_reports(
         copy_report_file(scratch_report, dest, research_sources)?;
     }
     Ok(())
+}
+
+pub(crate) fn write_summary_to_dir(
+    summary: &DispatchSummary,
+    dir: &Path,
+    stdout: &mut dyn std::io::Write,
+    stderr: &mut dyn std::io::Write,
+) -> (bool, i32) {
+    let json_str = serde_json::to_string_pretty(summary).unwrap();
+    let summary_path = dir.join(format!("{}.json", summary.id));
+    let write_failed = match std::fs::create_dir_all(dir)
+        .and_then(|()| std::fs::write(&summary_path, format!("{json_str}\n")))
+    {
+        Ok(()) => false,
+        Err(e) => {
+            let _ = writeln!(
+                stderr,
+                "blyte: could not write {}: {e}",
+                summary_path.display()
+            );
+            true
+        }
+    };
+    let _ = writeln!(stdout, "{json_str}");
+    let exit = if write_failed && summary.exit == 0 {
+        1
+    } else {
+        summary.exit
+    };
+    (write_failed, exit)
+}
+
+pub(crate) fn load_task_text(
+    task_file: Option<&Path>,
+    plan: Option<&str>,
+    plan_task: Option<&str>,
+) -> Result<Option<(String, Option<String>)>, String> {
+    if let Some(tf) = task_file {
+        let content = std::fs::read_to_string(tf)
+            .map_err(|e| format!("error reading task file {}: {e}", tf.display()))?;
+        return Ok(Some((content, Some(tf.display().to_string()))));
+    }
+    if let (Some(plan_path), Some(plan_task)) = (plan, plan_task) {
+        let plan_str = std::fs::read_to_string(plan_path)
+            .map_err(|e| format!("error reading plan {plan_path}: {e}"))?;
+        let Some(section) = crate::plan_section::extract(&plan_str, plan_task) else {
+            let mut msg = format!("error: no heading \"{plan_task}\" in {plan_path}");
+            if let Some(hint) = crate::plan_section::explain_missing(&plan_str, plan_task) {
+                msg.push_str(&format!("\n  {hint}"));
+            }
+            return Err(msg);
+        };
+        let content = format!("From the plan {plan_path}:\n\n{section}");
+        return Ok(Some((content, None)));
+    }
+    Ok(None)
 }
 
 fn finish_summary(summary: &DispatchSummary, root: &Path) -> i32 {
@@ -1031,31 +1160,12 @@ fn finish_summary_with_writers(
     stderr: &mut dyn std::io::Write,
 ) -> i32 {
     let wt_parent = root.join(".wt");
-    let json_str = serde_json::to_string_pretty(summary).unwrap();
-    let summary_path = wt_parent.join(format!("{}.json", summary.id));
-    let write_failed = match std::fs::create_dir_all(&wt_parent)
-        .and_then(|()| std::fs::write(&summary_path, format!("{json_str}\n")))
-    {
-        Ok(()) => false,
-        Err(e) => {
-            let _ = writeln!(
-                stderr,
-                "blyte: could not write {}: {e}",
-                summary_path.display()
-            );
-            true
-        }
-    };
+    let (write_failed, exit) = write_summary_to_dir(summary, &wt_parent, stdout, stderr);
     if !write_failed {
         let notify_outcome = crate::surface_notify::notify_runs_changed(root, &summary.id);
         crate::surface_notify::report(&notify_outcome, stderr);
     }
-    let _ = writeln!(stdout, "{json_str}");
-    if write_failed && summary.exit == 0 {
-        1
-    } else {
-        summary.exit
-    }
+    exit
 }
 
 const RUN_RECORD_EXTENSIONS: &[&str] = &[
@@ -1151,7 +1261,7 @@ pub fn branch_exists_message(root: &Path, branch: &str, id: &str) -> String {
 }
 
 /// Source-state block for the research root and each read root, skipping duplicates.
-fn research_source_block(
+pub(crate) fn research_source_block(
     root: &Path,
     config_allow_read: &[PathBuf],
     allow_read: &[PathBuf],
@@ -1288,8 +1398,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         return 2;
     };
     if !out.status.success() {
-        eprintln!("error: not a git repository");
-        return 2;
+        return crate::dispatch_in_place::run(args);
     }
     let start_dir = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
     let root = match crate::clean::find_repo_root() {
@@ -1320,7 +1429,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
 
     let mut left_out: Vec<(String, String)> = Vec::new();
     let (gate, gate_source) = if args.research {
-        ("test -s report.md".to_string(), "research")
+        research_gate()
     } else if let Some(ref g) = args.gate {
         (g.clone(), "flag")
     } else if let Some(ref g) = dispatch_cfg.gate {
@@ -1363,10 +1472,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
 
     let model = args.model.as_ref().or(dispatch_cfg.model.as_ref());
     let (max_seconds, max_turns) = if args.research {
-        (
-            args.max_seconds.unwrap_or(1800),
-            args.max_turns.unwrap_or(300),
-        )
+        research_budgets(args)
     } else {
         (
             args.max_seconds
@@ -1409,60 +1515,35 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
             Some(crate::fix_round::FixRoundRecord::Started { .. })
         );
 
-    let (task_content, recorded_task_file) = if let Some(ref tf) = args.task_file {
-        let content = match std::fs::read_to_string(tf) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("error reading task file {}: {e}", tf.display());
-                return 2;
-            }
-        };
-        (content, Some(tf.display().to_string()))
-    } else {
-        match (&args.plan, &args.plan_task) {
-            (Some(plan_path), Some(plan_task)) => {
-                let plan_str = match std::fs::read_to_string(plan_path) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("error reading plan {plan_path}: {e}");
-                        return 2;
-                    }
-                };
-                let section = match crate::plan_section::extract(&plan_str, plan_task) {
-                    Some(sec) => sec,
-                    None => {
-                        eprintln!("error: no heading \"{plan_task}\" in {plan_path}");
-                        if let Some(hint) =
-                            crate::plan_section::explain_missing(&plan_str, plan_task)
-                        {
-                            eprintln!("  {hint}");
-                        }
-                        return 2;
-                    }
-                };
-                let content = format!("From the plan {plan_path}:\n\n{section}");
-                (content, None)
-            }
-            _ if resuming_fix_round => {
-                let start_path = wt_parent.join(format!("{}.start.json", args.id));
-                match read_start_task_content(&root, &start_path) {
-                    Ok(content) => (content, None),
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        return 2;
-                    }
+    let (task_content, recorded_task_file) = match load_task_text(
+        args.task_file.as_deref(),
+        args.plan.as_deref(),
+        args.plan_task.as_deref(),
+    ) {
+        Ok(Some(pair)) => pair,
+        Ok(None) if resuming_fix_round => {
+            let start_path = wt_parent.join(format!("{}.start.json", args.id));
+            match read_start_task_content(&root, &start_path) {
+                Ok(content) => (content, None),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return 2;
                 }
             }
-            _ => {
-                eprintln!("error: give a task file, or --plan with --plan-task");
-                if args.research {
-                    eprintln!(
-                        "A research question needs these sections:\n\n{}",
-                        crate::research_brief::TEMPLATE
-                    );
-                }
-                return 2;
+        }
+        Ok(None) => {
+            eprintln!("error: give a task file, or --plan with --plan-task");
+            if args.research {
+                eprintln!(
+                    "A research question needs these sections:\n\n{}",
+                    crate::research_brief::TEMPLATE
+                );
             }
+            return 2;
+        }
+        Err(msg) => {
+            eprintln!("{msg}");
+            return 2;
         }
     };
 
@@ -1674,6 +1755,8 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
                     research: false,
                     no_claim_check: args.no_claim_check,
                     left_out: &left_out,
+                    snapshot_dir: None,
+                    snapshot_manifest: None,
                 };
                 let (fix_summary, round_report) = match execute_fix_round(
                     &root,
@@ -1933,58 +2016,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     }
 
     if args.research {
-        if let Err(e) = std::fs::create_dir_all(&worktree_dir) {
-            eprintln!(
-                "error creating scratch directory {}: {e}",
-                worktree_dir.display()
-            );
+        if let Err(e) = create_research_scratch_dir(&worktree_dir) {
+            eprintln!("{e}");
             return 2;
-        }
-        let init_out = Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&worktree_dir)
-            .output();
-        match init_out {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                eprintln!(
-                    "error: git init failed: {}",
-                    String::from_utf8_lossy(&o.stderr)
-                );
-                return 2;
-            }
-            Err(e) => {
-                eprintln!("error: failed to execute git init: {e}");
-                return 2;
-            }
-        }
-        let commit_out = Command::new("git")
-            .args([
-                "-c",
-                "user.name=blyte",
-                "-c",
-                "user.email=blyte@local",
-                "commit",
-                "-q",
-                "--allow-empty",
-                "-m",
-                "research",
-            ])
-            .current_dir(&worktree_dir)
-            .output();
-        match commit_out {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                eprintln!(
-                    "error: git commit failed: {}",
-                    String::from_utf8_lossy(&o.stderr)
-                );
-                return 2;
-            }
-            Err(e) => {
-                eprintln!("error: failed to execute git commit: {e}");
-                return 2;
-            }
         }
     } else if need_worktree_add {
         let base_ref = base_commit.as_deref().unwrap();
@@ -2208,6 +2242,8 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         research: args.research,
         no_claim_check: args.no_claim_check,
         left_out: &left_out,
+        snapshot_dir: None,
+        snapshot_manifest: None,
     };
 
     let comments_str = if args.research {
@@ -2328,13 +2364,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     };
 
     let outcome = if args.research {
-        match pass1.report_outcome.as_str() {
-            "verified" => "verified",
-            "gate_failed" => "gate_failed",
-            "budget_exhausted" => "budget_exhausted",
-            "blocked" => "blocked",
-            _ => "error",
-        }
+        research_outcome(&pass1.report_outcome)
     } else {
         dispatch_outcome(&pass1.report_outcome, commits.len())
     };
@@ -2577,6 +2607,18 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
 }
 
 pub fn run_review(args: &ReviewArgs) -> i32 {
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(out) = Command::new("git")
+            .current_dir(&cwd)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+        {
+            if !out.status.success() {
+                return crate::in_place_review::review(args);
+            }
+        }
+    }
+
     let root = match crate::clean::find_repo_root() {
         Ok(r) => r,
         Err(e) => {
@@ -3192,15 +3234,22 @@ pub struct StatusOutput {
 }
 
 pub fn run_status(id: &str, json: bool) -> i32 {
-    let root = match crate::clean::find_repo_root() {
-        Ok(r) => r,
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+    let records_dir = match crate::dispatch_in_place::records_dir_for(&cwd) {
+        Ok(d) => d,
         Err(e) => {
             eprintln!("error: {e}");
             return 2;
         }
     };
 
-    let start_path = root.join(".wt").join(format!("{id}.start.json"));
+    let start_path = records_dir.join(format!("{id}.start.json"));
     let start_raw = match std::fs::read_to_string(&start_path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -3247,7 +3296,7 @@ pub fn run_status(id: &str, json: bool) -> i32 {
         false
     };
 
-    let report_path = root.join(".wt").join(format!("{id}.report.json"));
+    let report_path = records_dir.join(format!("{id}.report.json"));
     let report_json: Option<serde_json::Value> = match std::fs::read_to_string(&report_path) {
         Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
             Ok(v) if v.is_object() => Some(v),
@@ -3307,7 +3356,7 @@ pub fn run_status(id: &str, json: bool) -> i32 {
         now.saturating_sub(started_at)
     };
 
-    let log_path = root.join(".wt").join(format!("{id}.log"));
+    let log_path = records_dir.join(format!("{id}.log"));
     let log_content = match std::fs::read_to_string(&log_path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),

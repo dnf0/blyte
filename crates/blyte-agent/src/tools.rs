@@ -37,6 +37,9 @@ pub const PUBLISH_BODY_MAX_BYTES: usize = 20_000;
 static READ_ROOTS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::new());
 static DISPATCH_CMD: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 static BLYTE_TOOL: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+static BLYTE_TASKS_DIR: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+static BLYTE_RUN_STORE: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+static IN_PLACE_LOCK_PATH: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
 static BLYTE_SURFACE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 static APPROVAL: std::sync::RwLock<Option<ApprovalConfig>> = std::sync::RwLock::new(None);
 static PEER_TOOLS: std::sync::RwLock<Option<Arc<dyn PeerTools>>> = std::sync::RwLock::new(None);
@@ -96,6 +99,34 @@ pub const BLYTE_TOOL_COMMANDS: [&str; 9] = [
     "clean",
     "edit-start",
     "edit-finish",
+];
+
+pub const BLYTE_TOOL_NO_REPO_COMMANDS: [&str; 4] = ["dispatch", "wait", "status", "review"];
+
+const NO_REPO_REFUSED_COMMANDS: [&str; 6] =
+    ["plan", "init", "clean", "edit-start", "edit-finish", "undo"];
+
+const DISPATCH_VALUE_FLAGS: [&str; 20] = [
+    "-g",
+    "--gate",
+    "--tag",
+    "--plan",
+    "--plan-task",
+    "--request",
+    "--surface",
+    "--started-by",
+    "--base",
+    "--report-to",
+    "-m",
+    "--model",
+    "--max-seconds",
+    "--max-turns",
+    "--max-cost",
+    "--fold-budget",
+    "--sandbox",
+    "--network",
+    "--allow-read",
+    "--pass-env",
 ];
 
 pub const REFUSED_DISPATCH_OPTIONS: [&str; 6] = [
@@ -158,6 +189,48 @@ pub fn set_blyte_tool(exe: Option<std::path::PathBuf>) {
 
 pub fn blyte_tool() -> Option<PathBuf> {
     BLYTE_TOOL
+        .read()
+        .map(|r| r.clone())
+        .unwrap_or_else(|e| e.into_inner().clone())
+}
+
+pub fn set_blyte_tasks_dir(dir: Option<PathBuf>) {
+    match BLYTE_TASKS_DIR.write() {
+        Ok(mut lock) => *lock = dir,
+        Err(poisoned) => *poisoned.into_inner() = dir,
+    }
+}
+
+pub fn blyte_tasks_dir() -> Option<PathBuf> {
+    BLYTE_TASKS_DIR
+        .read()
+        .map(|r| r.clone())
+        .unwrap_or_else(|e| e.into_inner().clone())
+}
+
+pub fn set_blyte_run_store(dir: Option<PathBuf>) {
+    match BLYTE_RUN_STORE.write() {
+        Ok(mut lock) => *lock = dir,
+        Err(poisoned) => *poisoned.into_inner() = dir,
+    }
+}
+
+pub fn blyte_run_store() -> Option<PathBuf> {
+    BLYTE_RUN_STORE
+        .read()
+        .map(|r| r.clone())
+        .unwrap_or_else(|e| e.into_inner().clone())
+}
+
+pub fn set_in_place_lock_path(path: Option<PathBuf>) {
+    match IN_PLACE_LOCK_PATH.write() {
+        Ok(mut lock) => *lock = path,
+        Err(poisoned) => *poisoned.into_inner() = path,
+    }
+}
+
+pub fn in_place_lock_path() -> Option<PathBuf> {
+    IN_PLACE_LOCK_PATH
         .read()
         .map(|r| r.clone())
         .unwrap_or_else(|e| e.into_inner().clone())
@@ -719,6 +792,108 @@ fn append_skipped_line(mut text: String, skipped: usize) -> String {
     text
 }
 
+fn resolve_host_prefix(fs: &dyn Fs, path: &Path) -> Result<PathBuf, String> {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("cannot determine current directory: {e}"))?
+            .join(path)
+    };
+    let mut probe = abs.as_path();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        match fs.canonicalize(probe) {
+            Ok(mut resolved) => {
+                for part in tail.into_iter().rev() {
+                    resolved.push(part);
+                }
+                return Ok(resolved);
+            }
+            Err(e) => {
+                let not_present = match std::fs::symlink_metadata(probe) {
+                    Ok(_) => false,
+                    Err(meta_err) => matches!(
+                        meta_err.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ),
+                };
+                if !not_present {
+                    return Err(format!("cannot canonicalize {}: {e}", probe.display()));
+                }
+                let Some(name) = probe.file_name() else {
+                    return Err(format!("cannot canonicalize {}: {e}", probe.display()));
+                };
+                tail.push(name.to_os_string());
+                let Some(parent) = probe.parent() else {
+                    return Err(format!("cannot canonicalize {}: {e}", probe.display()));
+                };
+                probe = parent;
+            }
+        }
+    }
+}
+
+fn check_protected_write(
+    fs: &dyn Fs,
+    root: &Path,
+    tool: &str,
+    raw_path: &str,
+    path: &Path,
+) -> Result<(), String> {
+    if !fs.is_local() {
+        return Ok(());
+    }
+    let home_raw = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .ok_or_else(|| format!("{tool}: cannot check protected paths without HOME"))?;
+    let real_target = resolve_real_target(fs, path)?;
+    let real_root = resolve_host_prefix(fs, root)?;
+    let home = resolve_host_prefix(fs, Path::new(&home_raw))?;
+    let mut state_dirs: Vec<PathBuf> = Vec::new();
+    let mut push_state_dir = |raw: PathBuf| -> Result<(), String> {
+        let resolved = resolve_host_prefix(fs, &raw)?;
+        if !state_dirs.contains(&resolved) {
+            state_dirs.push(resolved);
+        }
+        Ok(())
+    };
+    if let Some(dir) = crate::sandbox::state_blyte_dir() {
+        push_state_dir(dir)?;
+    }
+    if let Some(dir) = std::env::var_os("BLYTE_STATE_DIR").filter(|d| !d.is_empty()) {
+        push_state_dir(PathBuf::from(dir))?;
+    }
+    if let Some(xdg) = std::env::var_os("XDG_STATE_HOME").filter(|d| !d.is_empty()) {
+        push_state_dir(PathBuf::from(xdg).join("blyte"))?;
+    }
+    if state_dirs.is_empty() {
+        if let Some(reason) = crate::write_guard::protected_write(&real_target, &home, None) {
+            return Err(format!(
+                "{tool}: {raw_path} is protected ({reason}); blyte does not write there"
+            ));
+        }
+    } else {
+        for dir in &state_dirs {
+            let check_dir = if crate::sandbox::is_run_scratch_workspace(&real_root, dir)
+                && real_target.starts_with(&real_root)
+            {
+                None
+            } else {
+                Some(dir.as_path())
+            };
+            if let Some(reason) =
+                crate::write_guard::protected_write(&real_target, &home, check_dir)
+            {
+                return Err(format!(
+                    "{tool}: {raw_path} is protected ({reason}); blyte does not write there"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn check_write_scope(fs: &dyn Fs, tool: &str, path: &Path) -> Result<(), String> {
     let Some(scope) = write_scope() else {
         return Ok(());
@@ -972,6 +1147,10 @@ pub fn specs() -> Vec<ToolSpec> {
                     "background": {
                         "type": "boolean",
                         "description": "Start a `dispatch` in the background and return at once"
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": "Task text for `dispatch`; blyte writes it to the tasks directory and passes that path"
                     }
                 },
                 "required": ["args"]
@@ -1183,23 +1362,37 @@ fn execute_unbounded(
             ToolOutcome::ok(distil(&body, READ_LINE_BUDGET))
         }
         "write" => {
-            let path = match resolve_in_workspace(fs, root, &s("path")) {
+            let raw_path = s("path");
+            let path = match resolve_in_workspace(fs, root, &raw_path) {
                 Ok(p) => p,
                 Err(e) => return ToolOutcome::err(e),
             };
+            if let Err(e) = check_protected_write(fs, root, "write", &raw_path, &path) {
+                return ToolOutcome::err(e);
+            }
+            if let Err(e) = check_in_place_lock(fs, root, &path) {
+                return ToolOutcome::err(e);
+            }
             if let Err(e) = check_write_scope(fs, "write", &path) {
                 return ToolOutcome::err(e);
             }
             match fs.write(&path, &s("content")) {
-                Ok(_) => ToolOutcome::ok(format!("wrote {}", s("path"))),
+                Ok(_) => ToolOutcome::ok(format!("wrote {raw_path}")),
                 Err(e) => ToolOutcome::err(e),
             }
         }
         "edit" => {
-            let path = match resolve_in_workspace(fs, root, &s("path")) {
+            let raw_path = s("path");
+            let path = match resolve_in_workspace(fs, root, &raw_path) {
                 Ok(p) => p,
                 Err(e) => return ToolOutcome::err(e),
             };
+            if let Err(e) = check_protected_write(fs, root, "edit", &raw_path, &path) {
+                return ToolOutcome::err(e);
+            }
+            if let Err(e) = check_in_place_lock(fs, root, &path) {
+                return ToolOutcome::err(e);
+            }
             if let Err(e) = check_write_scope(fs, "edit", &path) {
                 return ToolOutcome::err(e);
             }
@@ -1545,14 +1738,22 @@ fn execute_unbounded(
             if let Some(refused) = refused_blyte_tool_command(&cmd_args) {
                 return ToolOutcome::err(crate::shell::model_shell_refusal_message(refused));
             }
-            if !BLYTE_TOOL_COMMANDS.contains(&first) {
+            let is_repo = crate::sandbox::is_git_repository(root);
+            if !is_repo {
+                if NO_REPO_REFUSED_COMMANDS.contains(&first) {
+                    return ToolOutcome::err(NO_REPO_BLYTE_COMMAND_ERROR);
+                }
+                if !BLYTE_TOOL_NO_REPO_COMMANDS.contains(&first) {
+                    return ToolOutcome::err(format!(
+                        "the blyte tool runs only: {}",
+                        BLYTE_TOOL_NO_REPO_COMMANDS.join(", ")
+                    ));
+                }
+            } else if !BLYTE_TOOL_COMMANDS.contains(&first) {
                 return ToolOutcome::err(format!(
                     "the blyte tool runs only: {}",
                     BLYTE_TOOL_COMMANDS.join(", ")
                 ));
-            }
-            if !crate::sandbox::is_git_repository(root) {
-                return ToolOutcome::err(NOT_A_GIT_REPOSITORY_ERROR);
             }
             let background = args
                 .get("background")
@@ -1561,8 +1762,20 @@ fn execute_unbounded(
             if background && first != "dispatch" {
                 return ToolOutcome::err("only dispatch can run in the background");
             }
+            let task_text: Option<&str> = match args.get("task") {
+                None | Some(Value::Null) => None,
+                Some(v) => match v.as_str() {
+                    Some(s) => Some(s),
+                    None => return ToolOutcome::err("task must be a string"),
+                },
+            };
+            if task_text.is_some() && first != "dispatch" {
+                return ToolOutcome::err("task can only be passed with dispatch");
+            }
 
             let mut exec_args = cmd_args.clone();
+            let mut dispatch_id: Option<String> = None;
+            let mut background_out_dir: Option<PathBuf> = None;
             if matches!(first, "dispatch" | "edit-finish") {
                 if cmd_args
                     .iter()
@@ -1591,6 +1804,53 @@ fn execute_unbounded(
                     if let Some(opt) = refused_dispatch_option(&cmd_args) {
                         return ToolOutcome::err(refused_dispatch_option_message(opt));
                     }
+                    let parsed = parse_dispatch_args(&cmd_args);
+                    if background {
+                        let out_dir = if is_repo {
+                            root.join(".wt")
+                        } else {
+                            let Some(store) = blyte_run_store() else {
+                                return ToolOutcome::err(
+                                    "run store is not configured for background dispatch outside a git repository",
+                                );
+                            };
+                            store
+                        };
+                        background_out_dir = Some(out_dir);
+                    }
+                    if let Some(text) = task_text {
+                        if text.trim().is_empty() {
+                            return ToolOutcome::err("task must not be empty");
+                        }
+                        if parsed.has_plan || parsed.has_plan_task {
+                            return ToolOutcome::err("do not pass task with --plan or --plan-task");
+                        }
+                        if parsed.has_task_file {
+                            return ToolOutcome::err("do not pass both task and a task file path");
+                        }
+                        let Some((id_idx, ref id)) = parsed.id else {
+                            return ToolOutcome::err("dispatch needs an id");
+                        };
+                        if id.is_empty() {
+                            return ToolOutcome::err("dispatch needs an id");
+                        }
+                        let tasks_dir = if is_repo {
+                            root.join(".wt").join("tasks")
+                        } else {
+                            let Some(dir) = blyte_tasks_dir() else {
+                                return ToolOutcome::err(
+                                    "tasks directory is not configured for dispatch outside a git repository",
+                                );
+                            };
+                            dir
+                        };
+                        let task_path = match write_inline_task(&tasks_dir, id, text) {
+                            Ok(p) => p,
+                            Err(e) => return ToolOutcome::err(e),
+                        };
+                        exec_args.insert(id_idx + 1, task_path.to_string_lossy().into_owned());
+                    }
+                    dispatch_id = parsed.id.map(|(_, id)| id).filter(|id| !id.is_empty());
                 }
                 if let Some(req_id) = blyte_request() {
                     if let Some(pos) = exec_args.iter().position(|a| a == "--") {
@@ -1633,10 +1893,18 @@ fn execute_unbounded(
             }
 
             if background {
-                let Some(id) = cmd_args.get(1).filter(|s| !s.is_empty()) else {
+                let Some(id) = dispatch_id else {
                     return ToolOutcome::err("dispatch needs an id");
                 };
-                return run_background_dispatch(cmd_builder, root, id);
+                if let Err(e) = validate_dispatch_id(&id) {
+                    return ToolOutcome::err(e);
+                }
+                let Some(out_dir) = background_out_dir else {
+                    return ToolOutcome::err(
+                        "run store is not configured for background dispatch outside a git repository",
+                    );
+                };
+                return run_background_dispatch(cmd_builder, &out_dir, &id);
             }
 
             match run_command_bounded(cmd_builder, command_timeout) {
@@ -1763,21 +2031,148 @@ fn execute_unbounded(
     }
 }
 
-const NOT_A_GIT_REPOSITORY_ERROR: &str = "this folder is not a git repository, and runs, direct edits and publishing need one. If the user wants that here, ask to run \"git init\" and then an empty first commit (git commit --allow-empty) with the bash tool and unsandboxed: true; the user approves each command. Add only the files the user names afterwards, never \"git add -A\": the folder may hold credentials. Otherwise keep working with read, grep, glob and the shell.";
+const NOT_A_GIT_REPOSITORY_ERROR: &str = "this folder is not a git repository, and direct edits, combining and publishing need one. If the user wants a repository here, ask to run \"git init\" and then an empty first commit (git commit --allow-empty) with the bash tool and unsandboxed: true; the user approves each command. Add only the files the user names afterwards, never \"git add -A\": the folder may hold credentials.";
+const NO_REPO_BLYTE_COMMAND_ERROR: &str = "this folder is not a git repository; here the blyte tool runs only dispatch, wait, status and review. `blyte undo <id>` is for the user to run. Other commands need a git repository (run `git init` and an empty first commit only when the user wants one).";
 const BACKGROUND_STARTUP_WAIT: Duration = Duration::from_secs(2);
 const BACKGROUND_STARTUP_POLL: Duration = Duration::from_millis(50);
 
+struct ParsedDispatchArgs {
+    id: Option<(usize, String)>,
+    has_task_file: bool,
+    has_plan: bool,
+    has_plan_task: bool,
+}
+
+fn parse_dispatch_args(cmd_args: &[String]) -> ParsedDispatchArgs {
+    let mut i = 1;
+    let mut after_dd = false;
+    let mut id: Option<(usize, String)> = None;
+    let mut has_task_file = false;
+    let mut has_plan = false;
+    let mut has_plan_task = false;
+    while i < cmd_args.len() {
+        let arg = &cmd_args[i];
+        if !after_dd {
+            if arg == "--" {
+                after_dd = true;
+                i += 1;
+                continue;
+            }
+            if arg == "--plan" || arg.starts_with("--plan=") {
+                has_plan = true;
+            }
+            if arg == "--plan-task" || arg.starts_with("--plan-task=") {
+                has_plan_task = true;
+            }
+            if DISPATCH_VALUE_FLAGS.contains(&arg.as_str()) {
+                i += 2;
+                continue;
+            }
+            if arg.starts_with('-') && arg != "-" {
+                i += 1;
+                continue;
+            }
+        }
+        if id.is_none() {
+            id = Some((i, arg.clone()));
+        } else {
+            has_task_file = true;
+        }
+        i += 1;
+    }
+    ParsedDispatchArgs {
+        id,
+        has_task_file,
+        has_plan,
+        has_plan_task,
+    }
+}
+
+fn validate_dispatch_id(id: &str) -> Result<(), String> {
+    if id.is_empty()
+        || id == "."
+        || id == ".."
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains('\0')
+    {
+        return Err(format!("invalid dispatch id: {id}"));
+    }
+    Ok(())
+}
+
+fn write_inline_task(tasks_dir: &Path, id: &str, text: &str) -> Result<PathBuf, String> {
+    validate_dispatch_id(id)?;
+    let task_path = tasks_dir.join(format!("{id}.md"));
+    if let Err(e) = std::fs::create_dir_all(tasks_dir) {
+        return Err(format!(
+            "cannot create tasks directory {} for {}: {e}",
+            tasks_dir.display(),
+            task_path.display()
+        ));
+    }
+    match std::fs::read_to_string(&task_path) {
+        Ok(existing) => {
+            if existing != text {
+                return Err(format!(
+                    "task file {} already exists with different content",
+                    task_path.display()
+                ));
+            }
+            Ok(task_path)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::write(&task_path, text)
+                .map_err(|we| format!("cannot write task file {}: {we}", task_path.display()))?;
+            Ok(task_path)
+        }
+        Err(e) => Err(format!(
+            "cannot read existing task file {}: {e}",
+            task_path.display()
+        )),
+    }
+}
+
+fn check_in_place_lock(fs: &dyn Fs, root: &Path, path: &Path) -> Result<(), String> {
+    if !fs.is_local() || crate::sandbox::is_git_repository(root) {
+        return Ok(());
+    }
+    let root_c = fs
+        .canonicalize(root)
+        .map_err(|e| format!("workspace root unreadable: {e}"))?;
+    let real_target = resolve_real_target(fs, path)?;
+    if !real_target.starts_with(&root_c) {
+        return Ok(());
+    }
+    let lock_path = match in_place_lock_path() {
+        Some(p) => p,
+        None if blyte_tool().is_some() => {
+            return Err(
+                "in-place lock path is not configured for writing outside a git repository"
+                    .to_string(),
+            );
+        }
+        None => return Ok(()),
+    };
+    match crate::folder_lock::holder(&lock_path)? {
+        Some(holder) => Err(format!(
+            "run {} is editing this folder; wait for it to finish",
+            holder.id
+        )),
+        None => Ok(()),
+    }
+}
+
 fn run_background_dispatch(
     mut cmd_builder: std::process::Command,
-    root: &Path,
+    out_dir: &Path,
     id: &str,
 ) -> ToolOutcome {
-    let wt_dir = root.join(".wt");
-    let out_path = wt_dir.join(format!("{id}.dispatch.out"));
-    if let Err(e) = std::fs::create_dir_all(&wt_dir) {
+    let out_path = out_dir.join(format!("{id}.dispatch.out"));
+    if let Err(e) = std::fs::create_dir_all(out_dir) {
         return ToolOutcome::err(format!(
             "cannot create {} for {}: {e}",
-            wt_dir.display(),
+            out_dir.display(),
             out_path.display()
         ));
     }
@@ -2035,5 +2430,50 @@ mod tests {
         let err = serialize_dispatch_args(&FailingSerialize).unwrap_err();
         assert!(err.contains("serialize"), "got: {err}");
         assert!(err.contains("unsupported map key"), "got: {err}");
+    }
+
+    #[test]
+    fn check_in_place_lock_ignores_targets_outside_root() {
+        struct LockReset;
+        impl Drop for LockReset {
+            fn drop(&mut self) {
+                set_blyte_tool(None);
+                set_in_place_lock_path(None);
+            }
+        }
+        let _reset = LockReset;
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let lock_path = lock_dir.path().join("in-place.lock");
+        let fs = crate::fs::LocalFs;
+
+        set_blyte_tool(Some(lock_dir.path().join("blyte-stub")));
+        set_in_place_lock_path(None);
+
+        let outside_file = outside.path().join("scratch.txt");
+        let inside_file = root.path().join("note.txt");
+
+        assert!(check_in_place_lock(&fs, root.path(), &outside_file).is_ok());
+        let missing = check_in_place_lock(&fs, root.path(), &inside_file).unwrap_err();
+        assert!(missing.contains("lock"), "{missing}");
+
+        set_in_place_lock_path(Some(lock_path.clone()));
+        let _held = crate::folder_lock::acquire(
+            &lock_path,
+            &crate::folder_lock::Holder {
+                pid: std::process::id(),
+                kind: "run".to_string(),
+                id: "R9".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert!(check_in_place_lock(&fs, root.path(), &outside_file).is_ok());
+        let held_err = check_in_place_lock(&fs, root.path(), &inside_file).unwrap_err();
+        assert_eq!(
+            held_err,
+            "run R9 is editing this folder; wait for it to finish"
+        );
     }
 }

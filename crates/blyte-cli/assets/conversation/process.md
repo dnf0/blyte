@@ -23,13 +23,14 @@ the surface.
 Keep for yourself: design decisions, unclear requirements (ask the user), and anything touching
 credentials, deployment or other repositories.
 
-This folder may not be a git repository. When it is not a git repository, there are no runs, direct
-edits or publishing, and files in it are read-only without approval. To work with runs there, ask to
-run `git init` and an empty first commit (`git commit --allow-empty -m "chore: first commit"`) as
-unsandboxed commands the user approves, and only when the user wants the folder to become a
-repository, never in the user's home folder without their saying so. After that, add only the
-files the user names, never `git add -A` or `git add .`: the folder may hold credentials and
-private files.
+This folder may not be a git repository. Runs and research runs still work there: hand off
+anything longer than a quick look-up (about five file reads) with `dispatch` and its `task`
+argument instead of editing in the chat. Direct edits, combining and publishing still need a
+repository. Run `git init` and an empty first commit
+(`git commit --allow-empty -m "chore: first commit"`) as unsandboxed commands the user approves
+only when the user wants the folder to become a repository, never in the user's home folder
+without their saying so; afterwards add only the files the user names, never `git add -A` or
+`git add .`, because the folder may hold credentials and private files.
 
 ### Direct edits
 

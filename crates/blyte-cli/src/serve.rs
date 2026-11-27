@@ -109,6 +109,10 @@ struct RunWithHold<'a> {
     run: &'a crate::replay::Run,
     hold: Option<Hold>,
     combined: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    in_place: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    undone: bool,
 }
 
 #[derive(Serialize)]
@@ -583,16 +587,18 @@ pub fn reconcile_runs(
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     if !is_repository(&surface.root)? {
-        return Ok((
-            crate::live_runs::LiveRuns {
-                generated_at: now,
-                repo: surface.repo.clone(),
-                running: Vec::new(),
-                runs: Vec::new(),
-                skipped: Vec::new(),
-            },
-            Vec::new(),
-        ));
+        let records_dir = crate::dispatch_in_place::records_dir_for(&surface.root)?;
+        let owned = crate::requests::owned_run_ids_in(&records_dir, &surface.surface_id)?;
+        let mut live =
+            crate::live_runs::collect_in_place(&surface.root, &records_dir, now, surface.days)?;
+        live.running.retain(|run| owned.contains(&run.id));
+        live.runs.retain(|run| owned.contains(&run.id));
+
+        let mut errors = Vec::new();
+        if let Err(e) = crate::run_results::report_finished_runs_in(surface, &records_dir) {
+            errors.push(format!("run report failed: {e}"));
+        }
+        return Ok((live, errors));
     }
     let owned = crate::requests::owned_run_ids(surface)?;
     let mut live = crate::live_runs::collect(&surface.root, now, surface.days)?;
@@ -634,6 +640,10 @@ pub fn reconcile_runs(
 }
 
 fn handle_runs(surface: &Surface, now: u64) -> Response {
+    let is_repo = match is_repository(&surface.root) {
+        Ok(v) => v,
+        Err(e) => return json_error(500, e),
+    };
     let (live, errors) = match reconcile_runs(surface, now) {
         Ok(res) => res,
         Err(e) => return json_error(500, e),
@@ -642,28 +652,51 @@ fn handle_runs(surface: &Surface, now: u64) -> Response {
         surface.session.record_error(&msg);
     }
 
-    let run_refs: Vec<(&str, Option<&str>)> = live
-        .runs
-        .iter()
-        .map(|run| (run.id.as_str(), run.request.as_deref()))
-        .collect();
-    let combined_ids = match crate::requests::combined_run_ids(&surface.root, &run_refs) {
-        Ok(ids) => ids,
-        Err(e) => return json_error(500, e),
-    };
-
     let mut runs_with_hold = Vec::with_capacity(live.runs.len());
-    for run in &live.runs {
-        let hold = match crate::queue_actions::read_hold(&surface.root, &run.id) {
-            Ok(h) => h,
+    if is_repo {
+        let run_refs: Vec<(&str, Option<&str>)> = live
+            .runs
+            .iter()
+            .map(|run| (run.id.as_str(), run.request.as_deref()))
+            .collect();
+        let combined_ids = match crate::requests::combined_run_ids(&surface.root, &run_refs) {
+            Ok(ids) => ids,
             Err(e) => return json_error(500, e),
         };
-        let combined = combined_ids.contains(&run.id);
-        runs_with_hold.push(RunWithHold {
-            run,
-            hold,
-            combined,
-        });
+
+        for run in &live.runs {
+            let hold = match crate::queue_actions::read_hold(&surface.root, &run.id) {
+                Ok(h) => h,
+                Err(e) => return json_error(500, e),
+            };
+            let combined = combined_ids.contains(&run.id);
+            runs_with_hold.push(RunWithHold {
+                run,
+                hold,
+                combined,
+                in_place: false,
+                undone: false,
+            });
+        }
+    } else {
+        let records_dir = match crate::dispatch_in_place::records_dir_for(&surface.root) {
+            Ok(dir) => dir,
+            Err(e) => return json_error(500, e),
+        };
+        for run in &live.runs {
+            let hold = match crate::queue_actions::read_hold_in(&records_dir, &run.id) {
+                Ok(h) => h,
+                Err(e) => return json_error(500, e),
+            };
+            let undone = crate::in_place_review::is_undone(&records_dir, &run.id);
+            runs_with_hold.push(RunWithHold {
+                run,
+                hold,
+                combined: false,
+                in_place: true,
+                undone,
+            });
+        }
     }
 
     let payload = LiveRunsResponse {
@@ -695,11 +728,40 @@ fn require_repository(root: &Path) -> Result<(), Response> {
 }
 
 fn handle_run_diff(surface: &Surface, id: &str) -> Response {
-    if let Err(resp) = require_repository(&surface.root) {
-        return resp;
-    }
+    let is_repo = match is_repository(&surface.root) {
+        Ok(v) => v,
+        Err(e) => return json_error(500, e),
+    };
     if !is_valid_run_id(id) {
         return json_error(404, format!("unknown run: {id}"));
+    }
+    if !is_repo {
+        let records_dir = match crate::dispatch_in_place::records_dir_for(&surface.root) {
+            Ok(dir) => dir,
+            Err(e) => return json_error(500, e),
+        };
+        let start = records_dir.join(format!("{id}.start.json"));
+        let summary = records_dir.join(format!("{id}.json"));
+        let report_json = records_dir.join(format!("{id}.report.json"));
+        let report_md = records_dir.join(format!("{id}.report.md"));
+        if !start.exists() && !summary.exists() && !report_json.exists() && !report_md.exists() {
+            return json_error(404, format!("unknown run: {id}"));
+        }
+        if let Err(err) = crate::requests::run_owner_check_in(&records_dir, &surface.surface_id, id)
+        {
+            return request_action_error_response(err);
+        }
+        return match crate::in_place_review::diff_for_run(&records_dir, id) {
+            Ok(body) => Response::text(200, &body),
+            Err(e) => {
+                if !summary.exists() || e.contains("No such file") || e.contains("missing manifest")
+                {
+                    json_error(404, e)
+                } else {
+                    json_error(500, e)
+                }
+            }
+        };
     }
     let wt_dir = surface.root.join(".wt");
     let wt = wt_dir.join(id);
@@ -739,6 +801,40 @@ fn handle_run_diff(surface: &Surface, id: &str) -> Response {
     }
 }
 
+fn handle_run_undo(surface: &Surface, id: &str) -> Response {
+    let is_repo = match is_repository(&surface.root) {
+        Ok(v) => v,
+        Err(e) => return json_error(500, e),
+    };
+    if is_repo {
+        return json_error(
+            409,
+            "undo is for runs in a folder that is not a git repository",
+        );
+    }
+    if !is_valid_run_id(id) {
+        return json_error(404, format!("unknown run: {id}"));
+    }
+    let records_dir = match crate::dispatch_in_place::records_dir_for(&surface.root) {
+        Ok(dir) => dir,
+        Err(e) => return json_error(500, e),
+    };
+    let run_exists = records_dir.join(format!("{id}.start.json")).exists()
+        || records_dir.join(format!("{id}.json")).exists()
+        || records_dir.join(format!("{id}.report.json")).exists()
+        || records_dir.join(format!("{id}.report.md")).exists();
+    if run_exists {
+        if let Err(err) = crate::requests::run_owner_check_in(&records_dir, &surface.surface_id, id)
+        {
+            return request_action_error_response(err);
+        }
+    }
+    match crate::in_place_review::undo_in(&surface.root, id) {
+        Ok(lines) => Response::json(200, &serde_json::json!({ "lines": lines })),
+        Err(msg) => json_error(409, msg),
+    }
+}
+
 fn parse_action(raw: &str) -> Result<Action, String> {
     match raw {
         "accept" => Ok(Action::Accept),
@@ -753,9 +849,10 @@ fn parse_action(raw: &str) -> Result<Action, String> {
 }
 
 fn handle_run_decision(surface: &Surface, id: &str, req: &Request, now: u64) -> Response {
-    if let Err(resp) = require_repository(&surface.root) {
-        return resp;
-    }
+    let is_repo = match is_repository(&surface.root) {
+        Ok(v) => v,
+        Err(e) => return json_error(500, e),
+    };
     let obj = match parse_json_object(&req.body) {
         Ok(o) => o,
         Err(resp) => return resp,
@@ -775,24 +872,46 @@ fn handle_run_decision(surface: &Surface, id: &str, req: &Request, now: u64) -> 
         Some(_) => return json_error(400, "field note must be a string or null"),
     };
 
-    let wt_dir = surface.root.join(".wt");
-    let run_exists = is_valid_run_id(id)
-        && (wt_dir.join(id).exists()
-            || wt_dir.join(format!("{id}.start.json")).exists()
-            || wt_dir.join(format!("{id}.json")).exists()
-            || wt_dir.join(format!("{id}.report.json")).exists()
-            || wt_dir.join(format!("{id}.report.md")).exists());
-    if run_exists {
-        if let Err(err) = crate::requests::run_owner_check(surface, id) {
-            return request_action_error_response(err);
+    let decision = if is_repo {
+        let wt_dir = surface.root.join(".wt");
+        let run_exists = is_valid_run_id(id)
+            && (wt_dir.join(id).exists()
+                || wt_dir.join(format!("{id}.start.json")).exists()
+                || wt_dir.join(format!("{id}.json")).exists()
+                || wt_dir.join(format!("{id}.report.json")).exists()
+                || wt_dir.join(format!("{id}.report.md")).exists());
+        if run_exists {
+            if let Err(err) = crate::requests::run_owner_check(surface, id) {
+                return request_action_error_response(err);
+            }
         }
-    }
-
-    let decision =
         match crate::queue_actions::decide(&surface.root, id, action, note.as_deref(), now) {
             Ok(d) => d,
             Err(e) => return json_error(400, e),
+        }
+    } else {
+        let records_dir = match crate::dispatch_in_place::records_dir_for(&surface.root) {
+            Ok(dir) => dir,
+            Err(e) => return json_error(500, e),
         };
+        let run_exists = is_valid_run_id(id)
+            && (records_dir.join(format!("{id}.start.json")).exists()
+                || records_dir.join(format!("{id}.json")).exists()
+                || records_dir.join(format!("{id}.report.json")).exists()
+                || records_dir.join(format!("{id}.report.md")).exists());
+        if run_exists {
+            if let Err(err) =
+                crate::requests::run_owner_check_in(&records_dir, &surface.surface_id, id)
+            {
+                return request_action_error_response(err);
+            }
+        }
+        match crate::queue_actions::decide_in_place(&records_dir, id, action, note.as_deref(), now)
+        {
+            Ok(d) => d,
+            Err(e) => return json_error(400, e),
+        }
+    };
     let seq = match surface.session.record_decision(
         &decision.run,
         &action_str,
@@ -802,7 +921,7 @@ fn handle_run_decision(surface: &Surface, id: &str, req: &Request, now: u64) -> 
         Ok(s) => s,
         Err(e) => return json_error(500, e),
     };
-    if action == Action::Accept {
+    if is_repo && action == Action::Accept {
         match crate::requests::run_request_id(&surface.root, &decision.run) {
             Ok(Some(req_id)) => {
                 if let Err(e) = crate::requests::maybe_combine(surface, &req_id) {
@@ -1065,6 +1184,14 @@ pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
                             return method_not_allowed(req);
                         }
                         return handle_run_decision(surface, id, req, now);
+                    }
+                }
+                if let Some(id) = rest.strip_suffix("/undo") {
+                    if !id.is_empty() && !id.contains('/') {
+                        if req.method != "POST" {
+                            return method_not_allowed(req);
+                        }
+                        return handle_run_undo(surface, id);
                     }
                 }
             }
@@ -2022,7 +2149,7 @@ where
     if !is_repo {
         let _ = writeln!(
             err,
-            "blyte: {} is not a git repository: runs, combining and publishing are off until it is one",
+            "blyte: {} is not a git repository: runs edit this folder in place; combining and publishing are off",
             main_checkout.display()
         );
         let _ = err.flush();

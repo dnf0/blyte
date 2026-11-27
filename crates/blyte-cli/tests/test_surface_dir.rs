@@ -1,13 +1,16 @@
+use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
+use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
 use blyte_agent::sandbox::validate_surface_id;
 use blyte_cli::surface_dir::{
-    is_running, list_records_in, new_surface_id, pick_name, read_record, surface_dir, surfaces_dir,
-    validate_surface_name, write_record_in, SurfaceRecord,
+    folder_store, in_place_lock_path, is_running, list_records_in, new_surface_id, pick_name,
+    read_record, run_store, surface_dir, surfaces_dir, tasks_dir, validate_surface_name,
+    write_record_in, SurfaceRecord,
 };
 
 fn sample_record(id: &str, name: &str, port: u16, started_at: u64) -> SurfaceRecord {
@@ -238,4 +241,137 @@ fn pick_name_handles_defaults_suffixes_conflicts_and_invalid_bases() {
     );
 
     assert_eq!(pick_name("my repo", Some("ok"), &[]).unwrap(), "ok");
+}
+
+fn init_git_repo(dir: &Path) {
+    let status = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git init failed in {}", dir.display());
+}
+
+fn dir_entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn run_store_of_a_repository_is_its_wt_folder() {
+    let state = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    init_git_repo(repo.path());
+
+    let got = run_store(state.path(), repo.path()).unwrap();
+    assert_eq!(got, repo.path().join(".wt"));
+    assert!(!got.exists());
+    assert!(dir_entries(state.path()).is_empty());
+}
+
+#[test]
+fn run_store_of_a_plain_folder_is_in_the_state_directory() {
+    let state = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    std::fs::write(folder.path().join("note.txt"), "hello\n").unwrap();
+    let before = dir_entries(folder.path());
+
+    let got = run_store(state.path(), folder.path()).unwrap();
+    let folders_root = state.path().join("folders");
+    assert!(got.starts_with(&folders_root), "{}", got.display());
+    assert_eq!(got.file_name(), Some(OsStr::new("runs")));
+    assert_eq!(
+        got.parent().and_then(|p| p.parent()),
+        Some(folders_root.as_path())
+    );
+    assert!(got.is_dir());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&got).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "expected 0700, got {:o}", mode);
+    }
+    assert_eq!(dir_entries(folder.path()), before);
+}
+
+#[test]
+fn two_plain_folders_get_different_run_stores() {
+    let state = tempfile::tempdir().unwrap();
+    let folder_a = tempfile::tempdir().unwrap();
+    let folder_b = tempfile::tempdir().unwrap();
+
+    let store_a = run_store(state.path(), folder_a.path()).unwrap();
+    let store_b = run_store(state.path(), folder_b.path()).unwrap();
+    assert_ne!(store_a, store_b);
+}
+
+#[test]
+fn tasks_dir_of_a_plain_folder_is_in_the_state_directory() {
+    let state = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    std::fs::write(folder.path().join("note.txt"), "hello\n").unwrap();
+    let before = dir_entries(folder.path());
+
+    let got = tasks_dir(state.path(), folder.path()).unwrap();
+    let expected_store = folder_store(state.path(), folder.path()).unwrap();
+    assert_eq!(got, expected_store.join("tasks"));
+    assert!(got.is_dir());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&got).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "expected 0700, got {:o}", mode);
+    }
+    assert_eq!(dir_entries(folder.path()), before);
+}
+
+#[test]
+fn tasks_dir_of_a_repository_is_wt_tasks() {
+    let state = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    init_git_repo(repo.path());
+
+    let got = tasks_dir(state.path(), repo.path()).unwrap();
+    assert_eq!(got, repo.path().join(".wt").join("tasks"));
+    assert!(!repo.path().join(".wt").exists());
+    assert!(dir_entries(state.path()).is_empty());
+}
+
+#[test]
+fn in_place_lock_path_is_refused_for_a_repository() {
+    let state = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    init_git_repo(repo.path());
+
+    let err = in_place_lock_path(state.path(), repo.path()).unwrap_err();
+    assert!(err.contains(&repo.path().display().to_string()), "{err}");
+    assert!(dir_entries(state.path()).is_empty());
+}
+
+#[test]
+fn in_place_lock_path_of_a_plain_folder_is_in_its_store() {
+    let state = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    std::fs::write(folder.path().join("note.txt"), "hello\n").unwrap();
+    let before = dir_entries(folder.path());
+
+    let got = in_place_lock_path(state.path(), folder.path()).unwrap();
+    let expected_store = folder_store(state.path(), folder.path()).unwrap();
+    assert_eq!(got, expected_store.join("in-place.lock"));
+    assert!(!got.exists());
+    assert_eq!(dir_entries(folder.path()), before);
+}
+
+#[test]
+fn run_store_of_a_missing_folder_is_an_error_naming_it() {
+    let state = tempfile::tempdir().unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let missing = parent.path().join("does-not-exist");
+
+    let err = run_store(state.path(), &missing).unwrap_err();
+    assert!(err.contains(&missing.display().to_string()), "{err}");
 }

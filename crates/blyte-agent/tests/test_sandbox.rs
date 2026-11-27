@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use blyte_agent::sandbox::{
-    conversation_allowed, default_allowed, profile, surface_message_path_for_id,
+    conversation_allowed, default_allowed, profile, state_blyte_dir, surface_message_path_for_id,
     surface_token_path_for_id, validate_surface_id,
 };
 
@@ -258,6 +258,83 @@ fn surface_message_path_rejects_an_invalid_id() {
     let token_err = surface_token_path_for_id("../x").unwrap_err();
     let msg_err = surface_message_path_for_id("../x").unwrap_err();
     assert_eq!(msg_err, token_err);
+}
+
+struct StateEnvGuard {
+    prev_blyte: Option<OsString>,
+    prev_xdg: Option<OsString>,
+    prev_home: Option<OsString>,
+}
+
+impl StateEnvGuard {
+    fn set(blyte: Option<&std::ffi::OsStr>, xdg: Option<&Path>, home: Option<&Path>) -> Self {
+        let prev_blyte = std::env::var_os("BLYTE_STATE_DIR");
+        let prev_xdg = std::env::var_os("XDG_STATE_HOME");
+        let prev_home = std::env::var_os("HOME");
+        match blyte {
+            Some(v) => std::env::set_var("BLYTE_STATE_DIR", v),
+            None => std::env::remove_var("BLYTE_STATE_DIR"),
+        }
+        match xdg {
+            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+        match home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        Self {
+            prev_blyte,
+            prev_xdg,
+            prev_home,
+        }
+    }
+}
+
+impl Drop for StateEnvGuard {
+    fn drop(&mut self) {
+        match &self.prev_blyte {
+            Some(v) => std::env::set_var("BLYTE_STATE_DIR", v),
+            None => std::env::remove_var("BLYTE_STATE_DIR"),
+        }
+        match &self.prev_xdg {
+            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+        match &self.prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
+#[test]
+fn state_blyte_dir_prefers_blyte_state_dir() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let blyte = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let _guard = StateEnvGuard::set(
+        Some(blyte.path().as_os_str()),
+        Some(xdg.path()),
+        Some(home.path()),
+    );
+
+    assert_eq!(state_blyte_dir(), Some(blyte.path().to_path_buf()));
+}
+
+#[test]
+fn an_empty_blyte_state_dir_is_ignored() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let xdg = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let _guard = StateEnvGuard::set(
+        Some(std::ffi::OsStr::new("")),
+        Some(xdg.path()),
+        Some(home.path()),
+    );
+
+    assert_eq!(state_blyte_dir(), Some(xdg.path().join("blyte")));
 }
 
 #[cfg(target_os = "macos")]
