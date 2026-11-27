@@ -397,6 +397,8 @@
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      direction: rtl;
+      text-align: left;
     }
 
     .surface-switcher-doing {
@@ -3574,7 +3576,7 @@
           ? '<span class="surface-switcher-branch">' + escapeHtml(String(s.branch)) + '</span>'
           : '';
         const badgeHtml = isCurrent ? '<span class="surface-switcher-badge">current</span>' : '';
-        const rootHtml = '<div class="surface-switcher-root mono">' + escapeHtml(s && s.root != null ? String(s.root) : "") + '</div>';
+        const rootHtml = '<div class="surface-switcher-root mono" title="' + escapeHtml(s && s.root != null ? String(s.root) : "") + '">&lrm;' + escapeHtml(s && s.root != null ? String(s.root) : "") + '</div>';
         const doingHtml = '<div class="surface-switcher-doing">' + escapeHtml(s && s.doing != null ? String(s.doing) : "") + '</div>';
         const errorHtml = !hasUrl
           ? '<div class="surface-switcher-row-error">' + escapeHtml(s && s.error != null ? String(s.error) : "surface unavailable") + '</div>'
