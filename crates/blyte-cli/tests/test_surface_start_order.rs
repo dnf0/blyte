@@ -245,6 +245,10 @@ struct StartSnapshot {
     reg_files: Vec<PathBuf>,
     live_ids: Vec<String>,
     records: Result<Vec<String>, String>,
+    allow_read: Vec<PathBuf>,
+    read_roots: Vec<PathBuf>,
+    attachments_exists: bool,
+    log_exists: bool,
 }
 
 #[test]
@@ -266,7 +270,7 @@ fn nothing_advertises_the_surface_while_its_session_is_starting() {
             name: Some("starting-surface".to_string()),
             ..default_surface_args()
         },
-        move |_cfg, _approver| {
+        move |cfg, _approver| {
             let reg_files = registry_files(&reg_dir_bg);
             let live_ids = live_entries(&reg_dir_bg)
                 .unwrap()
@@ -275,10 +279,25 @@ fn nothing_advertises_the_surface_while_its_session_is_starting() {
                 .collect();
             let records = list_records_in(&surfaces_root_bg)
                 .map(|list| list.into_iter().map(|r| r.record.id).collect());
+            let allow_read = cfg.allow_read.clone();
+            let read_roots = blyte_agent::tools::read_roots();
+            let attachments_exists = allow_read
+                .iter()
+                .any(|p| p.ends_with("attachments") && p.is_dir());
+            let log_exists = allow_read
+                .iter()
+                .find(|p| p.ends_with("attachments"))
+                .and_then(|p| p.parent())
+                .map(|dir| dir.join("entries.jsonl").is_file())
+                .unwrap_or(false);
             *observed_bg.lock().unwrap() = Some(StartSnapshot {
                 reg_files,
                 live_ids,
                 records,
+                allow_read,
+                read_roots,
+                attachments_exists,
+                log_exists,
             });
             Ok((Box::new(NoopRunner) as Box<dyn PromptRunner>, None))
         },
@@ -293,6 +312,26 @@ fn nothing_advertises_the_surface_while_its_session_is_starting() {
         .records
         .expect("list_records_in failed while session was starting");
 
+    assert!(
+        snapshot.attachments_exists,
+        "attachments dir in config.allow_read must exist on disk before runner starts; allow_read={:?}",
+        snapshot.allow_read
+    );
+    assert!(
+        snapshot.log_exists,
+        "entries.jsonl must be opened before runner starts; allow_read={:?}",
+        snapshot.allow_read
+    );
+    let attachments_path = snapshot
+        .allow_read
+        .iter()
+        .find(|p| p.ends_with("attachments"))
+        .expect("attachments dir missing from config.allow_read");
+    assert!(
+        snapshot.read_roots.iter().any(|p| p == attachments_path),
+        "read_roots must contain attachments dir before runner starts; read_roots={:?}",
+        snapshot.read_roots
+    );
     assert!(
         snapshot.reg_files.is_empty(),
         "registry directory must be empty while session is starting; found {:?}",
@@ -318,6 +357,10 @@ fn nothing_advertises_the_surface_while_its_session_is_starting() {
     assert_eq!(after_records[0].record.name, running.name);
     assert_eq!(after_records[0].record.port, running.port);
     assert_eq!(after_records[0].record.id, after_live[0].id);
+    assert!(
+        !after_records[0].dir.join(".starting").exists(),
+        ".starting marker must be removed once surface.json is written"
+    );
 
     let (code, stderr) = running.stop_and_join();
     assert_eq!(code, 0, "stderr={stderr}");
@@ -372,6 +415,13 @@ fn a_failed_session_start_leaves_no_record_and_no_registry_entry() {
         records.is_empty(),
         "list_records_in must be empty after failed start; found {records:?}"
     );
+    if let Ok(entries) = std::fs::read_dir(surfaces_dir(&repo)) {
+        let leftover: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        assert!(
+            leftover.is_empty(),
+            "surfaces dir must hold no leftover directory after failed start; found {leftover:?}"
+        );
+    }
 }
 
 #[test]

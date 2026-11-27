@@ -1077,7 +1077,12 @@ impl Shared {
         }
     }
 
-    fn attach_log(&self, log_path: Option<PathBuf>, err: &mut dyn Write) -> Result<(), String> {
+    fn new_with_log(
+        model: String,
+        effort: Option<String>,
+        log_path: Option<PathBuf>,
+        err: &mut dyn Write,
+    ) -> Result<Self, String> {
         let attachments_root = log_path
             .as_ref()
             .and_then(|p| p.parent())
@@ -1093,18 +1098,35 @@ impl Shared {
         let last_seq = entries.iter().map(|e| e.seq).max().unwrap_or(0);
         let next_approval_id = max_approval_id(&entries);
         let had_entries = !entries.is_empty();
-        let mut state = self.lock_state();
-        state.entries = entries;
-        state.last_seq = last_seq;
-        state.log = log;
-        state.attachments_root = attachments_root;
-        state.next_approval_id = next_approval_id;
+        let mut state = SessionState {
+            entries,
+            last_seq,
+            log,
+            attachments_root,
+            write_failure_noticed: false,
+            queue: VecDeque::new(),
+            session_prefix: new_session_prefix(),
+            request_seq: 0,
+            model,
+            effort,
+            busy: false,
+            closed: false,
+            approvals: HashMap::new(),
+            next_approval_id,
+            peer_turns_since_user: 0,
+        };
         if had_entries {
             state.push_entry(EntryBody::Error {
                 message: RESTART_NOTICE_TEXT.to_string(),
             });
         }
-        Ok(())
+        Ok(Self {
+            state: Mutex::new(state),
+            activity_hook: Mutex::new(None),
+            log_cv: Condvar::new(),
+            work_cv: Condvar::new(),
+            approval_cv: Condvar::new(),
+        })
     }
 
     fn lock_state(&self) -> MutexGuard<'_, SessionState> {
@@ -1223,12 +1245,11 @@ impl Session {
         F: FnOnce(Arc<SurfaceApprover>) -> Result<Box<dyn PromptRunner>, String>,
     {
         let (base_model, effort) = parse_model_and_effort(&model);
-        let shared = Arc::new(Shared::new(base_model, effort));
+        let shared = Arc::new(Shared::new_with_log(base_model, effort, log_path, err)?);
         let approver = Arc::new(SurfaceApprover {
             shared: Arc::clone(&shared),
         });
         let runner = build_runner(approver)?;
-        shared.attach_log(log_path, err)?;
         let worker_shared = Arc::clone(&shared);
         std::thread::spawn(move || worker_loop(runner, worker_shared));
         Ok(Session {

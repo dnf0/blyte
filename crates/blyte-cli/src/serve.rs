@@ -2033,25 +2033,31 @@ where
     };
 
     let is_resume = args.resume.is_some();
-    let attachments_dir = if is_resume {
-        match prepare_attachments_dir(&surface_record_dir) {
-            Ok(p) => p,
-            Err(e) => {
-                let _ = writeln!(err, "blyte: {e}");
-                return 1;
-            }
-        }
+    let mut starting_dir_guard = if is_resume {
+        StartingDirGuard { dir: None }
     } else {
-        match planned_attachments_dir(&surface_record_dir) {
-            Ok(p) => p,
-            Err(e) => {
-                let _ = writeln!(err, "blyte: {e}");
-                return 1;
-            }
+        if let Err(e) = crate::surface_dir::prepare_starting_dir(&surface_record_dir) {
+            let _ = writeln!(err, "blyte: {e}");
+            return 1;
+        }
+        StartingDirGuard {
+            dir: Some(surface_record_dir.clone()),
         }
     };
+    let attachments_dir = match prepare_attachments_dir(&surface_record_dir) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            return 1;
+        }
+    };
+    let mut read_roots = blyte_agent::tools::read_roots();
+    if !read_roots.iter().any(|p| p == &attachments_dir) {
+        read_roots.push(attachments_dir.clone());
+        blyte_agent::tools::set_read_roots(read_roots);
+    }
     if !config.allow_read.iter().any(|p| p == &attachments_dir) {
-        config.allow_read.push(attachments_dir.clone());
+        config.allow_read.push(attachments_dir);
     }
     blyte_agent::tools::set_peer_tools(Some(Arc::new(crate::tell::SurfacePeerTools {
         registry_dir: registry_dir.clone(),
@@ -2082,31 +2088,11 @@ where
         }) {
             Ok(s) => s,
             Err(e) => {
-                if !is_resume {
-                    cleanup_unrecorded_surface_dir(&surface_record_dir);
-                }
                 let _ = writeln!(err, "blyte: {e}");
                 let _ = err.flush();
                 return 1;
             }
         };
-    let attachments_dir = if is_resume {
-        attachments_dir
-    } else {
-        match prepare_attachments_dir(&surface_record_dir) {
-            Ok(p) => p,
-            Err(e) => {
-                cleanup_unrecorded_surface_dir(&surface_record_dir);
-                let _ = writeln!(err, "blyte: {e}");
-                return 1;
-            }
-        }
-    };
-    let mut read_roots = blyte_agent::tools::read_roots();
-    if !read_roots.iter().any(|p| p == &attachments_dir) {
-        read_roots.push(attachments_dir);
-        blyte_agent::tools::set_read_roots(read_roots);
-    }
     let record = SurfaceRecord {
         id: surface_id.clone(),
         name: surface_name.clone(),
@@ -2116,12 +2102,10 @@ where
         started_at,
     };
     if let Err(e) = crate::surface_dir::write_record_in(&surface_record_dir, &record) {
-        if !is_resume {
-            cleanup_unrecorded_surface_dir(&surface_record_dir);
-        }
         let _ = writeln!(err, "blyte: {e}");
         return 1;
     }
+    starting_dir_guard.disarm();
     let registry_entry = crate::surface_registry::RegistryEntry {
         id: surface_id.clone(),
         name: surface_name.clone(),
@@ -2243,31 +2227,21 @@ fn prepare_attachments_dir(surface_record_dir: &Path) -> Result<PathBuf, String>
     canonicalize_attachments_dir(&attachments_dir)
 }
 
-fn planned_attachments_dir(surface_record_dir: &Path) -> Result<PathBuf, String> {
-    let parent = surface_record_dir.parent().ok_or_else(|| {
-        format!(
-            "surface record directory has no parent: {}",
-            surface_record_dir.display()
-        )
-    })?;
-    let id = surface_record_dir.file_name().ok_or_else(|| {
-        format!(
-            "surface record directory has no name: {}",
-            surface_record_dir.display()
-        )
-    })?;
-    std::fs::create_dir_all(parent)
-        .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
-    let canonical_parent = std::fs::canonicalize(parent)
-        .map_err(|e| format!("failed to canonicalize {}: {e}", parent.display()))?;
-    Ok(crate::attachments::attachments_dir(
-        &canonical_parent.join(id),
-    ))
+struct StartingDirGuard {
+    dir: Option<PathBuf>,
 }
 
-fn cleanup_unrecorded_surface_dir(surface_record_dir: &Path) {
-    if !surface_record_dir.join("surface.json").exists() {
-        let _ = std::fs::remove_dir_all(surface_record_dir);
+impl StartingDirGuard {
+    fn disarm(&mut self) {
+        self.dir = None;
+    }
+}
+
+impl Drop for StartingDirGuard {
+    fn drop(&mut self) {
+        if let Some(ref dir) = self.dir {
+            crate::surface_dir::cleanup_starting_dir(dir);
+        }
     }
 }
 
