@@ -65,3 +65,51 @@ Run them with `cargo test -p blyte --test test_queue_actions`.
 **Constraints.** Existing tests pass unmodified. No fallbacks. Touch only the two files.
 
 **Commit message:** `fix(review): a research run is reviewed while its scratch folder still exists`
+
+### Task ST1: the surface records and shows how long each reply took
+
+**Depends on:** none. **Siblings:** RV1 changes `queue_actions.rs` separately; it is not in this
+worktree and is not to be touched here.
+
+**Why.** On 2026-11-27 three short replies in a surface took 11 s, 8 s and 18 s (91, 148 and 426
+output tokens). The log has only whole seconds and no time of first output, so nobody (the user or
+the model) can say where the time went.
+
+**Files:** `crates/blyte-cli/src/session.rs`, `crates/blyte-cli/assets/surface/index.html`,
+`crates/blyte-cli/tests/test_session.rs` (and `crates/blyte-cli/src/serve.rs` only if an
+exhaustive match there needs the new fields).
+
+**What to build.**
+
+1. The `Idle` entry (`EntryBody::Idle` and `EntryBodyWire::Idle` in `session.rs`) gains two fields:
+   - `seconds: Option<f64>`: from the moment the user's message began to be handled (the point the
+     user-message entry for this reply was pushed) to the moment the `Idle` entry is pushed,
+     measured with `std::time::Instant`, rounded to one decimal place;
+   - `first_output_seconds: Option<f64>`: from the same start to the first model output of that
+     reply (the first text or thinking delta, or the first tool call, whichever comes first),
+     rounded to one decimal place; `None` when the reply produced no model output.
+   Both are `#[serde(default, skip_serializing_if = "Option::is_none")]` on the wire, so a log
+   written before this change still reads; an old entry reads as `None`. `None` means "not
+   measured", and nothing may show it as zero. **No fallbacks**: do not estimate either value from
+   the whole-second `ts` fields.
+2. In `assets/surface/index.html`, the line under a finished reply (now
+   `N turns · USD 0.02`) becomes `N turns · USD 0.02 · 8.4 s (first output 6.1 s)` when both are
+   present, `· 8.4 s` when only `seconds` is, and is unchanged when neither is.
+
+**Tests** in `crates/blyte-cli/tests/test_session.rs`, using the scripted model the existing tests
+there use (read them first):
+
+1. `idle_entry_records_how_long_the_reply_took`: a scripted reply; the `Idle` entry has
+   `seconds` `Some(s)` with `s >= 0.0`, and `first_output_seconds` `Some(f)` with `f <= s`.
+2. `idle_entry_without_times_still_reads`: the JSON line
+   `{"seq":1,"ts":1,"kind":"idle","turns":1,"cost_usd":0.01}` deserialises, with both fields `None`,
+   and serialises back without either key.
+3. `surface_page_shows_reply_time`: `assets/surface/index.html` contains `first_output_seconds`
+   and the text `first output`.
+
+Run with `cargo test -p blyte --test test_session`.
+
+**Constraints.** Existing tests pass unmodified, apart from adding the two fields where a test
+builds an `Idle` entry by hand. No fallbacks.
+
+**Commit message:** `feat(surface): each reply shows how long it took`
