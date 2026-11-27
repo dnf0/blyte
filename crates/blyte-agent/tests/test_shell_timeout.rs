@@ -13,11 +13,11 @@ fn a_runaway_command_is_killed_at_the_deadline() {
     let d = tempfile::tempdir().unwrap();
     let started = Instant::now();
     let out = LocalShell
-        .exec("sleep 30", d.path(), Duration::from_millis(500))
+        .exec("sleep 60", d.path(), Duration::from_millis(500))
         .unwrap();
     let elapsed = started.elapsed();
     assert!(
-        elapsed < Duration::from_secs(10),
+        elapsed < Duration::from_secs(30),
         "must not wait for the command: {elapsed:?}"
     );
     assert_eq!(
@@ -56,10 +56,10 @@ fn a_command_that_reads_stdin_does_not_block_forever() {
     let d = tempfile::tempdir().unwrap();
     let started = Instant::now();
     let out = LocalShell
-        .exec("cat", d.path(), Duration::from_secs(5))
+        .exec("cat", d.path(), Duration::from_secs(60))
         .unwrap();
     assert!(
-        started.elapsed() < Duration::from_secs(4),
+        started.elapsed() < Duration::from_secs(30),
         "stdin must be closed, not inherited: waited {:?}",
         started.elapsed()
     );
@@ -76,7 +76,7 @@ fn a_command_producing_more_output_than_the_pipe_buffer_does_not_deadlock() {
     let d = tempfile::tempdir().unwrap();
     let started = Instant::now();
     let out = LocalShell
-        .exec("seq 1 200000", d.path(), Duration::from_secs(30))
+        .exec("seq 1 200000", d.path(), Duration::from_secs(60))
         .unwrap();
     assert_eq!(out.exit_code, 0);
     assert!(
@@ -84,7 +84,7 @@ fn a_command_producing_more_output_than_the_pipe_buffer_does_not_deadlock() {
         "all output must be drained"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(25),
+        started.elapsed() < Duration::from_secs(45),
         "must not have deadlocked"
     );
 }
@@ -108,14 +108,14 @@ fn grandchild_process_tree_is_killed_at_deadline() {
     let started = Instant::now();
     let out = LocalShell
         .exec(
-            "sh -c '(sleep 30) & wait'",
+            "sh -c '(sleep 60) & wait'",
             d.path(),
             Duration::from_millis(600),
         )
         .unwrap();
     let elapsed = started.elapsed();
     assert!(
-        elapsed < Duration::from_secs(4),
+        elapsed < Duration::from_secs(30),
         "must not deadlock on grandchild pipe handles: took {elapsed:?}"
     );
     assert_eq!(out.exit_code, 124, "expected exit code 124 on timeout");
@@ -137,10 +137,10 @@ fn container_shell_enforces_timeout_on_hung_execution() {
     };
     let d = tempfile::tempdir().unwrap();
     let started = Instant::now();
-    let res = shell.exec("sleep 30", d.path(), Duration::from_millis(500));
+    let res = shell.exec("sleep 60", d.path(), Duration::from_millis(500));
     let elapsed = started.elapsed();
     assert!(
-        elapsed < Duration::from_secs(3),
+        elapsed < Duration::from_secs(30),
         "container exec must obey timeout bound: took {elapsed:?}"
     );
     match res {

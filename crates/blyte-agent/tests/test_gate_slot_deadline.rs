@@ -64,43 +64,26 @@ impl Shell for FastShell {
     }
 }
 
-enum ClockState {
-    Frozen(Duration),
-    Running(Instant),
-}
-
 struct GateClock {
     base: Instant,
-    state: Mutex<ClockState>,
+    offset: Mutex<Duration>,
 }
 
 impl GateClock {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             base: Instant::now(),
-            state: Mutex::new(ClockState::Frozen(Duration::ZERO)),
+            offset: Mutex::new(Duration::ZERO),
         })
     }
 
-    fn start(&self) {
-        let mut g = self.state.lock().unwrap();
-        if matches!(*g, ClockState::Frozen(d) if d.is_zero()) {
-            *g = ClockState::Running(Instant::now());
-        }
-    }
-
-    fn freeze(&self) {
-        let mut g = self.state.lock().unwrap();
-        if let ClockState::Running(started) = *g {
-            *g = ClockState::Frozen(started.elapsed());
-        }
+    fn advance(&self, delta: Duration) {
+        let mut g = self.offset.lock().unwrap();
+        *g += delta;
     }
 
     fn now(&self) -> Instant {
-        match *self.state.lock().unwrap() {
-            ClockState::Running(started) => self.base + started.elapsed(),
-            ClockState::Frozen(offset) => self.base + offset,
-        }
+        self.base + *self.offset.lock().unwrap()
     }
 }
 
@@ -108,7 +91,7 @@ impl GateClock {
 fn a_gate_waiting_for_a_slot_past_max_duration_still_runs_and_verifies() {
     let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     const BUDGET: Duration = Duration::from_millis(80);
-    const HOLD: Duration = Duration::from_millis(120);
+    const HOLD: Duration = Duration::from_millis(400);
 
     let d = tempfile::tempdir().unwrap();
     let slot_dir = tempfile::tempdir().unwrap();
@@ -138,13 +121,12 @@ fn a_gate_waiting_for_a_slot_past_max_duration_still_runs_and_verifies() {
     let tx = Mutex::new(Some(tx));
     let on_event = |e: Event<'_>| match e {
         Event::GateStart { .. } => {
-            clock_for_event.start();
             if let Some(sender) = tx.lock().unwrap().take() {
                 let _ = sender.send(());
             }
         }
-        Event::GateSlotWait { .. } => {
-            clock_for_event.freeze();
+        Event::GateSlotWait { ms } => {
+            clock_for_event.advance(Duration::from_millis(ms));
         }
         _ => {}
     };

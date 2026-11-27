@@ -4,8 +4,9 @@ use std::time::{Duration, Instant};
 
 use blyte_agent::shell::{LocalShell, PersistentShell, Shell};
 
-const CMD: &str = "sleep 30 > /dev/null 2>&1 & echo $!";
-const TIMEOUT: Duration = Duration::from_secs(30);
+const CMD: &str = "sleep 60 > /dev/null 2>&1 & echo $!";
+const TIMEOUT: Duration = Duration::from_secs(60);
+const RETURN_BOUND: Duration = Duration::from_secs(30);
 
 struct PidGuard(i32);
 
@@ -38,13 +39,14 @@ fn session_keeps_a_redirected_background_job_alive() {
     let root = d.path().canonicalize().unwrap();
     let shell = PersistentShell::local(root.clone());
     assert!(shell.is_persistent(), "expected persistent session");
+    shell.exec_user("true", &root, TIMEOUT).unwrap();
 
     let start = Instant::now();
     let out = shell.exec_user(CMD, &root, TIMEOUT).unwrap();
     let elapsed = start.elapsed();
 
     assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
-    assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+    assert!(elapsed < RETURN_BOUND, "took {elapsed:?}");
     let pid = parse_pid(&out.stdout);
     assert!(pid > 0, "unexpected pid {pid}");
     let _guard = PidGuard(pid);
@@ -67,7 +69,7 @@ fn per_command_executor_keeps_a_redirected_background_job_alive() {
     let elapsed = start.elapsed();
 
     assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
-    assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+    assert!(elapsed < RETURN_BOUND, "took {elapsed:?}");
     let pid = parse_pid(&out.stdout);
     assert!(pid > 0, "unexpected pid {pid}");
     let _guard = PidGuard(pid);

@@ -312,11 +312,16 @@ fn no_retry_event_without_a_retry() {
 struct DelayedStreamProvider {
     total_delay: Duration,
     first_data_ms: u64,
+    completed_at: Mutex<Option<std::time::Instant>>,
 }
 
 impl Provider for DelayedStreamProvider {
     fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
-        std::thread::sleep(self.total_delay);
+        let entered = std::time::Instant::now();
+        while entered.elapsed() < self.total_delay {
+            std::thread::sleep(self.total_delay.saturating_sub(entered.elapsed()));
+        }
+        *self.completed_at.lock().unwrap() = Some(std::time::Instant::now());
         Ok(Response {
             text: "streamed reply".into(),
             tool_calls: vec![],
@@ -347,8 +352,9 @@ impl Provider for DelayedStreamProvider {
 fn emits_first_output_before_turn_using_stream_timing() {
     let dir = tempfile::tempdir().unwrap();
     let provider = DelayedStreamProvider {
-        total_delay: Duration::from_millis(250),
+        total_delay: Duration::from_millis(80),
         first_data_ms: 40,
+        completed_at: Mutex::new(None),
     };
     let observed = Mutex::new((
         Vec::<&'static str>::new(),
@@ -387,6 +393,7 @@ fn emits_first_output_before_turn_using_stream_timing() {
         base_check: blyte_agent::run::BaseCheck::None,
     };
     let mut state = State::new("stream test", "");
+    let before_run = std::time::Instant::now();
     let (outcome, _) = runner.run(&mut state);
     assert_eq!(outcome, Outcome::Verified);
 
@@ -394,8 +401,21 @@ fn emits_first_output_before_turn_using_stream_timing() {
     assert_eq!(order, vec!["first_output", "turn"]);
     let first_at = first_output_at.expect("expected FirstOutput instant");
     let turn_at = turn_emitted_at.expect("expected Turn instant");
+    let completed_at = provider
+        .completed_at
+        .lock()
+        .unwrap()
+        .expect("expected provider completion instant");
     assert!(
-        turn_at.saturating_duration_since(first_at) >= Duration::from_millis(150),
-        "expected FirstOutput to be recorded well before Turn completion"
+        first_at >= before_run + Duration::from_millis(provider.first_data_ms),
+        "expected FirstOutput ({first_at:?}) to reflect first_data_ms from call start ({before_run:?})"
+    );
+    assert!(
+        first_at < completed_at,
+        "expected FirstOutput ({first_at:?}) to be recorded before provider returned ({completed_at:?})"
+    );
+    assert!(
+        first_at < turn_at,
+        "expected FirstOutput ({first_at:?}) to precede Turn emission ({turn_at:?})"
     );
 }

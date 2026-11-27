@@ -37,6 +37,8 @@ pub const PUBLISH_BODY_MAX_BYTES: usize = 20_000;
 static READ_ROOTS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::new());
 static DISPATCH_CMD: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 static BLYTE_TOOL: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+static BACKGROUND_STARTUP_WAIT_OVERRIDE: std::sync::RwLock<Option<Duration>> =
+    std::sync::RwLock::new(None);
 static BLYTE_TASKS_DIR: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
 static BLYTE_RUN_STORE: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
 static IN_PLACE_LOCK_PATH: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
@@ -185,6 +187,21 @@ pub fn set_blyte_tool(exe: Option<std::path::PathBuf>) {
         Ok(mut lock) => *lock = exe,
         Err(poisoned) => *poisoned.into_inner() = exe,
     }
+}
+
+pub fn set_background_startup_wait(wait: Option<Duration>) {
+    match BACKGROUND_STARTUP_WAIT_OVERRIDE.write() {
+        Ok(mut lock) => *lock = wait,
+        Err(poisoned) => *poisoned.into_inner() = wait,
+    }
+}
+
+fn background_startup_wait() -> Duration {
+    BACKGROUND_STARTUP_WAIT_OVERRIDE
+        .read()
+        .map(|r| *r)
+        .unwrap_or_else(|e| *e.into_inner())
+        .unwrap_or(BACKGROUND_STARTUP_WAIT)
 }
 
 pub fn blyte_tool() -> Option<PathBuf> {
@@ -2206,7 +2223,7 @@ fn run_background_dispatch(
     };
     drop(cmd_builder);
 
-    let deadline = std::time::Instant::now() + BACKGROUND_STARTUP_WAIT;
+    let deadline = std::time::Instant::now() + background_startup_wait();
     let exited = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
