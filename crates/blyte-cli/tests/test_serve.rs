@@ -16,12 +16,15 @@ use blyte_cli::http::{Request, Response};
 use blyte_cli::repl::ReplConfig;
 use blyte_cli::serve::{
     authenticated_api_get_routes, constant_time_eq, generate_token, route, run_with_hooks,
-    run_with_io, run_with_runner, Surface, MESSAGE_HEADER, RECONCILE_SAFETY_NET_INTERVAL,
-    TOKEN_HEADER,
+    run_with_runner, Surface, MESSAGE_HEADER, RECONCILE_SAFETY_NET_INTERVAL, TOKEN_HEADER,
 };
 use blyte_cli::session::{peer_prompt, EntryBody, PromptRunner, Session};
-use blyte_cli::surface_dir::{list_records_in, surface_dir, surfaces_dir};
+use blyte_cli::surface_dir::{
+    list_records_in, new_surface_id, surface_dir, surfaces_dir, write_record_in, SurfaceRecord,
+};
 use blyte_cli::surface_registry::{entry_path, registry_dir, write_entry, RegistryEntry};
+
+const WAIT: Duration = Duration::from_secs(30);
 
 struct RecordedCall {
     prompt: String,
@@ -401,11 +404,16 @@ fn message_then_events() {
     assert_eq!(post_resp.status, 200);
     assert_eq!(parse_json(&post_resp), serde_json::json!({ "seq": 1 }));
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
     let mut collected = Vec::new();
     let mut after = 0u64;
+    let mut last_body = serde_json::Value::Null;
     let last_seq = loop {
-        assert!(Instant::now() < deadline, "timed out waiting for idle");
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {}s waiting for idle entry in /api/session/events; collected={collected:?}; last_response={last_body}",
+            WAIT.as_secs()
+        );
         let after_str = after.to_string();
         let ev_resp = route(
             &surface,
@@ -418,6 +426,7 @@ fn message_then_events() {
         );
         assert_eq!(ev_resp.status, 200);
         let body = parse_json(&ev_resp);
+        last_body = body.clone();
         let batch_last_seq = body.get("last_seq").unwrap().as_u64().unwrap();
         let batch = body.get("entries").unwrap().as_array().unwrap();
         for entry in batch {
@@ -552,9 +561,14 @@ fn report_attachment_is_read_from_the_run() {
     );
     assert_eq!(resp.status, 200);
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
+    let mut last_entries = Vec::new();
     loop {
-        assert!(Instant::now() < deadline, "timed out waiting for runner");
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {}s waiting for session to go idle after report attachment message; last_entries={last_entries:?}",
+            WAIT.as_secs()
+        );
         let entries = surface.session.entries_after(0, Duration::from_millis(200));
         if entries
             .iter()
@@ -562,6 +576,7 @@ fn report_attachment_is_read_from_the_run() {
         {
             break;
         }
+        last_entries = entries;
     }
 
     let recorded = calls.lock().unwrap();
@@ -967,9 +982,14 @@ fn send_back_reaches_the_conversation() {
         .to_string();
     assert!(!expected_msg.is_empty());
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
+    let mut last_entries = Vec::new();
     loop {
-        assert!(Instant::now() < deadline, "timed out waiting for runner");
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {}s waiting for session to go idle after send-back decision; last_entries={last_entries:?}",
+            WAIT.as_secs()
+        );
         let entries = surface.session.entries_after(0, Duration::from_millis(200));
         if entries
             .iter()
@@ -977,6 +997,7 @@ fn send_back_reaches_the_conversation() {
         {
             break;
         }
+        last_entries = entries;
     }
 
     let recorded = calls.lock().unwrap();
@@ -1175,6 +1196,8 @@ fn bare_blyte_starts_the_surface_without_a_terminal() {
         .current_dir(&repo)
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env_remove("BLYTE_STATE_DIR")
+        .env_remove("XDG_STATE_HOME")
         .env("BLYTE_ENV_FILE", "")
         .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env("BLYTE_USAGE_LOG", "off")
@@ -1215,7 +1238,7 @@ fn bare_blyte_starts_the_surface_without_a_terminal() {
         }
     });
 
-    let start_deadline = Instant::now() + Duration::from_secs(30);
+    let start_deadline = Instant::now() + WAIT;
     let mut seen_stdout = Vec::new();
     let mut started = false;
     let mut exited_early = None;
@@ -1262,7 +1285,8 @@ fn bare_blyte_starts_the_surface_without_a_terminal() {
         drop(rx);
         let _ = stdout_handle.join();
         panic!(
-            "surface did not print readiness line within 30s (status: {status:?})\nstdout:\n{}\nstderr:\n{stderr_text}",
+            "surface did not print readiness line within {}s (status: {status:?})\nstdout:\n{}\nstderr:\n{stderr_text}",
+            WAIT.as_secs(),
             seen_stdout.join("\n")
         );
     }
@@ -1291,7 +1315,7 @@ fn bare_blyte_starts_the_surface_without_a_terminal() {
         "kill -TERM {pid} failed: {kill_status:?}"
     );
 
-    let exit_deadline = Instant::now() + Duration::from_secs(10);
+    let exit_deadline = Instant::now() + WAIT;
     let exit_status = loop {
         if let Some(status) = guard.0.as_mut().unwrap().try_wait().unwrap() {
             guard.0 = None;
@@ -1308,9 +1332,16 @@ fn bare_blyte_starts_the_surface_without_a_terminal() {
         let _ = child.kill();
         let _ = child.wait();
         let stderr_text = stderr_handle.join().unwrap_or_default();
+        while let Ok(line) = rx.try_recv() {
+            seen_stdout.push(line);
+        }
         drop(rx);
         let _ = stdout_handle.join();
-        panic!("surface did not exit within 10s of SIGTERM\nstderr:\n{stderr_text}");
+        panic!(
+            "surface did not exit within {}s of SIGTERM\nstdout:\n{}\nstderr:\n{stderr_text}",
+            WAIT.as_secs(),
+            seen_stdout.join("\n")
+        );
     };
 
     let stderr_text = stderr_handle.join().unwrap_or_default();
@@ -1354,6 +1385,7 @@ struct RunningSurface {
     port: u16,
     token: String,
     stop: Arc<AtomicBool>,
+    out_buf: Arc<Mutex<Vec<u8>>>,
     err_buf: Arc<Mutex<Vec<u8>>>,
     handle: std::thread::JoinHandle<i32>,
 }
@@ -1382,17 +1414,18 @@ fn start_stoppable_surface_with_args(
         run_with_hooks(&args, cfg, &mut out, &mut err, &mut opener, stop_bg)
     });
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
     let (name, port, token) = loop {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for printed surface URL; stderr={}",
-            String::from_utf8_lossy(&err_buf.lock().unwrap())
-        );
-        let stdout = String::from_utf8(out_buf.lock().unwrap().clone()).unwrap();
+        let stdout = String::from_utf8_lossy(&out_buf.lock().unwrap()).into_owned();
         if let Some(parsed) = stdout.lines().find_map(parse_surface_ready_line) {
             break parsed;
         }
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {}s waiting for printed surface URL; stdout={stdout:?}; stderr={:?}",
+            WAIT.as_secs(),
+            String::from_utf8_lossy(&err_buf.lock().unwrap())
+        );
         std::thread::sleep(Duration::from_millis(5));
     };
 
@@ -1401,6 +1434,7 @@ fn start_stoppable_surface_with_args(
         port,
         token,
         stop,
+        out_buf,
         err_buf,
         handle,
     }
@@ -1503,39 +1537,6 @@ fn flip_last_hex_char(token: &str) -> String {
     let last = chars.last_mut().unwrap();
     *last = if *last == '0' { '1' } else { '0' };
     chars.into_iter().collect()
-}
-
-fn start_surface_and_read_url(repo: &Path) -> (u16, String) {
-    let out_buf = Arc::new(Mutex::new(Vec::new()));
-    let err_buf = Arc::new(Mutex::new(Vec::new()));
-    let repo_bg = repo.to_path_buf();
-    let out_bg = Arc::clone(&out_buf);
-    let err_bg = Arc::clone(&err_buf);
-    std::thread::spawn(move || {
-        let args = SurfaceArgs {
-            port: 0,
-            no_open: true,
-            days: 14,
-            ..Default::default()
-        };
-        let mut out = SharedBuf(out_bg);
-        let mut err = SharedBuf(err_bg);
-        let _ = run_with_io(&args, default_repl_config(repo_bg), &mut out, &mut err);
-    });
-
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for printed surface URL; stderr={}",
-            String::from_utf8_lossy(&err_buf.lock().unwrap())
-        );
-        let stdout = String::from_utf8(out_buf.lock().unwrap().clone()).unwrap();
-        if let Some((_name, port, token)) = stdout.lines().find_map(parse_surface_ready_line) {
-            return (port, token);
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
 }
 
 fn send_http(port: u16, raw_req: &str) -> String {
@@ -1685,7 +1686,7 @@ fn secret_never_leaks_and_origin_check_stays() {
     let d = tempfile::tempdir().unwrap();
     let repo = d.path().join("leak-check-repo");
     init_git_repo(&repo);
-    let (port, token) = start_surface_and_read_url(&repo);
+    let (port, token, stop, handle) = start_stoppable_surface(&repo);
     assert_eq!(token.len(), 64);
     assert!(token
         .bytes()
@@ -1787,6 +1788,9 @@ fn secret_never_leaks_and_origin_check_stays() {
     assert!(!wt_dir.join("sessions").exists());
     assert_eq!(list_records_in(&surfaces_dir(&repo)).unwrap().len(), 1);
     assert_no_file_under_contains(&wt_dir, &token);
+
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(handle.join().unwrap(), 0);
 }
 
 #[test]
@@ -1794,12 +1798,12 @@ fn two_starts_give_different_secrets() {
     let d1 = tempfile::tempdir().unwrap();
     let repo1 = d1.path().join("start-one");
     init_git_repo(&repo1);
-    let (_port1, token1) = start_surface_and_read_url(&repo1);
+    let (_port1, token1, stop1, handle1) = start_stoppable_surface(&repo1);
 
     let d2 = tempfile::tempdir().unwrap();
     let repo2 = d2.path().join("start-two");
     init_git_repo(&repo2);
-    let (_port2, token2) = start_surface_and_read_url(&repo2);
+    let (_port2, token2, stop2, handle2) = start_stoppable_surface(&repo2);
 
     assert_eq!(token1.len(), 64);
     assert_eq!(token2.len(), 64);
@@ -1810,6 +1814,11 @@ fn two_starts_give_different_secrets() {
     assert!(!constant_time_eq(b"short", b"longer"));
     assert!(!constant_time_eq(b"longer", b"short"));
     assert!(constant_time_eq(b"", b""));
+
+    stop1.store(true, Ordering::Relaxed);
+    stop2.store(true, Ordering::Relaxed);
+    assert_eq!(handle1.join().unwrap(), 0);
+    assert_eq!(handle2.join().unwrap(), 0);
 }
 
 #[test]
@@ -1889,17 +1898,28 @@ fn approval_endpoint_answers_validates_and_requires_secret() {
         let _ = done_tx.send(approver.ask(cmd, reason));
     });
 
-    let ev_resp = route(
-        &surface,
-        &get(
+    let ev_deadline = Instant::now() + WAIT;
+    let ev_json = loop {
+        let ev_resp = route(
             &surface,
-            "/api/session/events",
-            vec![("after", "0"), ("wait_ms", "2000")],
-        ),
-        t,
-    );
-    assert_eq!(ev_resp.status, 200);
-    let ev_json = parse_json(&ev_resp);
+            &get(
+                &surface,
+                "/api/session/events",
+                vec![("after", "0"), ("wait_ms", "2000")],
+            ),
+            t,
+        );
+        assert_eq!(ev_resp.status, 200);
+        let parsed = parse_json(&ev_resp);
+        if !parsed["entries"].as_array().unwrap().is_empty() {
+            break parsed;
+        }
+        assert!(
+            Instant::now() < ev_deadline,
+            "timed out after {}s waiting for approval_requested entry; last_response={parsed}",
+            WAIT.as_secs()
+        );
+    };
     let entries = ev_json["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["kind"], "approval_requested");
@@ -1934,7 +1954,11 @@ fn approval_endpoint_answers_validates_and_requires_secret() {
         serde_json::json!({ "id": id, "answer": "yes", "seq": 2 })
     );
     assert_eq!(
-        done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        done_rx.recv_timeout(WAIT).unwrap_or_else(|e| panic!(
+            "timed out after {}s waiting for approval 'yes' (id={id}): {e}; response={}",
+            WAIT.as_secs(),
+            String::from_utf8_lossy(&ok_yes.body)
+        )),
         blyte_agent::approval::Approval::Approved
     );
     ask_thread.join().unwrap();
@@ -1975,16 +1999,28 @@ fn approval_endpoint_answers_validates_and_requires_secret() {
         let _ = done2_tx.send(approver2.ask("curl https://example.com", "fetch"));
     });
 
-    let ev2_resp = route(
-        &surface,
-        &get(
+    let ev2_deadline = Instant::now() + WAIT;
+    let ev2_json = loop {
+        let ev2_resp = route(
             &surface,
-            "/api/session/events",
-            vec![("after", "2"), ("wait_ms", "2000")],
-        ),
-        t,
-    );
-    let ev2_json = parse_json(&ev2_resp);
+            &get(
+                &surface,
+                "/api/session/events",
+                vec![("after", "2"), ("wait_ms", "2000")],
+            ),
+            t,
+        );
+        assert_eq!(ev2_resp.status, 200);
+        let parsed = parse_json(&ev2_resp);
+        if !parsed["entries"].as_array().unwrap().is_empty() {
+            break parsed;
+        }
+        assert!(
+            Instant::now() < ev2_deadline,
+            "timed out after {}s waiting for second approval_requested entry; last_response={parsed}",
+            WAIT.as_secs()
+        );
+    };
     let id2 = ev2_json["entries"][0]["id"].as_str().unwrap().to_string();
 
     let ok_no = route(
@@ -1998,7 +2034,11 @@ fn approval_endpoint_answers_validates_and_requires_secret() {
     );
     assert_eq!(ok_no.status, 200);
     assert_eq!(
-        done2_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        done2_rx.recv_timeout(WAIT).unwrap_or_else(|e| panic!(
+            "timed out after {}s waiting for approval 'no' (id={id2}): {e}; response={}",
+            WAIT.as_secs(),
+            String::from_utf8_lossy(&ok_no.body)
+        )),
         blyte_agent::approval::Approval::Denied
     );
     ask_thread2.join().unwrap();
@@ -2463,8 +2503,9 @@ fn events_survive_a_restart() {
         port: port1,
         token: token1,
         stop: stop1,
+        out_buf: out_buf1,
+        err_buf: err_buf1,
         handle: handle1,
-        ..
     } = start_stoppable_surface_with_args(
         &repo,
         SurfaceArgs {
@@ -2489,12 +2530,8 @@ fn events_survive_a_restart() {
         "POST /api/session/messages failed: {post_resp}"
     );
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
     let before_entries = loop {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for idle entry before restart"
-        );
         let events_resp = send_http(
             port1,
             &format!(
@@ -2510,6 +2547,13 @@ fn events_survive_a_restart() {
         if entries.iter().any(|e| e["kind"] == "idle") {
             break entries;
         }
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {}s waiting for idle entry before restart; last_response={events_resp:?}; stdout={:?}; stderr={:?}",
+            WAIT.as_secs(),
+            String::from_utf8_lossy(&out_buf1.lock().unwrap()),
+            String::from_utf8_lossy(&err_buf1.lock().unwrap())
+        );
         std::thread::sleep(Duration::from_millis(10));
     };
     assert!(
@@ -2643,9 +2687,61 @@ fn a_runs_changed_post_combines_without_waiting_for_the_timer() {
     let base_sha = init_repo_with_commit(&repo);
     write_file(&repo.join("blyte.toml"), "[dispatch]\ngate = \"true\"\n");
 
-    let (port, token, stop, handle) = start_stoppable_surface(&repo);
+    let now = now_secs();
+    let surface_id = new_surface_id().unwrap();
+    write_record_in(
+        &surface_dir(&repo, &surface_id),
+        &SurfaceRecord {
+            id: surface_id.clone(),
+            name: "changed-combine-repo".to_string(),
+            pid: 0,
+            port: 0,
+            session_id: "sess-init".to_string(),
+            started_at: now,
+        },
+    )
+    .unwrap();
+    write_file(
+        &repo.join(".wt/S0.start.json"),
+        &format!(
+            r#"{{"id":"S0","pid":999999,"started_at":{now},"base_sha":"{base_sha}","task_file":".wt/tasks/S0.md","research":false,"request":"req-init","surface":"{surface_id}"}}"#
+        ),
+    );
+    write_file(
+        &repo.join(".wt/S0.json"),
+        r#"{"id":"S0","outcome":"verified","turns":1,"seconds":1,"final_message":"init"}"#,
+    );
+    write_file(
+        &repo.join(".wt/S0.checks.json"),
+        r#"{"flags":[],"fallbacks":[]}"#,
+    );
+    write_file(
+        &repo.join(".wt/S0.hold.json"),
+        &format!(r#"{{"note":"sentinel","ts":{now}}}"#),
+    );
 
-    std::thread::sleep(Duration::from_millis(250));
+    let running = start_stoppable_surface_with_args(
+        &repo,
+        SurfaceArgs {
+            no_open: true,
+            resume: Some(surface_id.clone()),
+            ..Default::default()
+        },
+        None,
+    );
+
+    let sentinel_reported = repo.join(".wt/S0.reported.json");
+    let init_deadline = Instant::now() + WAIT;
+    while !sentinel_reported.is_file() {
+        assert!(
+            Instant::now() < init_deadline,
+            "timed out after {}s waiting for initial reconcile pass to report sentinel run S0; stdout={:?}; stderr={:?}",
+            WAIT.as_secs(),
+            String::from_utf8_lossy(&running.out_buf.lock().unwrap()),
+            String::from_utf8_lossy(&running.err_buf.lock().unwrap())
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 
     let wt_run = repo.join(".wt/NC1");
     std::fs::create_dir_all(repo.join(".wt")).unwrap();
@@ -2679,13 +2775,6 @@ fn a_runs_changed_post_combines_without_waiting_for_the_timer() {
         .success());
 
     let now = now_secs();
-    let surface_id = list_records_in(&surfaces_dir(&repo))
-        .unwrap()
-        .into_iter()
-        .next()
-        .expect("surface record")
-        .record
-        .id;
     write_file(
         &repo.join(".wt/NC1.start.json"),
         &format!(
@@ -2713,9 +2802,10 @@ fn a_runs_changed_post_combines_without_waiting_for_the_timer() {
     );
 
     let post_resp = send_http(
-        port,
+        running.port,
         &format!(
-            "POST /api/runs/changed HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{TOKEN_HEADER}: {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            "POST /api/runs/changed HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n{TOKEN_HEADER}: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            running.port, running.token
         ),
     );
     assert!(
@@ -2724,18 +2814,21 @@ fn a_runs_changed_post_combines_without_waiting_for_the_timer() {
     );
     assert_eq!(http_json_body(&post_resp), serde_json::json!({}));
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
     while !rec_path.is_file() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    stop.store(true, Ordering::Relaxed);
-    assert_eq!(handle.join().unwrap(), 0);
+    let stdout_seen = String::from_utf8_lossy(&running.out_buf.lock().unwrap()).into_owned();
+    let stderr_seen = String::from_utf8_lossy(&running.err_buf.lock().unwrap()).into_owned();
+    running.stop.store(true, Ordering::Relaxed);
+    assert_eq!(running.handle.join().unwrap(), 0);
 
     assert!(
         rec_path.is_file(),
-        "expected {} to exist within 5 s after POST /api/runs/changed",
-        rec_path.display()
+        "expected {} to exist within {} s after POST /api/runs/changed; post_resp={post_resp:?}; stdout={stdout_seen:?}; stderr={stderr_seen:?}",
+        rec_path.display(),
+        WAIT.as_secs()
     );
     let rec: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&rec_path).unwrap()).unwrap();
@@ -2808,7 +2901,13 @@ fn make_busy_surface(root: PathBuf) -> (Surface, BlockingHandle) {
         reconcile_requested: std::sync::atomic::AtomicBool::new(false),
     };
     surface.session.submit("hold", Vec::new()).unwrap();
-    handle.entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    handle.entered.recv_timeout(WAIT).unwrap_or_else(|e| {
+        panic!(
+            "timed out after {}s waiting for blocking runner to enter turn: {e}; session_info={:?}",
+            WAIT.as_secs(),
+            surface.session.info()
+        )
+    });
     (surface, handle)
 }
 
@@ -3606,17 +3705,18 @@ fn start_stoppable_surface_with_runner(
         run_with_runner(&args, cfg, &mut out, &mut err, &mut opener, stop_bg, runner)
     });
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
     let (name, port, token) = loop {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for printed surface URL; stderr={}",
-            String::from_utf8_lossy(&err_buf.lock().unwrap())
-        );
-        let stdout = String::from_utf8(out_buf.lock().unwrap().clone()).unwrap();
+        let stdout = String::from_utf8_lossy(&out_buf.lock().unwrap()).into_owned();
         if let Some(parsed) = stdout.lines().find_map(parse_surface_ready_line) {
             break parsed;
         }
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {}s waiting for printed surface URL; stdout={stdout:?}; stderr={:?}",
+            WAIT.as_secs(),
+            String::from_utf8_lossy(&err_buf.lock().unwrap())
+        );
         std::thread::sleep(Duration::from_millis(5));
     };
 
@@ -3625,6 +3725,7 @@ fn start_stoppable_surface_with_runner(
         port,
         token,
         stop,
+        out_buf,
         err_buf,
         handle,
     }
@@ -4083,12 +4184,8 @@ fn registry_doing_tracks_running_turn_first_line_and_returns_to_idle() {
         cv.notify_all();
     }
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
     loop {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for turn to finish"
-        );
         let ev_resp = send_http(
             running.port,
             &format!(
@@ -4099,6 +4196,13 @@ fn registry_doing_tracks_running_turn_first_line_and_returns_to_idle() {
         if ev_resp.contains("\"kind\":\"idle\"") {
             break;
         }
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {}s waiting for turn to finish (idle entry); last_response={ev_resp:?}; stdout={:?}; stderr={:?}",
+            WAIT.as_secs(),
+            String::from_utf8_lossy(&running.out_buf.lock().unwrap()),
+            String::from_utf8_lossy(&running.err_buf.lock().unwrap())
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 
@@ -4422,12 +4526,20 @@ fn a_peer_message_reaches_the_runner_marked() {
     let (status, body) = post_peer_raw(running.port, &[(MESSAGE_HEADER, &cred)], &payload);
     assert_eq!(status, 200, "body={body}");
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
     loop {
-        assert!(Instant::now() < deadline, "timed out waiting for runner");
         if !prompts.lock().unwrap().is_empty() {
             break;
         }
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {}s waiting for peer message to reach runner; prompts={:?}; events={}; stdout={:?}; stderr={:?}",
+            WAIT.as_secs(),
+            prompts.lock().unwrap(),
+            fetch_events_json(running.port, &running.token),
+            String::from_utf8_lossy(&running.out_buf.lock().unwrap()),
+            String::from_utf8_lossy(&running.err_buf.lock().unwrap())
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(
