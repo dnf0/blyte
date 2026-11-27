@@ -1248,20 +1248,25 @@
       background: var(--color-card);
       padding: 10px 16px;
       display: flex;
-      align-items: center;
+      align-items: flex-end;
       gap: 8px;
       flex-shrink: 0;
     }
 
-    .composer input[type="text"] {
+    .composer textarea {
       flex: 1;
       min-width: 0;
-      padding: 7px 10px;
+      padding: 9px 12px;
       border-radius: 4px;
       border: 1px solid var(--color-line-dark);
       background: var(--color-page);
       color: var(--color-strong);
-      font-size: 13px;
+      font-family: inherit;
+      font-size: 14px;
+      line-height: 1.45;
+      resize: none;
+      min-height: calc(3 * 1.45em + 20px);
+      overflow-y: hidden;
     }
 
     .review-wrap {
@@ -2902,7 +2907,7 @@
           <div id="attached-reports" class="attached-reports" hidden></div>
           <div id="composer-error" class="inline-error composer-error" hidden></div>
           <form id="conversation-form" class="composer">
-            <input type="text" id="conversation-input" placeholder="Message the conversation model..." autocomplete="off">
+            <textarea id="conversation-input" rows="3" placeholder="Message the conversation model... (Shift+Return for a new line)" autocomplete="off"></textarea>
             <button type="submit" id="conversation-send" class="btn btn-primary">Send</button>
           </form>
         </div>
@@ -3189,7 +3194,7 @@
         input.disabled = missing;
         input.placeholder = missing
           ? "Open this page from the URL blyte printed to send..."
-          : "Message the conversation model...";
+          : "Message the conversation model... (Shift+Return for a new line)";
       }
       const sendBtn = document.getElementById("conversation-send");
       if (sendBtn) sendBtn.disabled = missing || uploadsInFlight > 0;
@@ -5274,6 +5279,30 @@
       }
     }
 
+    function resizeComposer() {
+      const input = document.getElementById("conversation-input");
+      if (!input) {
+        throw new Error("missing #conversation-input");
+      }
+      const cap = Math.floor(window.innerHeight * 0.4);
+      input.style.height = "auto";
+      const scrollHeight = input.scrollHeight;
+      input.style.height = Math.min(scrollHeight, cap) + "px";
+      input.style.overflowY = scrollHeight > cap ? "auto" : "hidden";
+    }
+
+    function handleComposerKeydown(e) {
+      if (e.key !== "Enter") return;
+      if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.isComposing || e.keyCode === 229) return;
+      e.preventDefault();
+      const form = document.getElementById("conversation-form");
+      if (!form) {
+        throw new Error("missing #conversation-form");
+      }
+      form.requestSubmit();
+    }
+
     function handleComposerPaste(e) {
       const input = document.getElementById("conversation-input");
       const dt = e && e.clipboardData;
@@ -5291,10 +5320,12 @@
       const n = nextPasteNumber;
       const marker = pasteMarker(n, text);
       pendingPastes.set(n, { n, text, marker });
-      if (input) {
-        insertAtCursor(input, marker);
-        pruneDeletedPastes(input.value);
+      if (!input) {
+        throw new Error("missing #conversation-input");
       }
+      insertAtCursor(input, marker);
+      pruneDeletedPastes(input.value);
+      resizeComposer();
     }
 
     function revokeMessageObjectUrl(seq) {
@@ -7551,12 +7582,15 @@
       });
 
       const convInput = document.getElementById("conversation-input");
-      if (convInput) {
-        convInput.addEventListener("paste", handleComposerPaste);
-        convInput.addEventListener("input", () => {
-          pruneDeletedPastes(convInput.value);
-        });
+      if (!convInput) {
+        throw new Error("missing #conversation-input");
       }
+      convInput.addEventListener("keydown", handleComposerKeydown);
+      convInput.addEventListener("paste", handleComposerPaste);
+      convInput.addEventListener("input", () => {
+        pruneDeletedPastes(convInput.value);
+        resizeComposer();
+      });
 
       if (typeof document.addEventListener === "function") {
         document.addEventListener("dragenter", (e) => {
@@ -7758,6 +7792,7 @@
       });
 
       window.addEventListener("resize", () => {
+        resizeComposer();
         if (openReportKey !== null) return;
         if (mapTab === "system" && mapState && mapState.status === "ok") {
           drawSystemEdges(mapState.data);
@@ -8070,6 +8105,7 @@
         }
         setComposerError("");
         input.value = "";
+        resizeComposer();
         attachedReports.length = 0;
         pendingAttachments.length = 0;
         pendingPastes.clear();
