@@ -399,7 +399,7 @@ pub struct CostArgs {
 
 #[derive(clap::Args, Debug, PartialEq, Clone)]
 pub struct StatuslineArgs {
-    /// Command to generate the base line before appending blyte costs
+    /// Command to generate the base line before appending blyte costs (5 s timeout; override in ms with BLYTE_STATUSLINE_AFTER_TIMEOUT_MS)
     #[arg(long, value_name = "COMMAND")]
     pub after: Option<String>,
 }

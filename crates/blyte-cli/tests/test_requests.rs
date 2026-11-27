@@ -1751,7 +1751,7 @@ impl PromptRunner for BlockingFirstRunner {
             let _ = tx.send(());
         }
         if let Some(rx) = self.release.take() {
-            let _ = rx.recv_timeout(Duration::from_secs(10));
+            let _ = rx.recv_timeout(WAIT);
         }
         Ok(())
     }
@@ -2081,9 +2081,7 @@ fn start_stoppable_surface(
 
 fn http_get_json(port: u16, token: &str, path: &str) -> (u16, Value) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect surface");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
+    stream.set_read_timeout(Some(WAIT)).unwrap();
     let req = format!(
         "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{TOKEN_HEADER}: {token}\r\nConnection: close\r\n\r\n"
     );
@@ -2153,7 +2151,7 @@ fn a_ready_request_is_combined_with_no_page_request() {
 
     let rec_path = root.join(".wt/combined/req-timer.json");
     let attempt_path = root.join(".wt/combined/req-timer.attempt.json");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + WAIT;
     while (!rec_path.is_file() || !attempt_path.is_file()) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -2197,22 +2195,45 @@ fn timer_and_page_requests_do_not_report_a_run_twice() {
         start_stoppable_surface(root, "s00000000000000a2", "req-race-surface");
 
     let hammer_stop = Arc::new(AtomicBool::new(false));
+    let total_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut workers = Vec::new();
     for _ in 0..2 {
         let tok = token.clone();
         let done = Arc::clone(&hammer_stop);
+        let calls_counter = Arc::clone(&total_calls);
         workers.push(std::thread::spawn(move || {
             let mut calls = 0usize;
             while !done.load(Ordering::Relaxed) {
                 let (status, _) = http_get_json(port, &tok, "/api/runs");
                 assert_eq!(status, 200);
                 calls += 1;
+                calls_counter.fetch_add(1, Ordering::Relaxed);
             }
             calls
         }));
     }
 
-    std::thread::sleep(Duration::from_millis(1200));
+    let wait_for_report = |run_id: &str| {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let (status, events) = http_get_json(port, &token, "/api/session/events?after=0");
+            assert_eq!(status, 200);
+            let entries = events["entries"].as_array().expect("entries array");
+            if entries
+                .iter()
+                .any(|e| e["kind"] == "decision" && e["run"] == run_id && e["action"] == "finished")
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for finished report for {run_id}; entries={entries:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+
+    wait_for_report("RACE1");
     write_start_file_with_surface(
         root,
         "RACE2",
@@ -2225,7 +2246,17 @@ fn timer_and_page_requests_do_not_report_a_run_twice() {
     );
     write_reportable_summary(root, "RACE2", "verified", Some("wip/RACE2"));
     write_checks(root, "RACE2", &["needs review"]);
-    std::thread::sleep(Duration::from_millis(1300));
+    wait_for_report("RACE2");
+
+    let target_calls = total_calls.load(Ordering::Relaxed) + 4;
+    let calls_deadline = Instant::now() + WAIT;
+    while total_calls.load(Ordering::Relaxed) < target_calls {
+        assert!(
+            Instant::now() < calls_deadline,
+            "timed out waiting for additional /api/runs requests after RACE2 was reported"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 
     hammer_stop.store(true, Ordering::Relaxed);
     for w in workers {

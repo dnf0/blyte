@@ -440,11 +440,43 @@ pub fn render_statusline(
     }
 }
 
+/// Default timeout for the `blyte statusline --after` command.
+pub const DEFAULT_AFTER_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Environment variable that overrides the `blyte statusline --after` timeout in milliseconds.
+pub const AFTER_TIMEOUT_ENV: &str = "BLYTE_STATUSLINE_AFTER_TIMEOUT_MS";
+
+fn parse_after_timeout_ms(raw: &std::ffi::OsStr) -> Result<Duration, String> {
+    let display = raw.to_string_lossy();
+    if let Some(valid) = raw.to_str() {
+        if !valid.is_empty() && valid.bytes().all(|b| b.is_ascii_digit()) {
+            if let Ok(ms) = valid.parse::<u64>() {
+                if ms > 0 {
+                    return Ok(Duration::from_millis(ms));
+                }
+            }
+        }
+    }
+    Err(format!(
+        "blyte: invalid {AFTER_TIMEOUT_ENV}={display:?}: expected a whole number greater than 0"
+    ))
+}
+
 /// Executes the `blyte statusline` subcommand.
 pub fn run(args: &crate::cli::StatuslineArgs) -> i32 {
+    let after_timeout = match std::env::var_os(AFTER_TIMEOUT_ENV) {
+        Some(raw) => match parse_after_timeout_ms(&raw) {
+            Ok(timeout) => timeout,
+            Err(msg) => {
+                eprintln!("{msg}");
+                return 2;
+            }
+        },
+        None => DEFAULT_AFTER_TIMEOUT,
+    };
     let mut stdin_bytes = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut stdin_bytes);
-    let line = render_statusline(&stdin_bytes, args.after.as_deref(), Duration::from_secs(2));
+    let line = render_statusline(&stdin_bytes, args.after.as_deref(), after_timeout);
     println!("{line}");
     0
 }

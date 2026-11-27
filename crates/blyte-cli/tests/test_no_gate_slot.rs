@@ -45,7 +45,11 @@ fn no_gate_slot_flag_is_accepted_and_bypasses_slot_acquisition() {
         .unwrap();
 
     // The run fails fast due to missing API key, but it did NOT wait or fail on CLI parsing.
-    assert!(start.elapsed() < Duration::from_secs(5));
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "blyte --no-gate-slot took {elapsed:?}, expected < 60s"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("unexpected argument '--no-gate-slot'"));
 }

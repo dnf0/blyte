@@ -368,7 +368,7 @@ Print Claude Code's status line with blyte costs
 Usage: blyte statusline [OPTIONS]
 
 Options:
-      --after <COMMAND>  Command to generate the base line before appending blyte costs
+      --after <COMMAND>  Command to generate the base line before appending blyte costs (5 s timeout; override in ms with BLYTE_STATUSLINE_AFTER_TIMEOUT_MS)
   -h, --help             Print help
 ```
 
@@ -398,6 +398,7 @@ Options:
 | `BLYTE_GEMINI_THOUGHT_SUMMARIES` | `0` turns off Gemini's thought summaries |
 | `BLYTE_GATE_SLOTS` | how many gates may run at once on the machine (default a quarter of the cores, at least 2) |
 | `BLYTE_STATE_DIR` | where blyte keeps its state, such as the list of repositories the dashboard reads (default `$XDG_STATE_HOME/blyte` or `~/.local/state/blyte`) |
+| `BLYTE_STATUSLINE_AFTER_TIMEOUT_MS` | timeout in milliseconds for `blyte statusline --after` (default `5000`; must be a whole number greater than 0) |
 | `BLYTE_NO_UPDATE_CHECK` | `1` turns off the check for a newer release |
 
 Models prefixed with `vertex/` (such as `vertex/gemini-4-argon`) reach Gemini through Vertex AI using Google Cloud Application Default Credentials instead of an API key. Authenticate by running `gcloud auth application-default login`. The cloud project is read from `GOOGLE_CLOUD_PROJECT` (or `CLOUDSDK_CORE_PROJECT`), and the location from `GOOGLE_CLOUD_LOCATION` (default `global`).
