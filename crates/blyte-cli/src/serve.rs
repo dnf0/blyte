@@ -223,10 +223,53 @@ fn handle_surfaces(surface: &Surface) -> Response {
         Ok(stopped) => stopped,
         Err(e) => return json_error(500, e),
     };
-    match crate::surfaces_cmd::surfaces_payload(&registry_dir, &surface.surface_id, &stopped) {
+    match crate::surfaces_cmd::surfaces_payload(
+        &registry_dir,
+        &state_dir,
+        &surface.surface_id,
+        &stopped,
+    ) {
         Ok(payload) => Response::json(200, &payload),
         Err(e) => json_error(500, e),
     }
+}
+
+fn handle_post_start_surface(req: &Request) -> Response {
+    let obj = match parse_json_object(&req.body) {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
+    let Some(folder) = obj.get("folder").and_then(|v| v.as_str()) else {
+        return json_error(400, "missing or invalid field folder");
+    };
+    let state_dir = match crate::surface_registry::state_dir() {
+        Ok(dir) => dir,
+        Err(e) => return json_error(500, e),
+    };
+    match crate::surface_start::start_surface_in(folder, &state_dir) {
+        Ok(started) => Response::json(
+            200,
+            &serde_json::json!({
+                "name": started.name,
+                "url": started.url,
+            }),
+        ),
+        Err(crate::surface_start::StartError::BadRequest(msg)) => json_error(400, msg),
+        Err(crate::surface_start::StartError::Internal(msg)) => json_error(500, msg),
+    }
+}
+
+type StopTrigger = Arc<dyn Fn() + Send + Sync>;
+
+fn handle_post_stop(stop_trigger: Option<&StopTrigger>) -> Response {
+    if let Some(trigger) = stop_trigger {
+        let trigger = Arc::clone(trigger);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            trigger();
+        });
+    }
+    Response::json(202, &serde_json::json!({ "stopping": true }))
 }
 
 fn health_response(surface: &Surface) -> Response {
@@ -1161,6 +1204,15 @@ fn handle_post_open(surface: &Surface, req: &Request, now: u64) -> Response {
 }
 
 pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
+    route_inner(surface, req, now, None)
+}
+
+fn route_inner(
+    surface: &Surface,
+    req: &Request,
+    now: u64,
+    stop_trigger: Option<&StopTrigger>,
+) -> Response {
     if req.path == "/api/peer/messages" && req.method == "POST" {
         if !has_valid_message_credential(surface, req) {
             return json_error(403, "missing or invalid message credential");
@@ -1235,6 +1287,18 @@ pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
                 return method_not_allowed(req);
             }
             handle_surfaces(surface)
+        }
+        "/api/surfaces/start" => {
+            if req.method != "POST" {
+                return method_not_allowed(req);
+            }
+            handle_post_start_surface(req)
+        }
+        "/api/session/stop" => {
+            if req.method != "POST" {
+                return method_not_allowed(req);
+            }
+            handle_post_stop(stop_trigger)
         }
         "/api/session/open-codes" => {
             if req.method != "POST" {
@@ -1584,7 +1648,6 @@ fn resolve_initial_model(config: &ReplConfig) -> String {
     "gemini-3.8-flash-high".to_string()
 }
 
-#[cfg(unix)]
 static SIGNAL_STOP: AtomicBool = AtomicBool::new(false);
 
 #[cfg(unix)]
@@ -1694,39 +1757,45 @@ impl Drop for PublishToolGuard {
     }
 }
 
+struct StopControl<S> {
+    should_stop: S,
+    trigger: StopTrigger,
+}
+
+fn atomic_stop_control(stop: Arc<AtomicBool>) -> StopControl<impl Fn() -> bool> {
+    let stop_trigger_flag = Arc::clone(&stop);
+    StopControl {
+        should_stop: move || stop.load(Ordering::Acquire),
+        trigger: Arc::new(move || stop_trigger_flag.store(true, Ordering::Release)),
+    }
+}
+
 pub fn run(args: &SurfaceArgs, config: ReplConfig) -> i32 {
+    SIGNAL_STOP.store(false, Ordering::Relaxed);
     #[cfg(unix)]
-    {
-        SIGNAL_STOP.store(false, Ordering::Relaxed);
-        unsafe {
-            libc::signal(
-                libc::SIGINT,
-                handle_shutdown_signal as *const () as libc::sighandler_t,
-            );
-            libc::signal(
-                libc::SIGTERM,
-                handle_shutdown_signal as *const () as libc::sighandler_t,
-            );
-        }
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            handle_shutdown_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            handle_shutdown_signal as *const () as libc::sighandler_t,
+        );
     }
     let open_in = args.open_in;
     let mut opener = |url: &str| open_browser_in(open_in, url);
+    let stop_control = StopControl {
+        should_stop: || SIGNAL_STOP.load(Ordering::Acquire),
+        trigger: Arc::new(|| SIGNAL_STOP.store(true, Ordering::Release)),
+    };
     run_inner(
         args,
         config,
         &mut std::io::stdout(),
         &mut std::io::stderr(),
         &mut opener,
-        || {
-            #[cfg(unix)]
-            {
-                SIGNAL_STOP.load(Ordering::Relaxed)
-            }
-            #[cfg(not(unix))]
-            {
-                false
-            }
-        },
+        stop_control,
         None,
     )
 }
@@ -1739,7 +1808,16 @@ pub fn run_with_io(
 ) -> i32 {
     let open_in = args.open_in;
     let mut opener = |url: &str| open_browser_in(open_in, url);
-    run_inner(args, config, out, err, &mut opener, || false, None)
+    let stop = Arc::new(AtomicBool::new(false));
+    run_inner(
+        args,
+        config,
+        out,
+        err,
+        &mut opener,
+        atomic_stop_control(stop),
+        None,
+    )
 }
 
 pub fn run_with_hooks(
@@ -1756,7 +1834,7 @@ pub fn run_with_hooks(
         out,
         err,
         opener,
-        move || stop.load(Ordering::Relaxed),
+        atomic_stop_control(stop),
         None,
     )
 }
@@ -1783,7 +1861,7 @@ pub fn run_with_runner(
         out,
         err,
         opener,
-        move || stop.load(Ordering::Relaxed),
+        atomic_stop_control(stop),
         Some(Box::new(|_, _| Ok((runner, None)))),
     )
 }
@@ -1803,7 +1881,7 @@ pub fn run_with_runner_factory(
         out,
         err,
         opener,
-        move || stop.load(Ordering::Relaxed),
+        atomic_stop_control(stop),
         Some(factory),
     )
 }
@@ -1881,12 +1959,16 @@ fn run_inner<S>(
     out: &mut dyn Write,
     err: &mut dyn Write,
     opener: &mut dyn FnMut(&str),
-    should_stop: S,
+    stop_control: StopControl<S>,
     custom_runner: Option<RunnerFactory>,
 ) -> i32
 where
     S: Fn() -> bool,
 {
+    let StopControl {
+        should_stop,
+        trigger: stop_trigger,
+    } = stop_control;
     let (main_checkout, is_repo) = match find_git_toplevel(&config.repo_root) {
         Ok(GitToplevel::Repository(worktree_root)) => {
             let main = match resolve_main_checkout(&worktree_root) {
@@ -2413,7 +2495,7 @@ where
 
     let serve_result =
         crate::http::serve_until(listener, should_stop, move |req| match now_duration() {
-            Ok(d) => route(&surface, req, d.as_secs()),
+            Ok(d) => route_inner(&surface, req, d.as_secs(), Some(&stop_trigger)),
             Err(e) => json_error(500, e),
         });
 

@@ -54,6 +54,7 @@ pub mod statusline;
 pub mod surface_dir;
 pub mod surface_notify;
 pub mod surface_registry;
+pub mod surface_start;
 pub mod surfaces_cmd;
 pub mod task_runner;
 pub mod tell;

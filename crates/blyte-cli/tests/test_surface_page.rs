@@ -3354,8 +3354,9 @@ renderSurfaceList(multiContainer, [
   },
 ], []);
 
-assert.strictEqual(multiContainer.children.length, 3);
-const [row1, row2, row3] = multiContainer.children;
+const runningRows = multiContainer.children.filter(c => c.className.includes("surface-switcher-row"));
+assert.strictEqual(runningRows.length, 3);
+const [row1, row2, row3] = runningRows;
 assert.ok(row1.className.includes("surface-switcher-current"));
 assert.strictEqual(row1.getAttribute("aria-current"), "true");
 assert.strictEqual(row1.getAttribute("data-surface-url"), null);
@@ -3389,7 +3390,7 @@ renderSurfaceList(singleContainer, [
 ], []);
 const singleNodes = collectNodes(singleContainer);
 assert.ok(
-  singleNodes.some(n => n.textContent === "No other surfaces are running. Start one by running blyte in another folder.")
+  singleNodes.some(n => n.textContent === "No other surfaces are running.")
 );
 assert.ok(singleContainer.children[0].className.includes("surface-switcher-current"));
 "#;
@@ -3834,6 +3835,7 @@ assert.strictEqual(
         last_message: null,
       },
     ],
+    folders: ["/tmp/a"],
   }),
   null
 );
@@ -3842,6 +3844,7 @@ assert.strictEqual(
   validateSurfaces({
     surfaces: [runningSurface],
     stopped: [],
+    folders: [],
   }),
   null
 );
@@ -3855,12 +3858,14 @@ const missingNameErr = validateSurfaces({
       last_message: "fix login bug",
     },
   ],
+  folders: [],
 });
 assert.strictEqual(typeof missingNameErr, "string");
 assert.ok(missingNameErr.includes("name"), missingNameErr);
 
 const missingStoppedErr = validateSurfaces({
   surfaces: [runningSurface],
+  folders: [],
 });
 assert.strictEqual(typeof missingStoppedErr, "string");
 assert.ok(missingStoppedErr.includes("stopped"), missingStoppedErr);
@@ -3875,6 +3880,7 @@ const badLastUsedErr = validateSurfaces({
       last_message: null,
     },
   ],
+  folders: [],
 });
 assert.strictEqual(typeof badLastUsedErr, "string");
 assert.ok(badLastUsedErr.includes("last_used"), badLastUsedErr);
@@ -3889,6 +3895,7 @@ const badLastMessageErr = validateSurfaces({
       last_message: 42,
     },
   ],
+  folders: [],
 });
 assert.strictEqual(typeof badLastMessageErr, "string");
 assert.ok(badLastMessageErr.includes("last_message"), badLastMessageErr);
@@ -4031,6 +4038,7 @@ fn surface_waiting_title_badges_sort_dot_seen_and_validation() {
           error: null,
         }],
         stopped: [],
+        folders: [],
       }),
       null
     );
@@ -4048,6 +4056,7 @@ fn surface_waiting_title_badges_sort_dot_seen_and_validation() {
       error: null,
     }],
     stopped: [],
+    folders: [],
   });
   assert.strictEqual(typeof missingStateErr, "string");
   assert.ok(missingStateErr.includes("state"), missingStateErr);
@@ -4065,6 +4074,7 @@ fn surface_waiting_title_badges_sort_dot_seen_and_validation() {
       error: null,
     }],
     stopped: [],
+    folders: [],
   });
   assert.strictEqual(typeof badStateErr, "string");
   assert.ok(badStateErr.includes("state"), badStateErr);
@@ -4168,7 +4178,9 @@ fn surface_waiting_title_badges_sort_dot_seen_and_validation() {
     },
   ], []);
 
-  const orderedIds = listEl.children.map(r => r.getAttribute("data-surface-id"));
+  const orderedIds = listEl.children
+    .map(r => r.getAttribute("data-surface-id"))
+    .filter(Boolean);
   assert.deepStrictEqual(orderedIds, ["s-replied", "s-approval", "s-idle", "s-working"]);
 
   const repliedTexts = collectNodes(listEl.children[0]).map(n => n.textContent);
@@ -4243,7 +4255,7 @@ fn surface_waiting_title_badges_sort_dot_seen_and_validation() {
       return { ok: true, status: 200, async json() { return sessionPayload; } };
     }
     if (url === "/api/surfaces") {
-      return { ok: true, status: 200, async json() { return { surfaces: [], stopped: [] }; } };
+      return { ok: true, status: 200, async json() { return { surfaces: [], stopped: [], folders: [] }; } };
     }
     return { ok: true, status: 200, async json() { return {}; } };
   };
@@ -4316,6 +4328,217 @@ fn surface_waiting_title_badges_sort_dot_seen_and_validation() {
 "#
     );
     run_surface_script(&harness);
+}
+
+#[test]
+fn surface_switcher_start_folder_and_two_click_stop() {
+    let harness = r#"
+const assert = require("assert");
+(async () => {
+  const runningSurface = {
+    id: "s1",
+    name: "alpha-demo",
+    root: "/tmp/alpha",
+    branch: "main",
+    doing: "idle",
+    state: "idle",
+    current: true,
+    url: "http://127.0.0.1:4100/#open=c1",
+    error: null,
+  };
+
+  const missingFoldersErr = validateSurfaces({
+    surfaces: [runningSurface],
+    stopped: [],
+  });
+  assert.strictEqual(typeof missingFoldersErr, "string");
+  assert.ok(missingFoldersErr.includes("folders"), missingFoldersErr);
+
+  const badFoldersErr = validateSurfaces({
+    surfaces: [runningSurface],
+    stopped: [],
+    folders: ["/tmp/ok", 42],
+  });
+  assert.strictEqual(typeof badFoldersErr, "string");
+  assert.ok(badFoldersErr.includes("folders"), badFoldersErr);
+
+  assert.strictEqual(
+    validateSurfaces({
+      surfaces: [runningSurface],
+      stopped: [],
+      folders: ["/tmp/alpha", "/tmp/beta"],
+    }),
+    null
+  );
+
+  function makeDomEl(tag) {
+    const attrs = new Map();
+    const listeners = new Map();
+    let htmlSet = false;
+    return {
+      tagName: tag.toUpperCase(),
+      id: "",
+      className: "",
+      type: "",
+      value: "",
+      hidden: false,
+      disabled: false,
+      dataset: {},
+      children: [],
+      _text: "",
+      get textContent() { return this._text; },
+      set textContent(v) {
+        this._text = String(v);
+        if (this._text === "") this.children = [];
+      },
+      get innerHTML() { return ""; },
+      set innerHTML(_) { htmlSet = true; },
+      get _htmlSet() { return htmlSet; },
+      setAttribute(k, v) { attrs.set(k, String(v)); },
+      getAttribute(k) { return attrs.has(k) ? attrs.get(k) : null; },
+      appendChild(child) { this.children.push(child); return child; },
+      addEventListener(ev, fn) {
+        if (!listeners.has(ev)) listeners.set(ev, []);
+        listeners.get(ev).push(fn);
+      },
+      listeners,
+    };
+  }
+
+  function collectNodes(root, out = []) {
+    for (const child of root.children) {
+      out.push(child);
+      collectNodes(child, out);
+    }
+    return out;
+  }
+
+  const pageElements = {
+    "surface-switcher": makeDomEl("button"),
+    "surface-switcher-list": makeDomEl("div"),
+    "lost-server": makeDomEl("div"),
+    "surface-stopped": makeDomEl("div"),
+  };
+  pageElements["surface-stopped"].hidden = true;
+  pageElements["lost-server"].hidden = true;
+
+  global.document = {
+    createElement(tag) { return makeDomEl(tag); },
+    getElementById(id) { return pageElements[id] || null; },
+  };
+  let confirmCalls = 0;
+  global.window = {
+    location: {
+      origin: "http://127.0.0.1:4100",
+      href: "http://127.0.0.1:4100/",
+      reload() {},
+    },
+    confirm() { confirmCalls += 1; return true; },
+    alert() { confirmCalls += 1; },
+  };
+
+  surfaceToken = "tok-page-test";
+  surfaceSwitcherOpen = true;
+  const container = pageElements["surface-switcher-list"];
+  renderSurfaceList(container, [runningSurface], [], ["/tmp/alpha", "/tmp/beta"]);
+  const nodes = collectNodes(container);
+
+  const datalist = nodes.find(n => n.tagName === "DATALIST");
+  assert.ok(datalist, "expected <datalist>");
+  assert.deepStrictEqual(
+    datalist.children.map(o => o.value),
+    ["/tmp/alpha", "/tmp/beta"]
+  );
+
+  const folderInput = nodes.find(n => n.id === "surface-start-folder");
+  const startBtn = nodes.find(n => n.className.includes("surface-switcher-start-btn"));
+  const startErr = nodes.find(n => n.className.includes("surface-switcher-start-error"));
+  assert.ok(folderInput && startBtn && startErr);
+  assert.strictEqual(folderInput.getAttribute("list"), datalist.id);
+
+  let resolveStart;
+  const startFetchCalls = [];
+  global.fetch = (url, opts) => {
+    startFetchCalls.push({ url, opts });
+    return new Promise(resolve => { resolveStart = resolve; });
+  };
+
+  folderInput.value = "/tmp/beta";
+  const clickStart = startBtn.listeners.get("click")[0];
+  clickStart({ stopPropagation() {} });
+  assert.strictEqual(startBtn.disabled, true);
+  assert.strictEqual(startBtn.textContent, "Starting\u2026");
+  assert.strictEqual(startFetchCalls.length, 1);
+  assert.strictEqual(startFetchCalls[0].url, "/api/surfaces/start");
+  assert.strictEqual(startFetchCalls[0].opts.method, "POST");
+  assert.strictEqual(startFetchCalls[0].opts.headers["X-Blyte-Token"], "tok-page-test");
+  assert.deepStrictEqual(JSON.parse(startFetchCalls[0].opts.body), { folder: "/tmp/beta" });
+
+  resolveStart({
+    ok: true,
+    status: 200,
+    async json() {
+      return { name: "beta", url: "http://127.0.0.1:4222/#open=code123" };
+    },
+  });
+  await new Promise(r => setImmediate(r));
+  assert.strictEqual(window.location.href, "http://127.0.0.1:4222/#open=code123");
+
+  renderSurfaceList(container, [runningSurface], [], ["/tmp/alpha", "/tmp/beta"]);
+  const failNodes = collectNodes(container);
+  const failInput = failNodes.find(n => n.id === "surface-start-folder");
+  const failBtn = failNodes.find(n => n.className.includes("surface-switcher-start-btn"));
+  const failErr = failNodes.find(n => n.className.includes("surface-switcher-start-error"));
+
+  const xssMsg = '<img src=x onerror="alert(1)"> not a directory';
+  global.fetch = async () => ({
+    ok: false,
+    status: 400,
+    async text() { return JSON.stringify({ error: xssMsg }); },
+    async json() { return { error: xssMsg }; },
+  });
+  failInput.value = "/tmp/not-a-dir";
+  failBtn.listeners.get("click")[0]({ stopPropagation() {} });
+  await new Promise(r => setImmediate(r));
+  assert.strictEqual(failBtn.disabled, false);
+  assert.strictEqual(failBtn.textContent, "Start");
+  assert.strictEqual(failErr.hidden, false);
+  assert.strictEqual(failErr.textContent, xssMsg);
+  assert.strictEqual(failErr._htmlSet, false);
+
+  const stopCalls = [];
+  global.fetch = async (url, opts) => {
+    stopCalls.push({ url, opts });
+    return { ok: true, status: 202, async json() { return { stopping: true }; } };
+  };
+  const stopBtn = failNodes.find(n => n.className.includes("surface-switcher-stop-btn"));
+  assert.ok(stopBtn, "expected stop button on current surface row");
+  assert.strictEqual(stopBtn.textContent, "Stop");
+  const clickStop = stopBtn.listeners.get("click")[0];
+
+  clickStop({ stopPropagation() {} });
+  assert.strictEqual(stopCalls.length, 0);
+  assert.strictEqual(confirmCalls, 0);
+  assert.strictEqual(stopBtn.textContent, "Stop this surface?");
+
+  clickStop({ stopPropagation() {} });
+  await new Promise(r => setImmediate(r));
+  assert.strictEqual(stopCalls.length, 1);
+  assert.strictEqual(stopCalls[0].url, "/api/session/stop");
+  assert.strictEqual(stopCalls[0].opts.method, "POST");
+  assert.strictEqual(stopCalls[0].opts.headers["X-Blyte-Token"], "tok-page-test");
+  assert.strictEqual(confirmCalls, 0);
+  assert.strictEqual(pageElements["surface-stopped"].hidden, false);
+  assert.strictEqual(
+    pageElements["surface-stopped"].textContent,
+    "This surface has stopped. Resume it with: blyte --resume alpha-demo"
+  );
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"#;
+    run_surface_script(harness);
 }
 
 #[test]

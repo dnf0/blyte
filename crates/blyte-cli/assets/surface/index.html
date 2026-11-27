@@ -263,6 +263,21 @@
       display: none;
     }
 
+    .surface-stopped {
+      background: var(--color-strong);
+      color: #FFFFFF;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 8px 14px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+
+    .surface-stopped[hidden] {
+      display: none;
+    }
+
     .repo-name {
       font-family: var(--font-mono);
       font-size: 12px;
@@ -532,6 +547,104 @@
     .surface-switcher-copy-btn:focus-visible {
       border-color: var(--brand-rust);
       color: var(--color-strong);
+    }
+
+    .surface-switcher-stop-btn {
+      margin-left: auto;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 2px 7px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-card);
+      color: var(--color-muted);
+      cursor: pointer;
+    }
+
+    .surface-switcher-stop-btn:hover,
+    .surface-switcher-stop-btn:focus-visible {
+      border-color: var(--status-red);
+      color: var(--status-red);
+    }
+
+    .surface-switcher-stop-btn.surface-switcher-stop-confirm {
+      border-color: var(--status-red);
+      background: var(--status-red);
+      color: #FFFFFF;
+    }
+
+    .surface-switcher-stop-btn:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+
+    .surface-switcher-start {
+      margin-top: 4px;
+      padding: 8px 9px;
+      border-top: 1px solid var(--color-line);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .surface-switcher-start-label {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--color-muted);
+    }
+
+    .surface-switcher-start-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .surface-switcher-start-input {
+      flex: 1 1 auto;
+      min-width: 0;
+      font-size: 12px;
+      padding: 4px 7px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-page);
+      color: var(--color-strong);
+    }
+
+    .surface-switcher-start-input:focus {
+      outline: none;
+      border-color: var(--brand-rust);
+    }
+
+    .surface-switcher-start-btn {
+      flex: 0 0 auto;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 4px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--brand-rust);
+      background: var(--brand-rust);
+      color: #FFFFFF;
+      cursor: pointer;
+    }
+
+    .surface-switcher-start-btn:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+
+    .surface-switcher-start-error {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--status-red);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .surface-switcher-start-error[hidden] {
+      display: none;
     }
 
     .surface-switcher-error {
@@ -2962,6 +3075,7 @@
   <div id="app" class="shell">
     <div id="lost-server" class="lost-server" role="status" hidden>No answer from blyte. Trying again.</div>
     <div id="missing-token" class="missing-token" role="status" hidden>Cannot send until this page is opened from the URL blyte printed.</div>
+    <div id="surface-stopped" class="surface-stopped" role="status" hidden></div>
     <header id="bar">
       <div class="bar-row">
         <div class="bar-group">
@@ -3086,6 +3200,10 @@
     let surfaceSwitcherOpen = false;
     let surfaceSwitcherReqId = 0;
     let surfacesPollTimer = null;
+    let surfaceStarting = false;
+    let surfaceStartFolderValue = "";
+    let surfaceStartError = "";
+    let surfaceStopConfirming = false;
 
     const seenSeqs = new Set();
     const logEntries = [];
@@ -3861,7 +3979,194 @@
           return "/api/surfaces: stopped[" + i + "] missing or invalid field last_message";
         }
       }
+      if (!Array.isArray(data.folders)) {
+        return "/api/surfaces: missing folders array";
+      }
+      for (let i = 0; i < data.folders.length; i++) {
+        if (typeof data.folders[i] !== "string") {
+          return "/api/surfaces: folders[" + i + "] must be a string";
+        }
+      }
       return null;
+    }
+
+    function showSurfaceStopped(name) {
+      if (typeof document === "undefined") return;
+      const msg = "This surface has stopped. Resume it with: blyte --resume " + name;
+      const lostEl = document.getElementById("lost-server");
+      if (lostEl) lostEl.hidden = true;
+      const stoppedEl = document.getElementById("surface-stopped");
+      if (stoppedEl) {
+        stoppedEl.textContent = msg;
+        stoppedEl.hidden = false;
+      }
+    }
+
+    async function stopCurrentSurface(name, stopBtn, errorEl) {
+      const headers = { "Content-Type": "application/json" };
+      if (surfaceToken) {
+        headers[TOKEN_HEADER] = surfaceToken;
+      }
+      let res;
+      try {
+        res = await fetch("/api/session/stop", {
+          method: "POST",
+          headers,
+          body: "{}",
+        });
+      } catch (err) {
+        surfaceStopConfirming = false;
+        if (stopBtn) {
+          stopBtn.disabled = false;
+          stopBtn.textContent = "Stop";
+          stopBtn.className = "surface-switcher-stop-btn";
+          stopBtn.setAttribute("data-stop-state", "idle");
+        }
+        if (errorEl) {
+          errorEl.textContent = err && err.message ? err.message : String(err);
+          errorEl.hidden = false;
+        }
+        return;
+      }
+      if (res.status === 403) {
+        stopAllPolling();
+        clearSurfaceToken();
+      }
+      if (!res.ok) {
+        const errMsg = await parseErrorPayload(res, "/api/session/stop");
+        surfaceStopConfirming = false;
+        if (stopBtn) {
+          stopBtn.disabled = false;
+          stopBtn.textContent = "Stop";
+          stopBtn.className = "surface-switcher-stop-btn";
+          stopBtn.setAttribute("data-stop-state", "idle");
+        }
+        if (errorEl) {
+          errorEl.textContent = errMsg;
+          errorEl.hidden = false;
+        }
+        return;
+      }
+      surfaceStopConfirming = false;
+      stopAllPolling();
+      closeSurfaceSwitcher();
+      showSurfaceStopped(name);
+    }
+
+    async function startSurfaceInFolder(inputEl, startBtn, errEl) {
+      const folder = String(inputEl ? inputEl.value : "").trim();
+      surfaceStartFolderValue = folder;
+      if (!folder) {
+        surfaceStartError = "Enter a folder path.";
+        if (errEl) {
+          errEl.textContent = surfaceStartError;
+          errEl.hidden = false;
+        }
+        return;
+      }
+      surfaceStarting = true;
+      surfaceStartError = "";
+      if (startBtn) {
+        startBtn.disabled = true;
+        startBtn.textContent = "Starting\u2026";
+      }
+      if (inputEl) {
+        inputEl.disabled = true;
+      }
+      if (errEl) {
+        errEl.textContent = "";
+        errEl.hidden = true;
+      }
+      const headers = { "Content-Type": "application/json" };
+      if (surfaceToken) {
+        headers[TOKEN_HEADER] = surfaceToken;
+      }
+      let res;
+      try {
+        res = await fetch("/api/surfaces/start", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ folder }),
+        });
+      } catch (err) {
+        const errMsg = err && err.message ? err.message : String(err);
+        surfaceStarting = false;
+        surfaceStartError = errMsg;
+        if (startBtn) {
+          startBtn.disabled = false;
+          startBtn.textContent = "Start";
+        }
+        if (inputEl) {
+          inputEl.disabled = false;
+        }
+        if (errEl) {
+          errEl.textContent = errMsg;
+          errEl.hidden = false;
+        }
+        return;
+      }
+      if (res.status === 403) {
+        stopAllPolling();
+        clearSurfaceToken();
+      }
+      if (!res.ok) {
+        const errMsg = await parseErrorPayload(res, "/api/surfaces/start");
+        surfaceStarting = false;
+        surfaceStartError = errMsg;
+        if (startBtn) {
+          startBtn.disabled = false;
+          startBtn.textContent = "Start";
+        }
+        if (inputEl) {
+          inputEl.disabled = false;
+        }
+        if (errEl) {
+          errEl.textContent = errMsg;
+          errEl.hidden = false;
+        }
+        return;
+      }
+      let data;
+      try {
+        data = await res.json();
+      } catch (err) {
+        const errMsg = "/api/surfaces/start returned invalid JSON: " + (err && err.message ? err.message : String(err));
+        surfaceStarting = false;
+        surfaceStartError = errMsg;
+        if (startBtn) {
+          startBtn.disabled = false;
+          startBtn.textContent = "Start";
+        }
+        if (inputEl) {
+          inputEl.disabled = false;
+        }
+        if (errEl) {
+          errEl.textContent = errMsg;
+          errEl.hidden = false;
+        }
+        return;
+      }
+      if (!isPlainObject(data) || typeof data.url !== "string" || !data.url) {
+        const errMsg = "/api/surfaces/start returned no surface address";
+        surfaceStarting = false;
+        surfaceStartError = errMsg;
+        if (startBtn) {
+          startBtn.disabled = false;
+          startBtn.textContent = "Start";
+        }
+        if (inputEl) {
+          inputEl.disabled = false;
+        }
+        if (errEl) {
+          errEl.textContent = errMsg;
+          errEl.hidden = false;
+        }
+        return;
+      }
+      surfaceStarting = false;
+      surfaceStartError = "";
+      surfaceStartFolderValue = "";
+      navigateToSurface(data.url);
     }
 
     function formatStoppedLastUsed(ts) {
@@ -3881,11 +4186,12 @@
       }
     }
 
-    function renderSurfaceList(container, surfaces, stopped) {
+    function renderSurfaceList(container, surfaces, stopped, folders) {
       const list = Array.isArray(surfaces)
         ? surfaces.slice().sort((a, b) => (isSurfaceWaiting(b) ? 1 : 0) - (isSurfaceWaiting(a) ? 1 : 0))
         : [];
       const stoppedList = Array.isArray(stopped) ? stopped : [];
+      const folderList = Array.isArray(folders) ? folders : [];
       container.textContent = "";
 
       for (const s of list) {
@@ -3966,6 +4272,43 @@
           head.appendChild(stateBadge);
         }
 
+        let stopErrorEl = null;
+        if (isCurrent) {
+          stopErrorEl = document.createElement("div");
+          stopErrorEl.className = "surface-switcher-row-error";
+          stopErrorEl.setAttribute("role", "alert");
+          stopErrorEl.hidden = true;
+
+          const stopBtn = document.createElement("button");
+          stopBtn.type = "button";
+          stopBtn.className = surfaceStopConfirming
+            ? "surface-switcher-stop-btn surface-switcher-stop-confirm"
+            : "surface-switcher-stop-btn";
+          stopBtn.setAttribute("data-stop-state", surfaceStopConfirming ? "confirm" : "idle");
+          stopBtn.textContent = surfaceStopConfirming ? "Stop this surface?" : "Stop";
+          stopBtn.addEventListener("click", (e) => {
+            if (e && typeof e.stopPropagation === "function") {
+              e.stopPropagation();
+            }
+            if (stopBtn.disabled) return;
+            if (!surfaceStopConfirming) {
+              surfaceStopConfirming = true;
+              stopBtn.textContent = "Stop this surface?";
+              stopBtn.className = "surface-switcher-stop-btn surface-switcher-stop-confirm";
+              stopBtn.setAttribute("data-stop-state", "confirm");
+              if (stopErrorEl) {
+                stopErrorEl.textContent = "";
+                stopErrorEl.hidden = true;
+              }
+              return;
+            }
+            stopBtn.disabled = true;
+            stopBtn.textContent = "Stopping\u2026";
+            stopCurrentSurface(nameStr, stopBtn, stopErrorEl);
+          });
+          head.appendChild(stopBtn);
+        }
+
         row.appendChild(head);
 
         const rootEl = document.createElement("div");
@@ -3986,15 +4329,88 @@
           row.appendChild(errorEl);
         }
 
+        if (stopErrorEl) {
+          row.appendChild(stopErrorEl);
+        }
+
         container.appendChild(row);
       }
 
       if (!list.some(s => !s || !s.current)) {
         const emptyEl = document.createElement("div");
         emptyEl.className = "surface-switcher-empty";
-        emptyEl.textContent = "No other surfaces are running. Start one by running blyte in another folder.";
+        emptyEl.textContent = "No other surfaces are running.";
         container.appendChild(emptyEl);
       }
+
+      const startRow = document.createElement("div");
+      startRow.className = "surface-switcher-start";
+
+      const startLabel = document.createElement("label");
+      startLabel.className = "surface-switcher-start-label";
+      startLabel.setAttribute("for", "surface-start-folder");
+      startLabel.textContent = "Start a surface in another folder";
+      startRow.appendChild(startLabel);
+
+      const startControls = document.createElement("div");
+      startControls.className = "surface-switcher-start-controls";
+
+      const folderInput = document.createElement("input");
+      folderInput.id = "surface-start-folder";
+      folderInput.type = "text";
+      folderInput.className = "surface-switcher-start-input mono";
+      folderInput.setAttribute("list", "surface-start-folders-list");
+      folderInput.setAttribute("placeholder", "/path/to/folder");
+      folderInput.setAttribute("autocomplete", "off");
+      folderInput.value = surfaceStartFolderValue;
+      folderInput.disabled = surfaceStarting;
+
+      const dataList = document.createElement("datalist");
+      dataList.id = "surface-start-folders-list";
+      for (const folder of folderList) {
+        const opt = document.createElement("option");
+        opt.value = folder;
+        opt.setAttribute("value", folder);
+        dataList.appendChild(opt);
+      }
+
+      const startBtn = document.createElement("button");
+      startBtn.type = "button";
+      startBtn.className = "surface-switcher-start-btn";
+      startBtn.disabled = surfaceStarting;
+      startBtn.textContent = surfaceStarting ? "Starting\u2026" : "Start";
+
+      const startErrEl = document.createElement("div");
+      startErrEl.className = "surface-switcher-start-error";
+      startErrEl.setAttribute("role", "alert");
+      startErrEl.textContent = surfaceStartError;
+      startErrEl.hidden = !surfaceStartError;
+
+      folderInput.addEventListener("input", () => {
+        surfaceStartFolderValue = folderInput.value;
+      });
+      folderInput.addEventListener("keydown", (e) => {
+        if (e && e.key === "Enter" && !startBtn.disabled) {
+          if (typeof e.preventDefault === "function") {
+            e.preventDefault();
+          }
+          startSurfaceInFolder(folderInput, startBtn, startErrEl);
+        }
+      });
+      startBtn.addEventListener("click", (e) => {
+        if (e && typeof e.stopPropagation === "function") {
+          e.stopPropagation();
+        }
+        if (startBtn.disabled) return;
+        startSurfaceInFolder(folderInput, startBtn, startErrEl);
+      });
+
+      startControls.appendChild(folderInput);
+      startControls.appendChild(dataList);
+      startControls.appendChild(startBtn);
+      startRow.appendChild(startControls);
+      startRow.appendChild(startErrEl);
+      container.appendChild(startRow);
 
       if (stoppedList.length > 0) {
         const heading = document.createElement("div");
@@ -4063,6 +4479,10 @@
     function closeSurfaceSwitcher() {
       surfaceSwitcherOpen = false;
       surfaceSwitcherReqId += 1;
+      surfaceStopConfirming = false;
+      if (!surfaceStarting) {
+        surfaceStartError = "";
+      }
       if (typeof document === "undefined") return;
       const btn = document.getElementById("surface-switcher");
       if (btn) btn.setAttribute("aria-expanded", "false");
@@ -4139,7 +4559,7 @@
         return;
       }
       updateSwitcherWaitingDot(data.surfaces);
-      renderSurfaceList(list, data.surfaces, data.stopped);
+      renderSurfaceList(list, data.surfaces, data.stopped, data.folders);
     }
 
     async function refreshSurfacesInBackground() {
@@ -4175,10 +4595,14 @@
         return;
       }
       updateSwitcherWaitingDot(data.surfaces);
-      if (surfaceSwitcherOpen && typeof document !== "undefined") {
+      if (surfaceSwitcherOpen && !surfaceStarting && !surfaceStopConfirming && typeof document !== "undefined") {
+        const active = document.activeElement;
+        if (active && active.id === "surface-start-folder") {
+          return;
+        }
         const list = document.getElementById("surface-switcher-list");
         if (list) {
-          renderSurfaceList(list, data.surfaces, data.stopped);
+          renderSurfaceList(list, data.surfaces, data.stopped, data.folders);
         }
       }
     }

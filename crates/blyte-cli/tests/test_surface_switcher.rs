@@ -225,7 +225,7 @@ fn surfaces_payload_lists_two_live_entries_sorted_by_name_with_urls_and_current(
         format!("http://127.0.0.1:{}/#token=tok-alpha-111", srv_a.port)
     );
 
-    let payload = surfaces_payload(reg.path(), &entry_z.id, &[]).unwrap();
+    let payload = surfaces_payload(reg.path(), state.path(), &entry_z.id, &[]).unwrap();
     let list = payload["surfaces"].as_array().unwrap();
     assert_eq!(list.len(), 2);
 
@@ -289,7 +289,7 @@ fn surfaces_payload_breaks_name_ties_by_started_at() {
     write_token(&older.id, "tok-old");
     write_token(&newer.id, "tok-new");
 
-    let payload = surfaces_payload(reg.path(), &older.id, &[]).unwrap();
+    let payload = surfaces_payload(reg.path(), state.path(), &older.id, &[]).unwrap();
     let list = payload["surfaces"].as_array().unwrap();
     assert_eq!(list.len(), 2);
     assert_eq!(list[0]["id"], "s0000000000000011");
@@ -328,7 +328,7 @@ fn surfaces_payload_lists_missing_token_entry_with_null_url_and_error() {
     write_entry(reg.path(), &missing_token_entry).unwrap();
     write_token(&ok_entry.id, "tok-ok");
 
-    let payload = surfaces_payload(reg.path(), &ok_entry.id, &[]).unwrap();
+    let payload = surfaces_payload(reg.path(), state.path(), &ok_entry.id, &[]).unwrap();
     let list = payload["surfaces"].as_array().unwrap();
     assert_eq!(list.len(), 2);
 
@@ -379,7 +379,7 @@ fn surfaces_payload_omits_dead_process_entries() {
     write_token(&live_entry.id, "tok-live");
     write_token(&dead_entry.id, "tok-dead");
 
-    let payload = surfaces_payload(reg.path(), &live_entry.id, &[]).unwrap();
+    let payload = surfaces_payload(reg.path(), state.path(), &live_entry.id, &[]).unwrap();
     let list = payload["surfaces"].as_array().unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0]["id"], "s00000000000000aa");
@@ -406,7 +406,7 @@ fn surfaces_payload_errors_when_current_id_is_absent() {
     write_token(&entry.id, "tok-alpha");
 
     let missing_id = "s00000000000000ff";
-    let err = surfaces_payload(reg.path(), missing_id, &[]).unwrap_err();
+    let err = surfaces_payload(reg.path(), state.path(), missing_id, &[]).unwrap_err();
     assert!(err.contains(missing_id), "{err}");
 }
 
@@ -565,11 +565,79 @@ fn surfaces_payload_carries_all_four_states() {
         write_token(&e.id, &format!("tok-{}", e.name));
     }
 
-    let payload = surfaces_payload(reg.path(), &e1.id, &[]).unwrap();
+    let payload = surfaces_payload(reg.path(), state.path(), &e1.id, &[]).unwrap();
     let list = payload["surfaces"].as_array().unwrap();
     assert_eq!(list.len(), 4);
     assert_eq!(list[0]["state"], "idle");
     assert_eq!(list[1]["state"], "working");
     assert_eq!(list[2]["state"], "approval");
     assert_eq!(list[3]["state"], "replied");
+}
+
+#[test]
+fn surfaces_payload_folders_lists_known_repos_and_running_roots_deduped_sorted_and_omits_missing() {
+    let state = tempfile::tempdir().unwrap();
+    let _guard = EnvGuard::set_state_root(state.path());
+    let state_dir = state.path().join("blyte");
+    let reg = tempfile::tempdir().unwrap();
+    let roots_tmp = tempfile::tempdir().unwrap();
+    let roots_dir = roots_tmp.path().canonicalize().unwrap();
+
+    let known_only = roots_dir.join("known-beta");
+    let shared_repo = roots_dir.join("shared-alpha");
+    let running_only = roots_dir.join("running-gamma");
+    let vanished_repo = roots_dir.join("vanished-delta");
+    std::fs::create_dir_all(&known_only).unwrap();
+    std::fs::create_dir_all(&shared_repo).unwrap();
+    std::fs::create_dir_all(&running_only).unwrap();
+    std::fs::create_dir_all(&vanished_repo).unwrap();
+
+    blyte_cli::registry::register(&known_only);
+    blyte_cli::registry::register(&shared_repo);
+    blyte_cli::registry::register(&vanished_repo);
+    std::fs::remove_dir_all(&vanished_repo).unwrap();
+
+    let srv_shared = MockHealthServer::start("s00000000000000f1");
+    let srv_running = MockHealthServer::start("s00000000000000f2");
+
+    let e1 = make_entry(
+        "s00000000000000f1",
+        "shared",
+        &shared_repo,
+        Some("main"),
+        srv_shared.port,
+        100,
+        "idle",
+    );
+    let e2 = make_entry(
+        "s00000000000000f2",
+        "running",
+        &running_only,
+        None,
+        srv_running.port,
+        200,
+        "idle",
+    );
+    write_entry(reg.path(), &e1).unwrap();
+    write_entry(reg.path(), &e2).unwrap();
+    write_token(&e1.id, "tok-f1");
+    write_token(&e2.id, "tok-f2");
+
+    let payload = surfaces_payload(reg.path(), &state_dir, &e1.id, &[]).unwrap();
+    let folders: Vec<&str> = payload["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+
+    let mut expected = [
+        known_only.to_string_lossy().into_owned(),
+        running_only.to_string_lossy().into_owned(),
+        shared_repo.to_string_lossy().into_owned(),
+    ];
+    expected.sort();
+    let expected_refs: Vec<&str> = expected.iter().map(String::as_str).collect();
+    assert_eq!(folders, expected_refs);
+    assert!(!folders.iter().any(|f| f.contains("vanished-delta")));
 }

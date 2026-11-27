@@ -1,7 +1,8 @@
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::serve::TOKEN_HEADER;
@@ -359,57 +360,44 @@ fn parse_http_status(head: &str) -> Result<u16, String> {
 }
 
 pub fn request_open_code(entry: &RegistryEntry, token: &str) -> Result<String, String> {
+    request_open_code_at(&entry.name, entry.port, token)
+}
+
+pub fn request_open_code_at(name: &str, port: u16, token: &str) -> Result<String, String> {
     let deadline = Instant::now() + OPEN_CODE_TIMEOUT;
-    let addr = SocketAddr::from(([127, 0, 0, 1], entry.port));
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = TcpStream::connect_timeout(&addr, OPEN_CODE_TIMEOUT).map_err(|e| {
         if e.kind() == ErrorKind::ConnectionRefused {
-            format!(
-                "surface {} refused the connection on port {}",
-                entry.name, entry.port
-            )
+            format!("surface {name} refused the connection on port {port}")
         } else {
-            format!(
-                "cannot connect to surface {} on port {}: {e}",
-                entry.name, entry.port
-            )
+            format!("cannot connect to surface {name} on port {port}: {e}")
         }
     })?;
 
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
-        return Err(format!(
-            "surface {} timed out on port {}",
-            entry.name, entry.port
-        ));
+        return Err(format!("surface {name} timed out on port {port}"));
     }
     let _ = stream.set_write_timeout(Some(remaining));
 
     let req = format!(
-        "POST /api/session/open-codes HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n{TOKEN_HEADER}: {token}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",
-        entry.port
+        "POST /api/session/open-codes HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{TOKEN_HEADER}: {token}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
     );
-    stream.write_all(req.as_bytes()).map_err(|e| {
-        format!(
-            "failed to request an open code from surface {}: {e}",
-            entry.name
-        )
-    })?;
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| format!("failed to request an open code from surface {name}: {e}"))?;
 
     let mut raw = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
         if raw.len() >= MAX_OPEN_CODE_RESPONSE_BYTES {
             return Err(format!(
-                "surface {} gave an answer blyte does not understand",
-                entry.name
+                "surface {name} gave an answer blyte does not understand"
             ));
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(format!(
-                "surface {} timed out on port {}",
-                entry.name, entry.port
-            ));
+            return Err(format!("surface {name} timed out on port {port}"));
         }
         let _ = stream.set_read_timeout(Some(remaining));
         let max_read = (MAX_OPEN_CODE_RESPONSE_BYTES - raw.len()).min(chunk.len());
@@ -418,66 +406,67 @@ pub fn request_open_code(entry: &RegistryEntry, token: &str) -> Result<String, S
             Ok(n) => raw.extend_from_slice(&chunk[..n]),
             Err(e) if e.kind() == ErrorKind::Interrupted => continue,
             Err(e) if e.kind() == ErrorKind::TimedOut || e.kind() == ErrorKind::WouldBlock => {
-                return Err(format!(
-                    "surface {} timed out on port {}",
-                    entry.name, entry.port
-                ));
+                return Err(format!("surface {name} timed out on port {port}"));
             }
             Err(e) => {
-                return Err(format!(
-                    "failed to read answer from surface {}: {e}",
-                    entry.name
-                ));
+                return Err(format!("failed to read answer from surface {name}: {e}"));
             }
         }
     }
 
-    let text = std::str::from_utf8(&raw).map_err(|_| {
-        format!(
-            "surface {} gave an answer blyte does not understand",
-            entry.name
-        )
-    })?;
-    let (head, resp_body) = text.split_once("\r\n\r\n").ok_or_else(|| {
-        format!(
-            "surface {} gave an answer blyte does not understand",
-            entry.name
-        )
-    })?;
-    let status = parse_http_status(head).map_err(|_| {
-        format!(
-            "surface {} gave an answer blyte does not understand",
-            entry.name
-        )
-    })?;
+    let text = std::str::from_utf8(&raw)
+        .map_err(|_| format!("surface {name} gave an answer blyte does not understand"))?;
+    let (head, resp_body) = text
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| format!("surface {name} gave an answer blyte does not understand"))?;
+    let status = parse_http_status(head)
+        .map_err(|_| format!("surface {name} gave an answer blyte does not understand"))?;
     if status != 200 {
         return Err(format!(
-            "surface {} could not create an open code (HTTP {status})",
-            entry.name
+            "surface {name} could not create an open code (HTTP {status})"
         ));
     }
-    let parsed: serde_json::Value = serde_json::from_str(resp_body).map_err(|_| {
-        format!(
-            "surface {} gave an answer blyte does not understand",
-            entry.name
-        )
-    })?;
+    let parsed: serde_json::Value = serde_json::from_str(resp_body)
+        .map_err(|_| format!("surface {name} gave an answer blyte does not understand"))?;
     let code = parsed
         .get("code")
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            format!(
-                "surface {} gave an answer blyte does not understand",
-                entry.name
-            )
-        })?;
+        .ok_or_else(|| format!("surface {name} gave an answer blyte does not understand"))?;
     Ok(code.to_string())
+}
+
+fn known_folders(state_dir: &Path, entries: &[RegistryEntry]) -> Result<Vec<String>, String> {
+    let mut folders = BTreeSet::new();
+    let repos_path = state_dir.join("repos");
+    match std::fs::read_to_string(&repos_path) {
+        Ok(content) => {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let path = PathBuf::from(trimmed);
+                if path.is_dir() {
+                    folders.insert(trimmed.to_string());
+                }
+            }
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!("failed to read {}: {e}", repos_path.display()));
+        }
+    }
+    for entry in entries {
+        folders.insert(entry.root.to_string_lossy().into_owned());
+    }
+    Ok(folders.into_iter().collect())
 }
 
 pub fn surfaces_payload(
     registry_dir: &Path,
+    state_dir: &Path,
     current_id: &str,
     stopped: &[StoppedSurface],
 ) -> Result<serde_json::Value, String> {
@@ -492,6 +481,7 @@ pub fn surfaces_payload(
             "current surface {current_id} is not in the surface registry"
         ));
     }
+    let folders = known_folders(state_dir, &entries)?;
     let surfaces: Vec<serde_json::Value> = entries
         .iter()
         .map(|entry| {
@@ -512,7 +502,7 @@ pub fn surfaces_payload(
             })
         })
         .collect();
-    Ok(serde_json::json!({ "surfaces": surfaces, "stopped": stopped }))
+    Ok(serde_json::json!({ "surfaces": surfaces, "stopped": stopped, "folders": folders }))
 }
 
 pub fn run_open(
