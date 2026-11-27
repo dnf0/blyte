@@ -1,3 +1,9 @@
+## v0.71.0 (2026-11-27)
+
+### Feat
+
+- dispatch, review and undo runs in a folder that is not a git repository (#448)
+
 ## v0.70.0 (2026-11-27)
 
 ### Feat
