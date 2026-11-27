@@ -35,12 +35,20 @@ pub struct Entry {
     pub body: EntryBody,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Paste {
+    pub n: u32,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum EntryBody {
     UserMessage {
         text: String,
         reports: Vec<String>,
         queued: bool,
+        attachments: Vec<crate::attachments::Meta>,
+        pastes: Vec<Paste>,
     },
     Turn {
         n: u32,
@@ -116,6 +124,10 @@ enum EntryBodyWire {
         text: String,
         reports: Vec<String>,
         queued: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<crate::attachments::Meta>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pastes: Vec<Paste>,
     },
     Turn {
         n: u32,
@@ -189,10 +201,14 @@ impl From<EntryBody> for EntryBodyWire {
                 text,
                 reports,
                 queued,
+                attachments,
+                pastes,
             } => EntryBodyWire::UserMessage {
                 text,
                 reports,
                 queued,
+                attachments,
+                pastes,
             },
             EntryBody::Turn {
                 n,
@@ -299,10 +315,14 @@ impl From<EntryBodyWire> for EntryBody {
                 text,
                 reports,
                 queued,
+                attachments,
+                pastes,
             } => EntryBody::UserMessage {
                 text,
                 reports,
                 queued,
+                attachments,
+                pastes,
             },
             EntryBodyWire::Turn {
                 n,
@@ -549,6 +569,12 @@ pub struct Attachment {
     pub text: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueuedAttachment {
+    pub meta: crate::attachments::Meta,
+    pub path: PathBuf,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct SessionInfo {
     pub model: String,
@@ -576,6 +602,8 @@ pub trait PromptRunner: Send + 'static {
     ) -> Result<(), String> {
         self.run(prompt, model, emit)
     }
+
+    fn set_pending_user_parts(&mut self, _parts: Vec<blyte_provider::UserPart>) {}
 }
 
 pub struct AgentRunner {
@@ -607,6 +635,10 @@ impl AgentRunner {
 }
 
 impl PromptRunner for AgentRunner {
+    fn set_pending_user_parts(&mut self, parts: Vec<blyte_provider::UserPart>) {
+        self.repl.state.runtime.pending_user_parts = parts;
+    }
+
     fn run(
         &mut self,
         prompt: &str,
@@ -703,6 +735,9 @@ struct ApprovalRecord {
 struct QueuedMessage {
     request_id: String,
     prompt: String,
+    reports: Vec<Attachment>,
+    attachments: Vec<QueuedAttachment>,
+    pastes: Vec<Paste>,
     peer: Option<String>,
 }
 
@@ -889,6 +924,7 @@ struct SessionState {
     entries: Vec<Entry>,
     last_seq: u64,
     log: Option<EntryLog>,
+    attachments_root: Option<PathBuf>,
     write_failure_noticed: bool,
     queue: VecDeque<QueuedMessage>,
     session_prefix: String,
@@ -1017,6 +1053,7 @@ impl Shared {
                 entries: Vec::new(),
                 last_seq: 0,
                 log: None,
+                attachments_root: None,
                 write_failure_noticed: false,
                 queue: VecDeque::new(),
                 session_prefix: new_session_prefix(),
@@ -1042,6 +1079,11 @@ impl Shared {
         log_path: Option<PathBuf>,
         err: &mut dyn Write,
     ) -> Result<Self, String> {
+        let attachments_root = log_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf);
         let (log, entries) = match log_path {
             Some(path) => {
                 let (log, entries) = EntryLog::open(path, err)?;
@@ -1056,6 +1098,7 @@ impl Shared {
             entries,
             last_seq,
             log,
+            attachments_root,
             write_failure_noticed: false,
             queue: VecDeque::new(),
             session_prefix: new_session_prefix(),
@@ -1281,23 +1324,49 @@ impl Session {
         }
     }
 
+    pub fn set_attachments_root(&self, dir: PathBuf) {
+        let mut state = self.guard.shared.lock_state();
+        state.attachments_root = Some(dir);
+    }
+
+    pub fn attachments_root(&self) -> Option<PathBuf> {
+        let state = self.guard.shared.lock_state();
+        state.attachments_root.clone()
+    }
+
     pub fn submit(&self, text: &str, attachments: Vec<Attachment>) -> Result<u64, String> {
-        if text.trim().is_empty() {
+        self.submit_with_attachments(text, attachments, Vec::new(), Vec::new())
+    }
+
+    pub fn submit_with_attachments(
+        &self,
+        text: &str,
+        reports: Vec<Attachment>,
+        file_attachments: Vec<QueuedAttachment>,
+        pastes: Vec<Paste>,
+    ) -> Result<u64, String> {
+        if text.trim().is_empty() && file_attachments.is_empty() {
             return Err("a message needs text".to_string());
         }
-        let reports = attachments.iter().map(|a| a.run.clone()).collect();
-        let full_prompt = format_prompt(text, &attachments);
+        validate_and_expand_pastes(text, &pastes)?;
+        let report_ids = reports.iter().map(|a| a.run.clone()).collect();
+        let metas = file_attachments.iter().map(|a| a.meta.clone()).collect();
         let mut state = self.guard.shared.lock_state();
         let queued = state.busy || !state.queue.is_empty();
         let seq = state.push_entry(EntryBody::UserMessage {
             text: text.to_string(),
-            reports,
+            reports: report_ids,
             queued,
+            attachments: metas,
+            pastes: pastes.clone(),
         });
         let request_id = state.next_request_id();
         state.queue.push_back(QueuedMessage {
             request_id,
-            prompt: full_prompt,
+            prompt: text.to_string(),
+            reports,
+            attachments: file_attachments,
+            pastes,
             peer: None,
         });
         self.guard.shared.work_cv.notify_one();
@@ -1329,6 +1398,9 @@ impl Session {
         state.queue.push_back(QueuedMessage {
             request_id,
             prompt: full_prompt,
+            reports: Vec::new(),
+            attachments: Vec::new(),
+            pastes: Vec::new(),
             peer: Some(from_name.to_string()),
         });
         self.guard.shared.work_cv.notify_one();
@@ -1453,11 +1525,16 @@ impl Session {
                 text: msg.to_string(),
                 reports: Vec::new(),
                 queued,
+                attachments: Vec::new(),
+                pastes: Vec::new(),
             });
             let request_id = state.next_request_id();
             state.queue.push_back(QueuedMessage {
                 request_id,
                 prompt: msg.to_string(),
+                reports: Vec::new(),
+                attachments: Vec::new(),
+                pastes: Vec::new(),
                 peer: None,
             });
             self.guard.shared.work_cv.notify_one();
@@ -1476,10 +1553,15 @@ impl Session {
             text: text.to_string(),
             reports: Vec::new(),
             queued,
+            attachments: Vec::new(),
+            pastes: Vec::new(),
         });
         state.queue.push_back(QueuedMessage {
             request_id: request_id.to_string(),
             prompt: text.to_string(),
+            reports: Vec::new(),
+            attachments: Vec::new(),
+            pastes: Vec::new(),
             peer: None,
         });
         self.guard.shared.work_cv.notify_one();
@@ -1551,7 +1633,12 @@ fn worker_loop(mut runner: Box<dyn PromptRunner>, shared: Arc<Shared>) {
         };
 
         let started = Instant::now();
-        call_activity_hook(&shared, Some(&msg.prompt));
+        let prepared = prepare_queued_message(&msg);
+        let activity_prompt = match &prepared {
+            Ok((prompt, _)) => prompt.as_str(),
+            Err(_) => msg.prompt.as_str(),
+        };
+        call_activity_hook(&shared, Some(activity_prompt));
 
         let totals = Mutex::new(TurnTotals {
             turns: 0,
@@ -1594,10 +1681,19 @@ fn worker_loop(mut runner: Box<dyn PromptRunner>, shared: Arc<Shared>) {
             emit_shared.log_cv.notify_all();
         };
 
-        let outcome = catch_unwind(AssertUnwindSafe(|| {
-            let _req_guard = RequestGuard::enter(msg.request_id, msg.peer);
-            runner.run_with_first_output(&msg.prompt, &effective_model, &emit, &record_first_output)
-        }));
+        let outcome = match prepared {
+            Ok((model_prompt, image_parts)) => catch_unwind(AssertUnwindSafe(|| {
+                let _req_guard = RequestGuard::enter(msg.request_id, msg.peer);
+                runner.set_pending_user_parts(image_parts);
+                runner.run_with_first_output(
+                    &model_prompt,
+                    &effective_model,
+                    &emit,
+                    &record_first_output,
+                )
+            })),
+            Err(err) => Ok(Err(err)),
+        };
 
         call_activity_hook(&shared, None);
 
@@ -1637,13 +1733,161 @@ fn worker_loop(mut runner: Box<dyn PromptRunner>, shared: Arc<Shared>) {
     }
 }
 
-fn format_prompt(text: &str, attachments: &[Attachment]) -> String {
+fn prepare_queued_message(
+    msg: &QueuedMessage,
+) -> Result<(String, Vec<blyte_provider::UserPart>), String> {
+    if msg.peer.is_some() {
+        return Ok((msg.prompt.clone(), Vec::new()));
+    }
+    let expanded = validate_and_expand_pastes(&msg.prompt, &msg.pastes)?;
+    let prompt = format_prompt(&expanded, &msg.reports, &msg.attachments);
+    let mut parts = Vec::new();
+    for att in &msg.attachments {
+        if att.meta.image {
+            let bytes = std::fs::read(&att.path).map_err(|e| {
+                format!(
+                    "attachment {} at {} could not be read: {e}",
+                    att.meta.id,
+                    att.path.display()
+                )
+            })?;
+            let encoded = crate::attachments::base64_encode(&bytes);
+            parts.push(blyte_provider::UserPart::Image {
+                mime_type: att.meta.mime_type.clone(),
+                data: Arc::from(encoded),
+            });
+        }
+    }
+    Ok((prompt, parts))
+}
+
+fn parse_paste_marker_at(s: &str) -> Option<(usize, u32)> {
+    const PREFIX: &str = "[Pasted text #";
+    let rest = s.strip_prefix(PREFIX)?;
+    let n_end = rest
+        .bytes()
+        .position(|b| !b.is_ascii_digit())
+        .unwrap_or(rest.len());
+    if n_end == 0 {
+        return None;
+    }
+    let n = rest[..n_end].parse::<u32>().ok()?;
+    let after_n = rest[n_end..].strip_prefix(" +")?;
+    let lines_end = after_n
+        .bytes()
+        .position(|b| !b.is_ascii_digit())
+        .unwrap_or(after_n.len());
+    if lines_end == 0 {
+        return None;
+    }
+    let _lines = after_n[..lines_end].parse::<u64>().ok()?;
+    let suffix_rest = after_n[lines_end..].strip_prefix(" lines]")?;
+    let total_len = s.len() - suffix_rest.len();
+    Some((total_len, n))
+}
+
+fn find_paste_markers(text: &str) -> Vec<(usize, usize, u32)> {
+    const PREFIX: &str = "[Pasted text #";
+    let mut markers = Vec::new();
+    let mut pos = 0usize;
+    while let Some(rel) = text[pos..].find(PREFIX) {
+        let start = pos + rel;
+        if let Some((len, n)) = parse_paste_marker_at(&text[start..]) {
+            let end = start + len;
+            markers.push((start, end, n));
+            pos = end;
+        } else {
+            pos = start + PREFIX.len();
+        }
+    }
+    markers
+}
+
+pub fn validate_and_expand_pastes(text: &str, pastes: &[Paste]) -> Result<String, String> {
+    let mut by_n: HashMap<u32, &Paste> = HashMap::with_capacity(pastes.len());
+    for paste in pastes {
+        if by_n.insert(paste.n, paste).is_some() {
+            return Err(format!("duplicate paste #{}", paste.n));
+        }
+    }
+
+    let markers = find_paste_markers(text);
+    let mut matched = std::collections::HashSet::with_capacity(pastes.len());
+    for &(start, end, n) in &markers {
+        let raw = &text[start..end];
+        if by_n.contains_key(&n) {
+            matched.insert(n);
+        } else {
+            return Err(format!("paste marker {raw} has no matching paste entry"));
+        }
+    }
+
+    for paste in pastes {
+        if !matched.contains(&paste.n) {
+            return Err(format!(
+                "paste [Pasted text #{}] is not in the message text",
+                paste.n
+            ));
+        }
+    }
+
+    if markers.is_empty() {
+        return Ok(text.to_string());
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    for (start, end, n) in markers {
+        out.push_str(&text[cursor..start]);
+        out.push_str(&by_n[&n].text);
+        cursor = end;
+    }
+    out.push_str(&text[cursor..]);
+    Ok(out)
+}
+
+fn format_prompt(
+    text: &str,
+    reports: &[Attachment],
+    file_attachments: &[QueuedAttachment],
+) -> String {
     let mut out = text.to_string();
-    for att in attachments {
+    for att in reports {
         out.push_str("\n\nResearch report ");
         out.push_str(&att.run);
         out.push_str(":\n");
         out.push_str(&att.text);
+    }
+    let mut image_idx = 0usize;
+    for att in file_attachments {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        if att.meta.image {
+            image_idx += 1;
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    "[Image #{}] {} ({}, {} bytes) saved at {}",
+                    image_idx,
+                    att.meta.name,
+                    att.meta.mime_type,
+                    att.meta.size,
+                    att.path.display()
+                ),
+            );
+        } else {
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    "[File {}] ({}, {} bytes) saved at {}",
+                    att.meta.name,
+                    att.meta.mime_type,
+                    att.meta.size,
+                    att.path.display()
+                ),
+            );
+        }
     }
     out
 }
