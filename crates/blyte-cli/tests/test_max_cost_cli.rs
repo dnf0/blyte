@@ -42,10 +42,4 @@ fn dispatch_help_and_config_template_state_default_max_cost() {
         first_chunk.contains("25") && first_chunk.to_ascii_lowercase().contains("default"),
         "expected default 25 in --max-cost help: {first_chunk}"
     );
-
-    let rendered = blyte_cli::config::render(&["true".to_string()]);
-    assert!(
-        rendered.contains("# max_cost = 25.0   # USD per run; this is the default"),
-        "rendered template: {rendered}"
-    );
 }

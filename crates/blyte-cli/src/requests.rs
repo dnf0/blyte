@@ -853,13 +853,6 @@ fn check_record_combined_for_request(
     Ok(combined)
 }
 
-pub fn run_is_combined(root: &Path, run_id: &str, request: Option<&str>) -> Result<bool, String> {
-    let Some(request) = request else {
-        return Ok(false);
-    };
-    Ok(check_record_combined_for_request(root, request, &[run_id])?.contains(run_id))
-}
-
 pub fn combined_run_ids(
     root: &Path,
     runs: &[(&str, Option<&str>)],
@@ -1854,150 +1847,10 @@ impl SurfacePublishTool {
         let approver: Arc<dyn blyte_agent::approval::Approver> = surface.session.approver();
         Self { surface, approver }
     }
-
-    pub fn with_approver(
-        surface: Arc<Surface>,
-        approver: Arc<dyn blyte_agent::approval::Approver>,
-    ) -> Self {
-        Self { surface, approver }
-    }
 }
 
 impl blyte_agent::tools::PublishTool for SurfacePublishTool {
     fn publish(&self, request: &str, title: &str, body: &str) -> Result<String, String> {
         publish_request_with_approval(&self.surface, self.approver.as_ref(), request, title, body)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn run_git(dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    }
-
-    fn write_test_file(path: &Path, content: &str) {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(path, content).unwrap();
-    }
-
-    #[test]
-    fn a_combined_run_without_a_summary_errors_naming_the_file() {
-        let d = tempfile::tempdir().unwrap();
-        let repo = d.path().join("missing-summary-repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        run_git(&repo, &["init", "-q", "-b", "main"]);
-        run_git(&repo, &["config", "user.email", "test@example.com"]);
-        run_git(&repo, &["config", "user.name", "Test"]);
-        write_test_file(&repo.join("README.md"), "hello\n");
-        write_test_file(&repo.join("blyte.toml"), "[dispatch]\ngate = \"true\"\n");
-        run_git(&repo, &["add", "."]);
-        run_git(&repo, &["commit", "-q", "-m", "initial"]);
-        let base_sha = run_git(&repo, &["rev-parse", "HEAD"]);
-
-        let wt_run = repo.join(".wt/MS1");
-        std::fs::create_dir_all(repo.join(".wt")).unwrap();
-        assert!(Command::new("git")
-            .args(["worktree", "add", "-q", "-b", "wip/MS1"])
-            .arg(&wt_run)
-            .arg(&base_sha)
-            .current_dir(&repo)
-            .status()
-            .unwrap()
-            .success());
-        write_test_file(&wt_run.join("ms1.txt"), "one\n");
-        run_git(&wt_run, &["add", "ms1.txt"]);
-        run_git(&wt_run, &["commit", "-q", "-m", "feat: MS1"]);
-        assert!(Command::new("git")
-            .args(["worktree", "remove", "--force"])
-            .arg(&wt_run)
-            .current_dir(&repo)
-            .status()
-            .unwrap()
-            .success());
-
-        write_test_file(&repo.join(".wt/tasks/MS1.md"), "# Task MS1\n");
-        write_test_file(
-            &repo.join(".wt/MS1.start.json"),
-            &format!(
-                r#"{{"id":"MS1","pid":999999,"started_at":100,"base_sha":"{base_sha}","task_file":".wt/tasks/MS1.md","research":false,"request":"req-ms"}}"#
-            ),
-        );
-        let summary_path = repo.join(".wt/MS1.json");
-        write_test_file(
-            &summary_path,
-            r#"{"id":"MS1","outcome":"verified","branch":"wip/MS1","turns":2,"seconds":5,"cost_usd":0.01,"final_message":"done"}"#,
-        );
-        write_test_file(
-            &repo.join(".wt/MS1.checks.json"),
-            r#"{"flags":[],"fallbacks":[]}"#,
-        );
-
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let code = crate::combine::combine_in(&repo, "req-ms", &mut out, &mut err);
-        assert_eq!(code, 0, "combine failed: {}", String::from_utf8_lossy(&err));
-        assert_eq!(run_is_combined(&repo, "MS1", Some("req-ms")), Ok(true));
-
-        std::fs::remove_file(&summary_path).unwrap();
-        let err_msg = run_is_combined(&repo, "MS1", Some("req-ms")).unwrap_err();
-        assert!(
-            err_msg.contains(".wt/MS1.json"),
-            "expected error to contain .wt/MS1.json, got: {err_msg}"
-        );
-    }
-
-    #[test]
-    fn a_combined_run_with_non_string_branch_errors_naming_the_file() {
-        let d = tempfile::tempdir().unwrap();
-        let repo = d.path().join("non-string-branch-repo");
-        write_test_file(
-            &repo.join(".wt/combined/req-ns.json"),
-            r#"{"request":"req-ns","state":"combined","branch":"request/req-ns","base":"0000000","runs":[{"id":"NS1","tip":"1111111"}],"commits":["1111111"]}"#,
-        );
-        write_test_file(
-            &repo.join(".wt/NS1.json"),
-            r#"{"id":"NS1","outcome":"verified","branch":42}"#,
-        );
-
-        let err_msg = run_is_combined(&repo, "NS1", Some("req-ns")).unwrap_err();
-        assert!(
-            err_msg.contains(".wt/NS1.json"),
-            "expected error to contain .wt/NS1.json, got: {err_msg}"
-        );
-    }
-
-    #[test]
-    fn a_combined_run_with_git_error_returns_error_naming_run_and_branch() {
-        let d = tempfile::tempdir().unwrap();
-        let non_repo = d.path().join("not-a-git-repo");
-        write_test_file(
-            &non_repo.join(".wt/combined/req-ge.json"),
-            r#"{"request":"req-ge","state":"combined","branch":"request/req-ge","base":"0000000","runs":[{"id":"GE1","tip":"1111111"}],"commits":["1111111"]}"#,
-        );
-        write_test_file(
-            &non_repo.join(".wt/GE1.json"),
-            r#"{"id":"GE1","outcome":"verified","branch":"wip/GE1"}"#,
-        );
-
-        let err_msg = run_is_combined(&non_repo, "GE1", Some("req-ge")).unwrap_err();
-        assert!(
-            err_msg.contains("GE1") && err_msg.contains("wip/GE1"),
-            "expected error to name run and branch, got: {err_msg}"
-        );
     }
 }

@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use blyte_cli::config::{detect, load, render};
+use blyte_cli::config::{detect, load};
 
 fn repo() -> tempfile::TempDir {
     let d = tempfile::tempdir().unwrap();
@@ -90,13 +90,17 @@ fn node_runs_the_scripts_it_defines_with_its_package_manager() {
 }
 
 #[test]
-fn render_round_trips_through_load() {
+fn load_reads_multiline_gate_and_max_turns() {
     let r = tempfile::tempdir().unwrap();
-    let steps = vec![
-        "cargo fmt --all --check".to_string(),
-        "cargo test".to_string(),
-    ];
-    std::fs::write(r.path().join("blyte.toml"), render(&steps)).unwrap();
+    let toml = r#"[dispatch]
+gate = """
+cargo fmt --all --check
+cargo test
+"""
+max_seconds = 3600
+max_turns = 300
+"#;
+    std::fs::write(r.path().join("blyte.toml"), toml).unwrap();
     let cfg = load(r.path()).unwrap().unwrap();
     assert_eq!(
         cfg.dispatch.gate.as_deref(),

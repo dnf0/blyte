@@ -65,26 +65,6 @@ impl Response {
     }
 }
 
-pub fn serve<F>(listener: TcpListener, handler: F) -> std::io::Result<()>
-where
-    F: Fn(&Request) -> Response + Send + Sync + 'static,
-{
-    let port = listener.local_addr()?.port();
-    let handler = Arc::new(handler);
-    loop {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                let handler = Arc::clone(&handler);
-                std::thread::spawn(move || {
-                    handle_connection(stream, port, handler.as_ref());
-                });
-            }
-            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
-            Err(err) => return Err(err),
-        }
-    }
-}
-
 pub fn serve_until<F, S>(listener: TcpListener, should_stop: S, handler: F) -> std::io::Result<()>
 where
     F: Fn(&Request) -> Response + Send + Sync + 'static,

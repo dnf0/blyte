@@ -301,33 +301,6 @@ pub fn detect(root: &Path) -> Vec<String> {
     steps
 }
 
-pub fn render(gate: &[String]) -> String {
-    let mut gate_str = String::new();
-    for step in gate {
-        gate_str.push_str(step);
-        gate_str.push('\n');
-    }
-    format!(
-        r#"# blyte.toml: how this repository's work is checked, for `blyte dispatch`.
-[dispatch]
-gate = """
-{gate_str}"""
-# model = "gemini-3.8-flash-high"
-max_seconds = 3600
-max_turns = 300
-# max_cost = 25.0   # USD per run; this is the default
-# network = "on"
-# fold_budget = 60000
-# fix_round = true
-# setup = "uv sync"   # prepares each new worktree before the implementer starts
-# allow_read = ["~/.cache/some-tool"]   # extra paths the sandbox may read
-
-# [dispatch.env]
-# UV_FROZEN = "1"   # settings for every command and the gate; never credentials
-"#
-    )
-}
-
 /// The targets a `Makefile` (or `makefile`, `GNUmakefile`) at `root` defines: lines of the form
 /// `name:` at the start of a line, excluding variable assignments (`name := …`) and special
 /// targets (`.PHONY`).

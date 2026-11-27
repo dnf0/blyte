@@ -7,8 +7,8 @@ use std::thread;
 use std::time::Duration;
 
 use blyte_cli::surface_registry::{
-    entry_path, find_by_name, first_line, live_entries, read_entries, remove_entry, set_doing,
-    write_entry, RegistryEntry,
+    entry_path, find_by_name, first_line, live_entries, read_entries, remove_entry, write_entry,
+    RegistryEntry,
 };
 
 struct MockHealthServer {
@@ -235,24 +235,6 @@ fn find_by_name_errors_when_multiple_live_entries_share_a_name() {
         err,
         "more than one running surface is named shared; use an id: s00000000000000aa, s00000000000000bb"
     );
-}
-
-#[test]
-fn set_doing_updates_only_doing_and_errors_when_missing() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
-    let entry = sample_entry("s00000000000000aa", "alpha", 18080, 100);
-    write_entry(dir, &entry).unwrap();
-
-    set_doing(dir, &entry.id, "fixing tests").unwrap();
-    let updated = read_entries(dir).unwrap();
-    let mut expected = entry;
-    expected.doing = "fixing tests".to_string();
-    assert_eq!(updated, vec![expected]);
-
-    let missing_path = entry_path(dir, "s00000000000000bb");
-    let err = set_doing(dir, "s00000000000000bb", "idle").unwrap_err();
-    assert!(err.contains(&missing_path.display().to_string()), "{err}");
 }
 
 #[test]

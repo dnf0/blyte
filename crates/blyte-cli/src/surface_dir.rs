@@ -208,14 +208,6 @@ pub fn surface_dir(main_checkout: &Path, id: &str) -> PathBuf {
     surfaces_dir(main_checkout).join(id)
 }
 
-pub fn record_path(main_checkout: &Path, id: &str) -> PathBuf {
-    surface_dir(main_checkout, id).join("surface.json")
-}
-
-pub fn entries_path(main_checkout: &Path, id: &str) -> PathBuf {
-    surface_dir(main_checkout, id).join("entries.jsonl")
-}
-
 pub fn write_record_in(dir: &Path, record: &SurfaceRecord) -> Result<(), String> {
     validate_surface_id(&record.id)?;
     validate_surface_name(&record.name)?;
@@ -239,10 +231,6 @@ pub fn write_record_in(dir: &Path, record: &SurfaceRecord) -> Result<(), String>
         ));
     }
     Ok(())
-}
-
-pub fn write_record(main_checkout: &Path, record: &SurfaceRecord) -> Result<(), String> {
-    write_record_in(&surface_dir(main_checkout, &record.id), record)
 }
 
 pub fn read_record_in(dir: &Path, id: &str) -> Result<SurfaceRecord, String> {
@@ -302,13 +290,6 @@ pub fn list_records_in(root: &Path) -> Result<Vec<LocatedRecord>, String> {
             .then_with(|| a.record.id.cmp(&b.record.id))
     });
     Ok(records)
-}
-
-pub fn list_records(main_checkout: &Path) -> Result<Vec<SurfaceRecord>, String> {
-    Ok(list_records_in(&surfaces_dir(main_checkout))?
-        .into_iter()
-        .map(|located| located.record)
-        .collect())
 }
 
 pub fn list_records_for_root(

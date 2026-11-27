@@ -1237,7 +1237,8 @@ fn old_model_review_json_without_fallbacks_still_loads() {
         .to_string(),
     )
     .unwrap();
-    let loaded = blyte_cli::model_review::load_saved_review(&old_path).unwrap();
+    let raw = std::fs::read_to_string(&old_path).unwrap();
+    let loaded: blyte_cli::model_review::SavedModelReview = serde_json::from_str(&raw).unwrap();
     assert_eq!(loaded.model.as_deref(), Some("gemini/gemini-3.8-flash"));
     assert_eq!(loaded.concerns.len(), 1);
     assert!(loaded.fallbacks.is_empty());

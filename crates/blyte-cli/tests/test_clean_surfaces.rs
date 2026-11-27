@@ -361,16 +361,14 @@ fn stopped_surface_older_than_threshold_and_token_are_removed() {
         session_id: "sess-15d".to_string(),
         started_at: NOW_SECS - DAY_SECS,
     };
-    surface_dir::write_record(repo.path(), &record).expect("write record");
-    let entries = surface_dir::entries_path(repo.path(), id);
+    let sdir = surface_dir::surface_dir(repo.path(), id);
+    surface_dir::write_record_in(&sdir, &record).expect("write record");
+    let entries = sdir.join("entries.jsonl");
     write_file(&entries, "{\"type\":\"note\"}\n");
     let token_path = surface_token_path_for_id(id).expect("token path for id");
     write_file(&token_path, "per-surface-token\n");
 
-    set_mtime(
-        &surface_dir::record_path(repo.path(), id),
-        NOW_SECS - 16 * DAY_SECS,
-    );
+    set_mtime(&sdir.join("surface.json"), NOW_SECS - 16 * DAY_SECS);
     set_mtime(&entries, NOW_SECS - 15 * DAY_SECS);
 
     let lines = clean_surfaces(repo.path(), 14, false, NOW_SECS).expect("clean_surfaces ok");
@@ -398,14 +396,15 @@ fn stopped_surface_younger_than_threshold_is_kept_with_token() {
         session_id: "sess-13d".to_string(),
         started_at: NOW_SECS - 13 * DAY_SECS,
     };
-    surface_dir::write_record(repo.path(), &record).expect("write record");
-    let entries = surface_dir::entries_path(repo.path(), id);
+    let sdir = surface_dir::surface_dir(repo.path(), id);
+    surface_dir::write_record_in(&sdir, &record).expect("write record");
+    let entries = sdir.join("entries.jsonl");
     write_file(&entries, "{\"type\":\"note\"}\n");
     let token_path = surface_token_path_for_id(id).expect("token path for id");
     write_file(&token_path, "per-surface-token\n");
 
     let recent_ts = NOW_SECS - 13 * DAY_SECS;
-    set_mtime(&surface_dir::record_path(repo.path(), id), recent_ts);
+    set_mtime(&sdir.join("surface.json"), recent_ts);
     set_mtime(&entries, recent_ts);
 
     let lines = clean_surfaces(repo.path(), 14, false, NOW_SECS).expect("clean_surfaces ok");
@@ -430,16 +429,14 @@ fn stopped_surface_with_old_record_and_newer_file_is_kept() {
         session_id: "sess-mixed".to_string(),
         started_at: NOW_SECS - 20 * DAY_SECS,
     };
-    surface_dir::write_record(repo.path(), &record).expect("write record");
-    let entries = surface_dir::entries_path(repo.path(), id);
+    let sdir = surface_dir::surface_dir(repo.path(), id);
+    surface_dir::write_record_in(&sdir, &record).expect("write record");
+    let entries = sdir.join("entries.jsonl");
     write_file(&entries, "{\"type\":\"note\"}\n");
     let token_path = surface_token_path_for_id(id).expect("token path for id");
     write_file(&token_path, "per-surface-token\n");
 
-    set_mtime(
-        &surface_dir::record_path(repo.path(), id),
-        NOW_SECS - 15 * DAY_SECS,
-    );
+    set_mtime(&sdir.join("surface.json"), NOW_SECS - 15 * DAY_SECS);
     set_mtime(&entries, NOW_SECS - 13 * DAY_SECS);
 
     let lines = clean_surfaces(repo.path(), 14, false, NOW_SECS).expect("clean_surfaces ok");
@@ -470,14 +467,15 @@ fn running_surface_with_old_files_is_kept() {
         session_id: "sess-live".to_string(),
         started_at: NOW_SECS - 15 * DAY_SECS,
     };
-    surface_dir::write_record(repo.path(), &record).expect("write record");
-    let entries = surface_dir::entries_path(repo.path(), id);
+    let sdir = surface_dir::surface_dir(repo.path(), id);
+    surface_dir::write_record_in(&sdir, &record).expect("write record");
+    let entries = sdir.join("entries.jsonl");
     write_file(&entries, "{\"type\":\"note\"}\n");
     let token_path = surface_token_path_for_id(id).expect("token path for id");
     write_file(&token_path, "per-surface-token\n");
 
     let old_ts = NOW_SECS - 15 * DAY_SECS;
-    set_mtime(&surface_dir::record_path(repo.path(), id), old_ts);
+    set_mtime(&sdir.join("surface.json"), old_ts);
     set_mtime(&entries, old_ts);
 
     let lines = clean_surfaces(repo.path(), 14, false, NOW_SECS).expect("clean_surfaces ok");
@@ -636,8 +634,9 @@ fn cli_blyte_clean_dry_run_leaves_stopped_surface_intact() {
         session_id: "sess-cli-dry".to_string(),
         started_at: old_ts,
     };
-    surface_dir::write_record(repo.path(), &record).expect("write record");
-    set_mtime(&surface_dir::record_path(repo.path(), id), old_ts);
+    let sdir = surface_dir::surface_dir(repo.path(), id);
+    surface_dir::write_record_in(&sdir, &record).expect("write record");
+    set_mtime(&sdir.join("surface.json"), old_ts);
 
     let out = Command::new(blyte_bin())
         .args(["clean", "--dry-run"])

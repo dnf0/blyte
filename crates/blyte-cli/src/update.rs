@@ -95,11 +95,6 @@ pub const fn parse_repo(url: &str) -> Option<&str> {
     }
 }
 
-/// Alias for [`parse_repo`].
-pub const fn parse_repo_url(url: &str) -> Option<&str> {
-    parse_repo(url)
-}
-
 /// The release asset for this machine, or `None` where no binary is built.
 pub fn asset_name() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {

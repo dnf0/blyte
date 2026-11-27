@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use blyte_cli::clean::{
-    check_session_worktree_removable, clean_repo_with_options, is_session_worktree,
-    parse_lsof_cwd_output, parse_worktree_list, KeptReason, RemovalReason,
+    check_session_worktree_removable_with_ctx, clean_repo_with_options, is_session_worktree,
+    parse_lsof_cwd_output, parse_worktree_list, CleanContext, KeptReason, RemovalReason,
 };
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -449,21 +449,36 @@ fn test_session_worktree_idle_checks_both_index_and_head() {
     // Only index is old, HEAD is fresh -> kept
     backdate_worktree_admin_files(&wt_path, 8, 1);
     assert_eq!(
-        check_session_worktree_removable(&root, wt_info, &Ok(vec![]), 7),
+        check_session_worktree_removable_with_ctx(
+            &mut CleanContext::new(&root),
+            wt_info,
+            &Ok(vec![]),
+            7
+        ),
         Err(KeptReason::UsedRecently(7))
     );
 
     // Only HEAD is old, index is fresh -> kept
     backdate_worktree_admin_files(&wt_path, 1, 8);
     assert_eq!(
-        check_session_worktree_removable(&root, wt_info, &Ok(vec![]), 7),
+        check_session_worktree_removable_with_ctx(
+            &mut CleanContext::new(&root),
+            wt_info,
+            &Ok(vec![]),
+            7
+        ),
         Err(KeptReason::UsedRecently(7))
     );
 
     // Both index and HEAD are > 7 days old -> removable
     backdate_worktree_admin_files(&wt_path, 8, 8);
     assert_eq!(
-        check_session_worktree_removable(&root, wt_info, &Ok(vec![]), 7),
+        check_session_worktree_removable_with_ctx(
+            &mut CleanContext::new(&root),
+            wt_info,
+            &Ok(vec![]),
+            7
+        ),
         Ok(RemovalReason::SessionMerged("feat/idle".to_string()))
     );
 }
@@ -491,7 +506,12 @@ fn test_session_worktree_lsof_error_keeps_worktree() {
         .unwrap();
 
     let cwds_err = Err("No such file or directory (os error 2)".to_string());
-    let res = check_session_worktree_removable(&root, wt_info, &cwds_err, 0);
+    let res = check_session_worktree_removable_with_ctx(
+        &mut CleanContext::new(&root),
+        wt_info,
+        &cwds_err,
+        0,
+    );
     assert_eq!(
         res,
         Err(KeptReason::CannotCheckInUse(

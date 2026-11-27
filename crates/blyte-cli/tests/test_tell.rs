@@ -12,7 +12,7 @@ use blyte_cli::cli::SurfaceArgs;
 use blyte_cli::repl::ReplConfig;
 use blyte_cli::serve::run_with_runner;
 use blyte_cli::session::{peer_prompt, EntryBody, PromptRunner};
-use blyte_cli::surface_dir::list_records;
+use blyte_cli::surface_dir::{list_records_in, surfaces_dir};
 use blyte_cli::surface_registry::{entry_path, registry_dir, write_entry, RegistryEntry};
 use blyte_cli::tell::{run_tell, tell, SurfacePeerTools, TellOutcome};
 
@@ -173,9 +173,9 @@ fn start_surface(repo: &Path, name: &str) -> RunningSurface {
         std::thread::sleep(Duration::from_millis(5));
     };
 
-    let records = list_records(repo).unwrap();
+    let records = list_records_in(&surfaces_dir(repo)).unwrap();
     assert_eq!(records.len(), 1);
-    let id = records[0].id.clone();
+    let id = records[0].record.id.clone();
 
     RunningSurface {
         id,
