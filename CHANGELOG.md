@@ -1,3 +1,9 @@
+## v0.70.0 (2026-11-27)
+
+### Feat
+
+- **surface**: switch between running surfaces from the name in the header (#446)
+
 ## v0.69.0 (2026-11-27)
 
 ### Feat
