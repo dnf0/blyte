@@ -1,3 +1,9 @@
+## v0.69.0 (2026-11-27)
+
+### Feat
+
+- drop or paste images, files and long text into the surface (#444)
+
 ## v0.68.3 (2026-11-27)
 
 ### Fix
