@@ -935,10 +935,26 @@ fn run_task_with_event_callback(
         let exe = std::env::current_exe()
             .map_err(|e| format!("cannot locate blyte executable for the blyte tool: {e}"))?;
         blyte_agent::tools::set_blyte_tool(Some(exe));
+        if blyte_agent::sandbox::is_git_repository(&config.root) {
+            blyte_agent::tools::set_blyte_tasks_dir(None);
+            blyte_agent::tools::set_blyte_run_store(None);
+            blyte_agent::tools::set_in_place_lock_path(None);
+        } else {
+            let state_dir = crate::surface_registry::state_dir()?;
+            let tasks_dir = crate::surface_dir::tasks_dir(&state_dir, &config.root)?;
+            let run_store = crate::surface_dir::run_store(&state_dir, &config.root)?;
+            let lock_path = crate::surface_dir::in_place_lock_path(&state_dir, &config.root)?;
+            blyte_agent::tools::set_blyte_tasks_dir(Some(tasks_dir));
+            blyte_agent::tools::set_blyte_run_store(Some(run_store));
+            blyte_agent::tools::set_in_place_lock_path(Some(lock_path));
+        }
         guard
     } else {
         configure_converse_policy(false, false, &config.root, None, false)?;
         blyte_agent::tools::set_blyte_tool(None);
+        blyte_agent::tools::set_blyte_tasks_dir(None);
+        blyte_agent::tools::set_blyte_run_store(None);
+        blyte_agent::tools::set_in_place_lock_path(None);
         None
     };
     blyte_agent::tools::set_dispatch_cmd(config.dispatch_cmd.clone());

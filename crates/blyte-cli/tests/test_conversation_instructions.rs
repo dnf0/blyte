@@ -296,3 +296,44 @@ fn assembled_instructions_explain_working_without_a_git_repository() {
         built_off.instructions
     );
 }
+
+#[test]
+fn assembled_instructions_for_non_repository_describe_in_place_runs_and_undo() {
+    let root = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let _guard = XdgGuard::set(xdg.path());
+
+    let built = build_with_sandbox(false, Answers::Person, root.path(), true, 0).unwrap();
+    assert!(
+        built.instructions.contains("blyte undo"),
+        "{}",
+        built.instructions
+    );
+    assert!(
+        !built.instructions.contains("there are no runs"),
+        "{}",
+        built.instructions
+    );
+    assert!(
+        built.instructions.contains("blyte review <id>"),
+        "{}",
+        built.instructions
+    );
+    assert!(
+        built.instructions.contains("in place"),
+        "{}",
+        built.instructions
+    );
+
+    let built_off = build_with_sandbox(false, Answers::Person, root.path(), false, 0).unwrap();
+    assert!(
+        built_off.instructions.contains("blyte undo"),
+        "{}",
+        built_off.instructions
+    );
+    assert!(
+        !built_off.instructions.contains("there are no runs"),
+        "{}",
+        built_off.instructions
+    );
+}

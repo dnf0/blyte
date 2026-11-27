@@ -247,24 +247,10 @@ fn blyte_tool_refuses_dispatch_without_a_repository_and_creates_nothing() {
         &json!({"args": ["dispatch", "T1", "x.md"], "background": true}),
     );
     assert!(out.is_error, "expected error, got: {}", out.content);
-    assert!(
-        out.content.contains("not a git repository"),
-        "{}",
-        out.content
-    );
-    assert!(out.content.contains("git init"), "{}", out.content);
+    assert!(out.content.contains("run store"), "{}", out.content);
     assert!(!root.path().join(".wt").exists());
 
-    for subcmd in [
-        "wait",
-        "status",
-        "review",
-        "plan",
-        "init",
-        "clean",
-        "edit-start",
-        "edit-finish",
-    ] {
+    for subcmd in ["plan", "init", "clean", "edit-start", "edit-finish", "undo"] {
         let res = execute(
             root.path(),
             &LocalShell,
@@ -297,7 +283,7 @@ fn blyte_tool_works_again_after_git_init() {
         &LocalShell,
         &LocalFs,
         "blyte",
-        &json!({"args": ["status", "T1"]}),
+        &json!({"args": ["plan", "plan.md"]}),
     );
     assert!(before.is_error);
     assert!(before.content.contains("not a git repository"));
@@ -309,11 +295,11 @@ fn blyte_tool_works_again_after_git_init() {
         &LocalShell,
         &LocalFs,
         "blyte",
-        &json!({"args": ["status", "T1"]}),
+        &json!({"args": ["plan", "plan.md"]}),
     );
     assert!(!after.is_error, "{}", after.content);
     assert!(
-        after.content.contains("reached-binary:status T1"),
+        after.content.contains("reached-binary:plan plan.md"),
         "{}",
         after.content
     );
