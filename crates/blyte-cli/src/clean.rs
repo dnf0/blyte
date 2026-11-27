@@ -2695,14 +2695,18 @@ pub fn clean_surfaces(
             continue;
         }
         let token_path = blyte_agent::sandbox::surface_token_path_for_id(&located.record.id)?;
+        let conversation_path =
+            crate::conversation_store::conversation_path_for_id(&located.record.id)?;
         let dir_label = if dir.starts_with(main_checkout) {
             format!(".wt/surfaces/{}", located.record.id)
         } else {
             dir.display().to_string()
         };
         let token_label = token_path.display().to_string();
+        let conversation_label = conversation_path.display().to_string();
         remove_dir_if_present(dir, &dir_label, dry_run, &mut lines)?;
         remove_file_if_present(&token_path, &token_label, dry_run, &mut lines)?;
+        remove_file_if_present(&conversation_path, &conversation_label, dry_run, &mut lines)?;
     }
 
     Ok(lines)

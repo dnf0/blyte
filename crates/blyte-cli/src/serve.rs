@@ -1955,6 +1955,54 @@ where
     }
     config.repo_root = main_checkout.clone();
 
+    let is_resume = args.resume.is_some();
+    let model = resolve_initial_model(&config);
+    let conversation_path = match crate::conversation_store::conversation_path_for_id(&surface_id) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            let _ = err.flush();
+            return 1;
+        }
+    };
+    let (mut conversation_store, mut loaded_conversation) = if is_resume {
+        match crate::conversation_store::ConversationStore::load(conversation_path) {
+            Ok(pair) => pair,
+            Err(e) => {
+                let _ = writeln!(err, "blyte: {e}");
+                let _ = err.flush();
+                return 1;
+            }
+        }
+    } else {
+        match crate::conversation_store::ConversationStore::new_for_fresh(conversation_path) {
+            Ok(store) => (store, None),
+            Err(e) => {
+                let _ = writeln!(err, "blyte: {e}");
+                let _ = err.flush();
+                return 1;
+            }
+        }
+    };
+    let resume_memory = match loaded_conversation.as_mut() {
+        Some(loaded) if !loaded.messages.is_empty() => {
+            match crate::conversation_store::maybe_digest_for_provider(
+                &mut conversation_store,
+                loaded,
+                &model,
+            ) {
+                Ok(true) => crate::session::ResumeMemoryState::Summarized,
+                Ok(false) => crate::session::ResumeMemoryState::Loaded,
+                Err(e) => {
+                    let _ = writeln!(err, "blyte: {e}");
+                    let _ = err.flush();
+                    return 1;
+                }
+            }
+        }
+        _ => crate::session::ResumeMemoryState::NotLoaded,
+    };
+
     let started_dur = match now_duration() {
         Ok(d) => d,
         Err(e) => {
@@ -2032,7 +2080,6 @@ where
         path: message_file_path,
     };
 
-    let is_resume = args.resume.is_some();
     let mut starting_dir_guard = if is_resume {
         StartingDirGuard { dir: None }
     } else {
@@ -2067,32 +2114,39 @@ where
     })));
     let entries_log_path = surface_record_dir.join("entries.jsonl");
     blyte_agent::tools::set_blyte_surface(Some(surface_id.clone()));
-    let model = resolve_initial_model(&config);
     let mut _private_tmp_guard: Option<PrivateTmpDirGuard> = None;
-    let session =
-        match Session::try_start_with_log_io(model, Some(entries_log_path), err, |approver| {
-            match custom_runner {
-                Some(factory) => {
-                    let (runner, tmpdir) = factory(&config, approver)?;
-                    _private_tmp_guard = tmpdir.map(|path| PrivateTmpDirGuard { path });
-                    Ok(runner)
-                }
-                None => {
-                    let runner = AgentRunner::try_new(&config, approver)?;
-                    _private_tmp_guard = runner.private_tmpdir().map(|path| PrivateTmpDirGuard {
-                        path: path.to_path_buf(),
-                    });
-                    Ok(Box::new(runner) as Box<dyn crate::session::PromptRunner>)
-                }
+    let session = match Session::try_start_with_log_and_resume_io(
+        model,
+        Some(entries_log_path),
+        resume_memory,
+        err,
+        |approver| match custom_runner {
+            Some(factory) => {
+                let (runner, tmpdir) = factory(&config, approver)?;
+                _private_tmp_guard = tmpdir.map(|path| PrivateTmpDirGuard { path });
+                Ok(runner)
             }
-        }) {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = writeln!(err, "blyte: {e}");
-                let _ = err.flush();
-                return 1;
+            None => {
+                let runner = AgentRunner::try_new_with_conversation(
+                    &config,
+                    approver,
+                    Some(conversation_store),
+                    loaded_conversation,
+                )?;
+                _private_tmp_guard = runner.private_tmpdir().map(|path| PrivateTmpDirGuard {
+                    path: path.to_path_buf(),
+                });
+                Ok(Box::new(runner) as Box<dyn crate::session::PromptRunner>)
             }
-        };
+        },
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            let _ = err.flush();
+            return 1;
+        }
+    };
     let record = SurfaceRecord {
         id: surface_id.clone(),
         name: surface_name.clone(),
