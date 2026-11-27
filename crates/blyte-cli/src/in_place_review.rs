@@ -306,10 +306,7 @@ fn review_inner(args: &ReviewArgs) -> Result<(), String> {
         return Ok(());
     }
 
-    let is_research = start_val
-        .get("research")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let is_research = parse_research_flag(&start_val, &start_path)?;
 
     let manifest = if is_research {
         BTreeMap::new()
@@ -466,11 +463,7 @@ pub fn undo_in(cwd: &Path, id: &str) -> Result<Vec<String>, String> {
     let summary_val =
         read_required_json(&summary_path)?.ok_or_else(|| format!("run {id} has not finished"))?;
 
-    if start_val
-        .get("research")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    if parse_research_flag(&start_val, &start_path)? {
         return Err(format!(
             "run {id} is a research run and made no edits to undo"
         ));

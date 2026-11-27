@@ -171,24 +171,13 @@ pub fn notify_runs_changed(main_checkout: &Path, id: &str) -> NotifyOutcome {
         Err(e) => return NotifyOutcome::Failed(e),
     };
     match crate::surface_dir::existing_folder_store(&state_dir, main_checkout) {
-        Ok(Some(store)) => {
-            return notify_runs_changed_in(&store.join("runs"), &store.join("surfaces"), id);
-        }
-        Ok(None) => {}
-        Err(e) => return NotifyOutcome::Failed(e),
+        Ok(Some(store)) => notify_runs_changed_in(&store.join("runs"), &store.join("surfaces"), id),
+        Ok(None) => NotifyOutcome::Failed(format!(
+            "{} is not a git repository and has no run store",
+            main_checkout.display()
+        )),
+        Err(e) => NotifyOutcome::Failed(e),
     }
-    if main_checkout.join(".wt").is_dir() {
-        return notify_runs_changed_in(
-            &main_checkout.join(".wt"),
-            &crate::surface_dir::surfaces_dir(main_checkout),
-            id,
-        );
-    }
-    let start_path = main_checkout.join(".wt").join(format!("{id}.start.json"));
-    NotifyOutcome::Failed(format!(
-        "cannot read {}: no run store",
-        start_path.display()
-    ))
 }
 
 pub fn report(outcome: &NotifyOutcome, err: &mut dyn Write) {
