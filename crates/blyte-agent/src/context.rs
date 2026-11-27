@@ -8,7 +8,7 @@
 //! the next turn reproduces every earlier fold exactly, and between folds the output is pure
 //! append. A cut never separates a tool call from its result.
 
-use blyte_provider::Message;
+use blyte_provider::{Message, UserPart};
 
 use crate::state::State;
 
@@ -57,14 +57,28 @@ impl Default for Folded {
     }
 }
 
+/// Fixed token estimate per image, used only for folding and sizing; billing uses the provider's
+/// reported usage.
+pub const IMAGE_TOKEN_ESTIMATE: usize = 1_000;
+
 /// Characters / 4: a budget, not a billing figure.
 pub fn approx_tokens(m: &Message) -> usize {
-    let chars = match m {
-        Message::User(t) | Message::Assistant(t) => t.len(),
-        Message::ToolCall { arguments, .. } => arguments.to_string().len(),
-        Message::ToolResult { content, .. } => content.len(),
-    };
-    chars / 4
+    match m {
+        Message::User(t) | Message::Assistant(t) => t.len() / 4,
+        Message::UserParts(parts) => {
+            let mut text_chars = 0usize;
+            let mut images = 0usize;
+            for part in parts {
+                match part {
+                    UserPart::Text(t) => text_chars += t.len(),
+                    UserPart::Image { .. } => images += 1,
+                }
+            }
+            text_chars / 4 + images * IMAGE_TOKEN_ESTIMATE
+        }
+        Message::ToolCall { arguments, .. } => arguments.to_string().len() / 4,
+        Message::ToolResult { content, .. } => content.len() / 4,
+    }
 }
 
 fn clip(text: &str, max: usize) -> String {
@@ -122,6 +136,24 @@ fn digest(folded: &[Message], first: usize, last: usize) -> Message {
             }
             Message::User(t) => {
                 text.push_str(&format!("- harness: {}\n", clip(t, 160)));
+                i += 1;
+            }
+            Message::UserParts(parts) => {
+                let mut pieces = Vec::new();
+                for part in parts {
+                    match part {
+                        UserPart::Text(t) => {
+                            let c = clip(t, 160);
+                            if !c.is_empty() {
+                                pieces.push(c);
+                            }
+                        }
+                        UserPart::Image { mime_type, .. } => {
+                            pieces.push(format!("[image {mime_type}]"));
+                        }
+                    }
+                }
+                text.push_str(&format!("- harness: {}\n", pieces.join(" ")));
                 i += 1;
             }
             Message::ToolResult { .. } => i += 1,

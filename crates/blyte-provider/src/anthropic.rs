@@ -13,7 +13,9 @@
 
 use serde_json::{json, Value};
 
-use crate::{Message, ModelInfo, Provider, ProviderError, Request, Response, ToolCall, Usage};
+use crate::{
+    Message, ModelInfo, Provider, ProviderError, Request, Response, ToolCall, Usage, UserPart,
+};
 
 /// Default model identifier when `BLYTE_MODEL` is not specified in the environment.
 const DEFAULT_MODEL: &str = "claude-3-7-sonnet-latest";
@@ -128,6 +130,25 @@ impl Anthropic {
                             "text": text,
                         }),
                     );
+                }
+                Message::UserParts(parts) => {
+                    for part in parts {
+                        let block = match part {
+                            UserPart::Text(text) => json!({
+                                "type": "text",
+                                "text": text,
+                            }),
+                            UserPart::Image { mime_type, data } => json!({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": mime_type,
+                                    "data": data.as_ref(),
+                                },
+                            }),
+                        };
+                        push_block("user", block);
+                    }
                 }
                 Message::Assistant(text) => {
                     push_block(

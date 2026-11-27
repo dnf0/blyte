@@ -12,7 +12,9 @@
 use serde_json::{json, Value};
 use std::path::Path;
 
-use crate::{Message, ModelInfo, Provider, ProviderError, Request, Response, ToolCall, Usage};
+use crate::{
+    Message, ModelInfo, Provider, ProviderError, Request, Response, ToolCall, Usage, UserPart,
+};
 
 const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 
@@ -182,6 +184,26 @@ impl ChatGpt {
                                 "text": text,
                             }
                         ]
+                    }));
+                }
+                Message::UserParts(parts) => {
+                    let content: Vec<Value> = parts
+                        .iter()
+                        .map(|part| match part {
+                            UserPart::Text(text) => json!({
+                                "type": "input_text",
+                                "text": text,
+                            }),
+                            UserPart::Image { mime_type, data } => json!({
+                                "type": "input_image",
+                                "image_url": format!("data:{mime_type};base64,{data}"),
+                            }),
+                        })
+                        .collect();
+                    input.push(json!({
+                        "type": "message",
+                        "role": "user",
+                        "content": content,
                     }));
                 }
                 Message::Assistant(text) => {

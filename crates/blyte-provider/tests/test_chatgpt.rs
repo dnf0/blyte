@@ -3,7 +3,7 @@
 
 use blyte_provider::chatgpt::ChatGpt;
 use blyte_provider::registry::{detect_provider_kind, ProviderKind};
-use blyte_provider::{Message, ProviderError, Request, ToolSpec};
+use blyte_provider::{Message, ProviderError, Request, ToolSpec, UserPart};
 use serde_json::json;
 
 fn b64url(s: &str) -> String {
@@ -160,5 +160,34 @@ fn the_prefix_routes_before_the_ollama_colon_rule() {
     assert_eq!(
         detect_provider_kind(Some("chatgpt/gpt-5.5")),
         ProviderKind::ChatGpt
+    );
+}
+
+#[test]
+fn user_parts_wire_shape() {
+    let h = home(json!({"tokens": {"access_token": jwt(NOW + 3600, "a"), "account_id": "a"}}));
+    let p = ChatGpt::from_codex_home(h.path(), NOW)
+        .unwrap()
+        .with_model("gpt-5.5");
+    let b = p.body(&Request {
+        messages: vec![Message::UserParts(vec![
+            UserPart::Text("look".into()),
+            UserPart::Image {
+                mime_type: "image/png".into(),
+                data: std::sync::Arc::from("QUJD"),
+            },
+        ])],
+        ..Default::default()
+    });
+    assert_eq!(
+        b["input"][0],
+        json!({
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "look"},
+                {"type": "input_image", "image_url": "data:image/png;base64,QUJD"}
+            ]
+        })
     );
 }

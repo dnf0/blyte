@@ -5,7 +5,7 @@ use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{Budget, Outcome, Runner};
 use blyte_agent::shell::LocalShell;
 use blyte_agent::state::{Runtime, State};
-use blyte_provider::{Message, Provider, ProviderError, Request, Response, ToolCall};
+use blyte_provider::{Message, Provider, ProviderError, Request, Response, ToolCall, UserPart};
 use serde_json::json;
 
 struct Scripted {
@@ -237,5 +237,73 @@ fn serialized_runtime_without_conversation_is_unchanged() {
     let val = serde_json::to_value(Runtime::default()).unwrap();
     assert!(val.get("conversation").is_none());
     assert!(val.get("conversation_goal").is_none());
+    assert!(val.get("pending_user_parts").is_none());
     assert_eq!(val, json!({"rollbacks": 0}));
+}
+
+#[test]
+fn pending_user_parts_are_sent_with_the_next_prompt_only() {
+    let d = tempfile::tempdir().unwrap();
+    let p = Scripted {
+        script: Mutex::new(vec![
+            Response {
+                text: "I see the image.".into(),
+                ..Default::default()
+            },
+            Response {
+                text: "Follow-up answered.".into(),
+                ..Default::default()
+            },
+        ]),
+        seen: Mutex::new(Vec::new()),
+    };
+    let runner = Runner {
+        provider: &p,
+        shell: &LocalShell,
+        fs: &LocalFs,
+        context: &Conversational,
+        root: d.path().to_path_buf(),
+        budget: Budget {
+            max_turns: 5,
+            max_gate_attempts: 1,
+            max_duration: None,
+        },
+        rollback: false,
+        on_event: None,
+        research: false,
+        claim_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
+    };
+    let image = UserPart::Image {
+        mime_type: "image/png".into(),
+        data: std::sync::Arc::from("QUJD"),
+    };
+    let mut state = State::new("look at this", "");
+    state.runtime.conversation = Some(Vec::new());
+    state.runtime.pending_user_parts.push(image.clone());
+
+    let serialized = serde_json::to_value(&state.runtime).unwrap();
+    assert!(serialized.get("pending_user_parts").is_none());
+
+    let (outcome1, _) = runner.run(&mut state);
+    assert_eq!(outcome1, Outcome::Verified);
+    assert!(state.runtime.pending_user_parts.is_empty());
+
+    state.brief.goal = "and now?".into();
+    let (outcome2, _) = runner.run(&mut state);
+    assert_eq!(outcome2, Outcome::Verified);
+
+    let seen = p.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    let expected_first =
+        Message::UserParts(vec![UserPart::Text("Begin. look at this".into()), image]);
+    assert_eq!(seen[0].messages.last(), Some(&expected_first));
+    assert_eq!(
+        seen[1].messages,
+        vec![
+            expected_first,
+            Message::Assistant("I see the image.".into()),
+            Message::User("and now?".into()),
+        ]
+    );
 }

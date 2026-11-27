@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use blyte_provider::{Message, Provider, ProviderError, Request, StreamTiming, Usage};
+use blyte_provider::{Message, Provider, ProviderError, Request, StreamTiming, Usage, UserPart};
 
 use crate::claim_check;
 use crate::context::ContextStrategy;
@@ -122,6 +122,13 @@ pub struct FailedAttempt {
 fn message_chars(m: &Message) -> usize {
     match m {
         Message::User(t) | Message::Assistant(t) => t.len(),
+        Message::UserParts(parts) => parts
+            .iter()
+            .map(|p| match p {
+                UserPart::Text(t) => t.len(),
+                UserPart::Image { .. } => crate::context::IMAGE_TOKEN_ESTIMATE * 4,
+            })
+            .sum(),
         Message::ToolCall { arguments, .. } => arguments.to_string().len(),
         Message::ToolResult { content, .. } => content.len(),
     }
@@ -831,14 +838,26 @@ impl<'a> Runner<'a> {
             state.runtime.conversation_goal = Some(state.brief.goal.clone());
         }
 
+        let pending = std::mem::take(&mut state.runtime.pending_user_parts);
+        let make_user_message = |prompt: String| {
+            if pending.is_empty() {
+                Message::User(prompt)
+            } else {
+                let mut parts = Vec::with_capacity(1 + pending.len());
+                parts.push(UserPart::Text(prompt));
+                parts.extend(pending);
+                Message::UserParts(parts)
+            }
+        };
+
         let mut history = match &state.runtime.conversation {
-            None => vec![Message::User(format!("Begin. {}", state.brief.goal))],
+            None => vec![make_user_message(format!("Begin. {}", state.brief.goal))],
             Some(prev) if prev.is_empty() => {
-                vec![Message::User(format!("Begin. {}", state.brief.goal))]
+                vec![make_user_message(format!("Begin. {}", state.brief.goal))]
             }
             Some(prev) => {
                 let mut h = prev.clone();
-                h.push(Message::User(state.brief.goal.clone()));
+                h.push(make_user_message(state.brief.goal.clone()));
                 h
             }
         };
