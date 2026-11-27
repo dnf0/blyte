@@ -100,7 +100,12 @@ impl<F: Fs> SnapshotFs<F> {
         rel_path: &Path,
         rel_key: &str,
     ) -> Result<(), String> {
-        let mut recorded = self.recorded.lock().unwrap_or_else(|e| e.into_inner());
+        let mut recorded = self.recorded.lock().map_err(|e| {
+            format!(
+                "cannot snapshot {}: snapshot state lock poisoned: {e}",
+                original_path.display()
+            )
+        })?;
         if recorded.contains(rel_key) {
             return Ok(());
         }
@@ -400,4 +405,34 @@ pub fn unified_diff(root: &Path, before_dir: &Path, manifest: &Path) -> Result<S
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs::LocalFs;
+
+    #[test]
+    fn a_poisoned_recorded_mutex_refuses_writes_and_leaves_the_file_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("folder");
+        std::fs::create_dir_all(&root).unwrap();
+        let before_dir = tmp.path().join("before");
+        let manifest = tmp.path().join("manifest.jsonl");
+        let target = root.join("notes.txt");
+        std::fs::write(&target, "original\n").unwrap();
+
+        let sfs = SnapshotFs::new(LocalFs, root, before_dir.clone(), manifest.clone()).unwrap();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = sfs.recorded.lock().unwrap();
+            panic!("poison snapshot lock");
+        }));
+
+        let err = sfs.write(&target, "updated\n").unwrap_err();
+        assert!(err.contains("notes.txt"), "{err}");
+        assert!(err.contains("poison"), "{err}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original\n");
+        assert!(!before_dir.join("notes.txt").exists());
+        assert!(read_manifest(&manifest).unwrap().is_empty());
+    }
 }
