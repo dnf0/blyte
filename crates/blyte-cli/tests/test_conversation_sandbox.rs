@@ -678,8 +678,10 @@ fn sandboxed_shell_cannot_write_the_usage_ledger_directory() {
 
     let blyte_state = home.path().join(".local").join("state").join("blyte");
     let local_bin = home.path().join(".local").join("bin");
+    let cache_dir = home.path().join(".cache");
     std::fs::create_dir_all(&blyte_state).unwrap();
     std::fs::create_dir_all(&local_bin).unwrap();
+    std::fs::create_dir_all(&cache_dir).unwrap();
 
     let _env = EnvGuard::set(xdg.path(), home.path());
     struct XdgStateGuard(Option<OsString>);
@@ -700,11 +702,11 @@ fn sandboxed_shell_cannot_write_the_usage_ledger_directory() {
     ] {
         let sh = blyte_agent::shell::LocalShell::sandboxed(profile);
 
-        let bin_target = local_bin.join("x");
-        let _ = std::fs::remove_file(&bin_target);
+        let cache_target = cache_dir.join("x");
+        let _ = std::fs::remove_file(&cache_target);
         let allowed = sh
             .exec_user(
-                &format!("echo ok > '{}'", bin_target.display()),
+                &format!("echo ok > '{}'", cache_target.display()),
                 repo.path(),
                 Duration::from_secs(30),
             )
@@ -715,10 +717,27 @@ fn sandboxed_shell_cannot_write_the_usage_ledger_directory() {
         assert_eq!(
             allowed.exit_code,
             0,
-            "write to .local/bin should succeed: {}",
+            "write to .cache should succeed: {}",
             allowed.merged()
         );
-        assert!(bin_target.exists());
+        assert!(cache_target.exists());
+
+        let bin_target = local_bin.join("x");
+        let _ = std::fs::remove_file(&bin_target);
+        let denied_bin = sh
+            .exec_user(
+                &format!("echo no > '{}'", bin_target.display()),
+                repo.path(),
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        assert_ne!(
+            denied_bin.exit_code,
+            0,
+            "write to .local/bin should fail: {}",
+            denied_bin.merged()
+        );
+        assert!(!bin_target.exists());
 
         let ledger_target = blyte_state.join("x");
         let _ = std::fs::remove_file(&ledger_target);

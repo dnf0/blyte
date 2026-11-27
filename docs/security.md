@@ -29,13 +29,41 @@ Commands may write under:
 - the workspace (the directory blyte runs in) and its git common directory, so commits work in a
   worktree;
 - system temp directories (`/tmp`, `/var/tmp`, `$TMPDIR`, and macOS's `/private/var/folders`);
-- tool caches under `$HOME`: `.cargo`, `.rustup`, `.cache`, `.npm`, `.local`, `Library/Caches`,
-  `.gradle`, `.m2`, `go`, `.docker/buildx`;
+- tool caches under `$HOME`: `.cargo`, `.cache`, `.npm`, `Library/Caches`, `.gradle`, `.m2`,
+  `go/pkg`, `.docker/buildx`, and `.local` (with program and configuration folders carved out,
+  below);
 - `/dev` (for `/dev/null` and terminals).
 
+`~/.rustup` and `~/go` as a whole are not granted for writes (only `~/go/pkg` is). On macOS,
+Seatbelt also denies writes to program directories, tool configuration, and blyte's state inside
+the granted trees:
+
+- `~/.cargo/bin`, `~/.cargo/config`, `~/.cargo/config.toml`, `~/.cargo/credentials`,
+  `~/.cargo/credentials.toml`;
+- `~/.local/bin`, `~/.local/lib`, `~/.local/state/blyte`, `~/.local/share/uv/tools`,
+  `~/.local/share/mise`, `~/.local/share/pipx`, `~/.local/share/keyrings`;
+- `~/.gradle/init.d`, `~/.m2/settings.xml`;
+- `<git common dir>/hooks` and `<git common dir>/config` in a dispatch (the rest of the git
+  directory stays writable so commits work).
+
+Because these paths are read-only, installing programs (`cargo install`, `go install`,
+`uv tool install`, `pip install --user`, rustup toolchain or component installs) fails inside a
+run; install tools on the host beforehand, or run outside the sandbox when needed. Builds and
+existing toolchains continue to work because the caches (`~/.cargo/registry`, `~/.cargo/git`,
+`~/.cargo/.package-cache`, `~/go/pkg`, `~/.cache`, `~/.local/share/uv/python`, `~/.gradle/caches`,
+`~/.m2/repository`) stay writable and the protected directories remain readable.
+
+On Linux, Landlock can only *allow* paths and cannot carve deny rules out of an allowed directory.
+`~/.rustup`, `~/go/bin` (only `~/go/pkg` is granted), `~/.local/bin`, `~/.local/lib`, and
+`~/.local/state/blyte` are still read-only because they are omitted from the allow-list. However,
+subpaths inside granted trees — `~/.cargo/bin`, `~/.cargo/config*`, `~/.cargo/credentials*`,
+`~/.local/share/uv/tools`, `~/.local/share/mise`, `~/.local/share/pipx`,
+`~/.local/share/keyrings`, `~/.gradle/init.d`, `~/.m2/settings.xml`, and
+`<git common dir>/hooks` and `<git common dir>/config` — remain writable on Linux.
+
 Anything else fails with "Operation not permitted". This is what stops a model that "fixes" a
-failing test by clearing a system cache, editing your shell profile or writing into another
-checkout.
+failing test by clearing a system cache, editing your shell profile, installing trojaned binaries
+on `PATH`, or writing into another checkout.
 
 ## Credential reads
 
