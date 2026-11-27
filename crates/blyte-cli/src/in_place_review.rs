@@ -179,24 +179,14 @@ fn review_inner(args: &ReviewArgs) -> Result<(), String> {
     let undone_val = read_required_json(&undone_path)?;
 
     let log_path = store.join(format!("{}.log", args.id));
-    let log_content = match std::fs::read_to_string(&log_path) {
-        Ok(content) => Some(content),
-        Err(e) if e.kind() == ErrorKind::NotFound => None,
-        Err(e) => return Err(format!("cannot read {}: {e}", log_path.display())),
-    };
-
-    let (hcmds, reads, (refused_count, refused_paths)) = if let Some(ref content) = log_content {
-        let hcmds = host_commands(content);
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/"));
-        let allowed = [root];
-        let reads = outside_reads(content, &allowed, &home);
-        let refused = refused_reads(content);
-        (hcmds, reads, refused)
-    } else {
-        (Vec::new(), Vec::new(), (0, Vec::new()))
-    };
+    let log_content = std::fs::read_to_string(&log_path)
+        .map_err(|e| format!("cannot read the run's log {}: {e}", log_path.display()))?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        "HOME is not set, so reads outside the folder cannot be checked".to_string()
+    })?;
+    let hcmds = host_commands(&log_content);
+    let reads = outside_reads(&log_content, &[root], &home);
+    let (refused_count, refused_paths) = refused_reads(&log_content);
 
     let outcome = summary_val
         .get("outcome")
