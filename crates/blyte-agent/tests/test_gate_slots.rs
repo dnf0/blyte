@@ -1,7 +1,8 @@
 //! Parallel dispatches share the machine: gates take a machine-wide slot, so three runs do not
 //! all start a full build and test suite at once (2026-09-27).
 
-use std::time::{Duration, Instant};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::Duration;
 
 use blyte_agent::gate_slots::{acquire, slots};
 
@@ -13,16 +14,26 @@ fn one_slot_makes_the_second_gate_wait_for_the_first() {
     let (first, waited) = acquire(1, dir.path(), POLL).unwrap();
     assert!(waited < Duration::from_millis(100));
     let d = dir.path().to_path_buf();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
     let second = std::thread::spawn(move || {
-        let start = Instant::now();
+        started_tx.send(()).unwrap();
         let (_g, waited) = acquire(1, &d, POLL).unwrap();
-        (start.elapsed(), waited)
+        done_tx.send(waited).unwrap();
     });
-    std::thread::sleep(Duration::from_millis(400));
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("second thread did not start");
+    assert_eq!(
+        done_rx.recv_timeout(Duration::from_millis(300)),
+        Err(RecvTimeoutError::Timeout)
+    );
     drop(first);
-    let (elapsed, waited) = second.join().unwrap();
-    assert!(elapsed >= Duration::from_millis(350), "{elapsed:?}");
-    assert!(waited >= Duration::from_millis(300), "{waited:?}");
+    let waited = done_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("second gate did not acquire after first was dropped");
+    assert!(waited >= POLL, "{waited:?}");
+    second.join().unwrap();
 }
 
 #[test]

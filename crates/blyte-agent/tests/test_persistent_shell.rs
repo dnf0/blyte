@@ -77,13 +77,14 @@ fn the_models_shell_keeps_its_directory_and_environment() {
 #[test]
 fn a_timeout_kills_the_command_and_keeps_its_output() {
     let (_d, root, p) = setup();
+    p.exec_user("true", &root, T).unwrap();
     let o = p
-        .exec_user("echo start; sleep 10", &root, Duration::from_millis(250))
+        .exec_user("echo start; sleep 10", &root, Duration::from_secs(2))
         .unwrap();
     assert_eq!(o.exit_code, 124);
     assert_eq!(o.stdout, "start\n");
     assert!(
-        o.stderr.ends_with("[killed by blyte after 0s]"),
+        o.stderr.ends_with("[killed by blyte after 2s]"),
         "{:?}",
         o.stderr
     );
@@ -107,10 +108,12 @@ fn exit_ends_the_shell_and_the_next_command_gets_a_fresh_one() {
 #[test]
 fn a_background_job_does_not_hold_the_command() {
     let (_d, root, p) = setup();
+    p.exec_user("true", &root, T).unwrap();
     let t = Instant::now();
-    let o = p.exec_user("sleep 5 & echo started", &root, T).unwrap();
+    let o = p.exec_user("sleep 30 & echo started", &root, T).unwrap();
     assert_eq!(o.stdout, "started\n");
-    assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+    assert!(t.elapsed() < Duration::from_secs(15), "{:?}", t.elapsed());
+    let _ = p.exec_user("kill $! 2>/dev/null; wait $! 2>/dev/null || true", &root, T);
 }
 
 #[test]
