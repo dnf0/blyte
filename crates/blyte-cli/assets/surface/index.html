@@ -6544,6 +6544,11 @@
         undoResults.set(runKey, { ok: true, message: lines.length > 0 ? lines.join("\n") : "Undone." });
         await fetchRuns();
         return true;
+      } catch (err) {
+        const msg = url + " failed: " + (err && err.message ? err.message : String(err));
+        pendingUndoConfirm.delete(runKey);
+        undoResults.set(runKey, { ok: false, message: msg });
+        return false;
       } finally {
         undoInFlight.delete(runKey);
         renderAll(true);

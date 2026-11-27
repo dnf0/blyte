@@ -220,6 +220,20 @@ fn format_diff_section(diff: &str) -> String {
     out
 }
 
+pub(crate) fn parse_research_flag(
+    start_val: &serde_json::Value,
+    start_path: &Path,
+) -> Result<bool, String> {
+    match start_val.get("research") {
+        None | Some(serde_json::Value::Null) => Ok(false),
+        Some(serde_json::Value::Bool(b)) => Ok(*b),
+        Some(_) => Err(format!(
+            "invalid research field in {} (expected boolean)",
+            start_path.display()
+        )),
+    }
+}
+
 pub fn diff_for_run(store: &Path, id: &str) -> Result<String, String> {
     let start_path = store.join(format!("{id}.start.json"));
     let start_val =
@@ -229,10 +243,7 @@ pub fn diff_for_run(store: &Path, id: &str) -> Result<String, String> {
     let summary_val =
         read_required_json(&summary_path)?.ok_or_else(|| format!("run {id} has not finished"))?;
 
-    let is_research = start_val
-        .get("research")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+    let is_research = parse_research_flag(&start_val, &start_path)?
         || store.join(format!("{id}.report.md")).exists();
 
     if is_research {

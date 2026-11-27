@@ -2702,3 +2702,69 @@ assert.ok(renderRunCard(inPlaceClean).includes("changed since run T1 ended: note
     );
     run_surface_script(&harness);
 }
+
+#[test]
+fn post_undo_records_error_and_closes_confirm_on_network_failure() {
+    let harness = format!(
+        "{}\n{}",
+        review_queue_test_prelude(),
+        r##"
+(async () => {
+  const inPlaceClean = {
+    key: "notes/T1",
+    id: "T1",
+    repo: "notes",
+    title: "Edit notes",
+    task: "edit notes",
+    outcome: "finished",
+    research: false,
+    checks_recorded: true,
+    combined: false,
+    started_at: 1700000000,
+    finished_at: 1700000060,
+    turns: 2,
+    cost_usd: 0.01,
+    plan_file: null,
+    plan_task: null,
+    final_message: "done",
+    group: null,
+    verdict: null,
+    verdict_notes: null,
+    verdict_ts: null,
+    report: null,
+    card: "clean",
+    flags: [],
+    changed_files: ["notes.txt"],
+    commits: [],
+    hold: null,
+    in_place: true,
+    undone: false,
+  };
+  liveRuns = {
+    generated_at: 1700000100,
+    repo: "notes",
+    running: [],
+    runs: [inPlaceClean],
+    skipped: [],
+  };
+  surfaceToken = "test-token";
+  pendingUndoConfirm.add(inPlaceClean.key);
+  fetchWithRetry = async () => {
+    throw new Error("network down");
+  };
+  const ok = await postUndo(inPlaceClean.key);
+  assert.strictEqual(ok, false);
+  assert.strictEqual(pendingUndoConfirm.has(inPlaceClean.key), false);
+  assert.strictEqual(undoInFlight.has(inPlaceClean.key), false);
+  const result = undoResults.get(inPlaceClean.key);
+  assert.ok(result && result.ok === false, "undoResults should record error");
+  assert.ok(result.message.includes("network down"), "message=" + result.message);
+  assert.ok(renderRunCard(inPlaceClean).includes("network down"));
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"##
+    );
+    run_surface_script(&harness);
+}

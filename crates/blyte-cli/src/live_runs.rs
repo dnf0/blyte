@@ -127,10 +127,11 @@ fn title_from_task(task: &str, id: &str) -> String {
     id.to_string()
 }
 
-fn parse_running_log(path: &Path) -> (u64, bool, String) {
+fn parse_running_log(path: &Path) -> Result<(u64, bool, String), String> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
-        Err(_) => return (0, false, String::new()),
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok((0, false, String::new())),
+        Err(e) => return Err(format!("log unreadable ({}): {e}", path.display())),
     };
     let mut turns: u64 = 0;
     let mut gate_running = false;
@@ -150,18 +151,12 @@ fn parse_running_log(path: &Path) -> (u64, bool, String) {
         }
         activity = trimmed.chars().take(120).collect();
     }
-    (turns, gate_running, activity)
+    Ok((turns, gate_running, activity))
 }
 
-fn parse_summary_seconds(
-    val: &serde_json::Value,
-    started_at: u64,
-    summary_path: &Path,
-) -> Result<u64, String> {
+fn parse_summary_seconds(val: &serde_json::Value) -> Result<u64, String> {
     let Some(sec_val) = val.get("seconds") else {
-        return Ok(file_mtime(summary_path)
-            .unwrap_or(started_at)
-            .saturating_sub(started_at));
+        return Err("missing seconds".to_string());
     };
     if let Some(n) = sec_val.as_u64() {
         return Ok(n);
@@ -246,22 +241,43 @@ pub fn collect_in_place(
             continue;
         }
 
-        let research = start_val
-            .get("research")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let research = match crate::in_place_review::parse_research_flag(&start_val, &start_path) {
+            Ok(b) => b,
+            Err(err) => {
+                skipped.push(Skipped {
+                    key,
+                    reason: format!("start file unreadable: {err}"),
+                });
+                continue;
+            }
+        };
         let plan_file = non_empty_str(start_val.get("plan"));
         let plan_task = non_empty_str(start_val.get("plan_task"));
         let request = non_empty_str(start_val.get("request"));
 
-        let task = match start_val
-            .get("task_file")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-        {
-            Some(p) => std::fs::read_to_string(p).unwrap_or_default(),
-            None => std::fs::read_to_string(records_dir.join(format!("{id}.task.md")))
-                .unwrap_or_default(),
+        let task_path = match start_val.get("task_file") {
+            None | Some(serde_json::Value::Null) => records_dir.join(format!("{id}.task.md")),
+            Some(serde_json::Value::String(s)) if s.is_empty() => {
+                records_dir.join(format!("{id}.task.md"))
+            }
+            Some(serde_json::Value::String(s)) => std::path::PathBuf::from(s),
+            Some(_) => {
+                skipped.push(Skipped {
+                    key,
+                    reason: "start file unreadable: task_file is not a string".to_string(),
+                });
+                continue;
+            }
+        };
+        let task = match std::fs::read_to_string(&task_path) {
+            Ok(t) => t,
+            Err(e) => {
+                skipped.push(Skipped {
+                    key,
+                    reason: format!("task file unreadable ({}): {e}", task_path.display()),
+                });
+                continue;
+            }
         };
         let title = title_from_task(&task, &id);
 
@@ -271,7 +287,13 @@ pub fn collect_in_place(
             let is_alive = pid.is_some_and(crate::clean::is_pid_alive);
             if is_alive {
                 let (turns, gate_running, activity) =
-                    parse_running_log(&records_dir.join(format!("{id}.log")));
+                    match parse_running_log(&records_dir.join(format!("{id}.log"))) {
+                        Ok(parsed) => parsed,
+                        Err(reason) => {
+                            skipped.push(Skipped { key, reason });
+                            continue;
+                        }
+                    };
                 running.push(RunningRun {
                     key,
                     id,
@@ -340,7 +362,7 @@ pub fn collect_in_place(
                 continue;
             }
         };
-        let seconds = match parse_summary_seconds(&summary_val, started_at, &summary_path) {
+        let seconds = match parse_summary_seconds(&summary_val) {
             Ok(s) => s,
             Err(err) => {
                 skipped.push(Skipped {
@@ -368,10 +390,26 @@ pub fn collect_in_place(
                 continue;
             }
         };
-        let turns = summary_val
-            .get("turns")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let turns = match summary_val.get("turns") {
+            Some(v) => match v.as_u64() {
+                Some(n) => n,
+                None => {
+                    skipped.push(Skipped {
+                        key,
+                        reason: "summary unreadable: turns is not a non-negative integer"
+                            .to_string(),
+                    });
+                    continue;
+                }
+            },
+            None => {
+                skipped.push(Skipped {
+                    key,
+                    reason: "summary unreadable: missing turns".to_string(),
+                });
+                continue;
+            }
+        };
         let cost_usd = summary_val.get("cost_usd").and_then(|v| v.as_f64());
         let mut changed_files = Vec::new();
         if let Some(arr) = summary_val.get("changed_files").and_then(|v| v.as_array()) {
@@ -403,21 +441,76 @@ pub fn collect_in_place(
         let (verdict, verdict_notes, verdict_ts) = match std::fs::read_to_string(&verdict_path) {
             Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
                 Ok(val) => {
-                    let v = val
-                        .get("verdict")
-                        .and_then(|x| x.as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(String::from);
-                    let notes = val.get("notes").and_then(|x| x.as_str()).map(String::from);
-                    let ts = val
-                        .get("ts")
-                        .and_then(|x| x.as_u64())
-                        .or_else(|| file_mtime(&verdict_path));
+                    let v = match val.get("verdict").and_then(|x| x.as_str()) {
+                        Some(s) if !s.is_empty() => Some(s.to_string()),
+                        _ => {
+                            skipped.push(Skipped {
+                                key,
+                                reason: format!(
+                                    "verdict unreadable ({}): missing or invalid verdict",
+                                    verdict_path.display()
+                                ),
+                            });
+                            continue;
+                        }
+                    };
+                    let notes = match val.get("notes") {
+                        None | Some(serde_json::Value::Null) => None,
+                        Some(serde_json::Value::String(s)) => Some(s.clone()),
+                        Some(_) => {
+                            skipped.push(Skipped {
+                                key,
+                                reason: format!(
+                                    "verdict unreadable ({}): notes is not a string",
+                                    verdict_path.display()
+                                ),
+                            });
+                            continue;
+                        }
+                    };
+                    let ts = match val.get("ts") {
+                        Some(x) => match x.as_u64() {
+                            Some(n) => Some(n),
+                            None => {
+                                skipped.push(Skipped {
+                                    key,
+                                    reason: format!(
+                                        "verdict unreadable ({}): ts is not a non-negative integer",
+                                        verdict_path.display()
+                                    ),
+                                });
+                                continue;
+                            }
+                        },
+                        None => {
+                            skipped.push(Skipped {
+                                key,
+                                reason: format!(
+                                    "verdict unreadable ({}): missing ts",
+                                    verdict_path.display()
+                                ),
+                            });
+                            continue;
+                        }
+                    };
                     (v, notes, ts)
                 }
-                Err(_) => (None, None, None),
+                Err(e) => {
+                    skipped.push(Skipped {
+                        key,
+                        reason: format!("verdict unreadable ({}): {e}", verdict_path.display()),
+                    });
+                    continue;
+                }
             },
-            Err(_) => (None, None, None),
+            Err(e) if e.kind() == ErrorKind::NotFound => (None, None, None),
+            Err(e) => {
+                skipped.push(Skipped {
+                    key,
+                    reason: format!("verdict unreadable ({}): {e}", verdict_path.display()),
+                });
+                continue;
+            }
         };
 
         let report = if research {

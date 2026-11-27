@@ -1084,11 +1084,11 @@ pub fn decide_in_place(
         .get("outcome")
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("{} has no outcome", summary_path.display()))?;
-    let start_research = std::fs::read_to_string(&start_path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("research").and_then(|r| r.as_bool()))
-        .unwrap_or(false);
+    let start_raw = std::fs::read_to_string(&start_path)
+        .map_err(|e| format!("error reading {}: {e}", start_path.display()))?;
+    let start_val: serde_json::Value = serde_json::from_str(&start_raw)
+        .map_err(|e| format!("could not parse {}: {e}", start_path.display()))?;
+    let start_research = crate::in_place_review::parse_research_flag(&start_val, &start_path)?;
     let is_research = start_research || records_dir.join(format!("{id}.report.md")).exists();
 
     let trimmed_note: Option<String> = note

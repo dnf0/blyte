@@ -155,30 +155,40 @@ fn notify_runs_changed_in(records_dir: &Path, surfaces_root: &Path, id: &str) ->
 }
 
 pub fn notify_runs_changed(main_checkout: &Path, id: &str) -> NotifyOutcome {
-    if blyte_agent::sandbox::is_git_repository(main_checkout) || main_checkout.join(".wt").is_dir()
-    {
+    match crate::serve::is_repository(main_checkout) {
+        Ok(true) => {
+            return notify_runs_changed_in(
+                &main_checkout.join(".wt"),
+                &crate::surface_dir::surfaces_dir(main_checkout),
+                id,
+            );
+        }
+        Ok(false) => {}
+        Err(e) => return NotifyOutcome::Failed(e),
+    }
+    let state_dir = match crate::surface_registry::state_dir() {
+        Ok(d) => d,
+        Err(e) => return NotifyOutcome::Failed(e),
+    };
+    match crate::surface_dir::existing_folder_store(&state_dir, main_checkout) {
+        Ok(Some(store)) => {
+            return notify_runs_changed_in(&store.join("runs"), &store.join("surfaces"), id);
+        }
+        Ok(None) => {}
+        Err(e) => return NotifyOutcome::Failed(e),
+    }
+    if main_checkout.join(".wt").is_dir() {
         return notify_runs_changed_in(
             &main_checkout.join(".wt"),
             &crate::surface_dir::surfaces_dir(main_checkout),
             id,
         );
     }
-    let state_dir = match crate::surface_registry::state_dir() {
-        Ok(d) => d,
-        Err(e) => return NotifyOutcome::Failed(e),
-    };
-    let store = match crate::surface_dir::existing_folder_store(&state_dir, main_checkout) {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            let start_path = main_checkout.join(".wt").join(format!("{id}.start.json"));
-            return NotifyOutcome::Failed(format!(
-                "cannot read {}: no run store",
-                start_path.display()
-            ));
-        }
-        Err(e) => return NotifyOutcome::Failed(e),
-    };
-    notify_runs_changed_in(&store.join("runs"), &store.join("surfaces"), id)
+    let start_path = main_checkout.join(".wt").join(format!("{id}.start.json"));
+    NotifyOutcome::Failed(format!(
+        "cannot read {}: no run store",
+        start_path.display()
+    ))
 }
 
 pub fn report(outcome: &NotifyOutcome, err: &mut dyn Write) {

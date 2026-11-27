@@ -753,3 +753,303 @@ fn surface_notify_reaches_non_repository_surface_record() {
     assert_eq!(got.0, "POST /api/runs/changed HTTP/1.1");
     assert_eq!(got.1, token);
 }
+
+#[test]
+fn surface_notify_uses_folder_store_for_non_repo_even_when_wt_dir_exists() {
+    ensure_isolated_state_home();
+    let tmp = tempfile::tempdir().unwrap();
+    let folder = tmp.path().join("notify-plain-with-wt");
+    std::fs::create_dir_all(folder.join(".wt")).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let received: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+    let received_bg = Arc::clone(&received);
+
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut token = String::new();
+        let mut content_len = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((k, v)) = trimmed.split_once(':') {
+                if k.eq_ignore_ascii_case("x-blyte-token") {
+                    token = v.trim().to_string();
+                } else if k.eq_ignore_ascii_case("content-length") {
+                    content_len = v.trim().parse().unwrap_or(0);
+                }
+            }
+        }
+        let mut body = vec![0u8; content_len];
+        reader.read_exact(&mut body).unwrap();
+        *received_bg.lock().unwrap() = Some((request_line.trim().to_string(), token));
+        let resp = "HTTP/1.1 202 Accepted\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+        stream.write_all(resp.as_bytes()).unwrap();
+    });
+
+    let surface_id = "s0000000000000888";
+    let token = "plain-folder-with-wt-token";
+    let sd = state_dir().unwrap();
+    let fstore = folder_store(&sd, &folder).unwrap();
+    let sdir = fstore.join("surfaces").join(surface_id);
+    std::fs::create_dir_all(&sdir).unwrap();
+    let record = SurfaceRecord {
+        id: surface_id.to_string(),
+        name: "notify-plain-with-wt".to_string(),
+        pid: std::process::id(),
+        port,
+        session_id: format!("session-{surface_id}"),
+        started_at: 1700000000,
+    };
+    write_record_in(&sdir, &record).unwrap();
+    let token_path = surface_token_path_for_id(surface_id).unwrap();
+    std::fs::create_dir_all(token_path.parent().unwrap()).unwrap();
+    std::fs::write(&token_path, format!("{token}\n")).unwrap();
+
+    let run_store = records_dir_for(&folder).unwrap();
+    std::fs::create_dir_all(&run_store).unwrap();
+    let start = serde_json::json!({
+        "id": "T1",
+        "started_at": 1700000000u64,
+        "pid": 999999u32,
+        "research": false,
+        "surface": surface_id,
+    });
+    std::fs::write(
+        run_store.join("T1.start.json"),
+        serde_json::to_string_pretty(&start).unwrap(),
+    )
+    .unwrap();
+
+    let outcome = notify_runs_changed(&folder, "T1");
+    assert_eq!(outcome, NotifyOutcome::Told);
+
+    server.join().unwrap();
+    let got = received
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("listener must receive POST /api/runs/changed");
+    assert_eq!(got.0, "POST /api/runs/changed HTTP/1.1");
+    assert_eq!(got.1, token);
+}
+
+#[test]
+fn in_place_review_diff_and_decide_reject_bad_start_files() {
+    ensure_isolated_state_home();
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tmp.path().join("store");
+    std::fs::create_dir_all(&store).unwrap();
+
+    write_finished_in_place_run(&store, "T_BAD_RES", "s1", "notes.txt", "old\n", "new\n", "");
+    std::fs::write(
+        store.join("T_BAD_RES.start.json"),
+        serde_json::json!({
+            "id": "T_BAD_RES",
+            "started_at": now_secs().saturating_sub(60),
+            "pid": 999999u32,
+            "research": "yes",
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let diff_err = blyte_cli::in_place_review::diff_for_run(&store, "T_BAD_RES").unwrap_err();
+    assert!(
+        diff_err.contains("research") && diff_err.contains("T_BAD_RES.start.json"),
+        "diff_err={diff_err}"
+    );
+
+    let decide_bad_res = blyte_cli::queue_actions::decide_in_place(
+        &store,
+        "T_BAD_RES",
+        blyte_cli::queue_actions::Action::Accept,
+        None,
+        now_secs(),
+    )
+    .unwrap_err();
+    assert!(
+        decide_bad_res.contains("research") && decide_bad_res.contains("T_BAD_RES.start.json"),
+        "decide_bad_res={decide_bad_res}"
+    );
+
+    write_finished_in_place_run(
+        &store,
+        "T_CORRUPT_START",
+        "s1",
+        "notes.txt",
+        "old\n",
+        "new\n",
+        "",
+    );
+    std::fs::write(store.join("T_CORRUPT_START.start.json"), "{not json").unwrap();
+    let decide_corrupt = blyte_cli::queue_actions::decide_in_place(
+        &store,
+        "T_CORRUPT_START",
+        blyte_cli::queue_actions::Action::Accept,
+        None,
+        now_secs(),
+    )
+    .unwrap_err();
+    assert!(
+        decide_corrupt.contains("T_CORRUPT_START.start.json"),
+        "decide_corrupt={decide_corrupt}"
+    );
+
+    write_finished_in_place_run(
+        &store,
+        "T_MISSING_START",
+        "s1",
+        "notes.txt",
+        "old\n",
+        "new\n",
+        "",
+    );
+    std::fs::remove_file(store.join("T_MISSING_START.start.json")).unwrap();
+    let decide_missing = blyte_cli::queue_actions::decide_in_place(
+        &store,
+        "T_MISSING_START",
+        blyte_cli::queue_actions::Action::Accept,
+        None,
+        now_secs(),
+    )
+    .unwrap_err();
+    assert!(
+        decide_missing.contains("T_MISSING_START.start.json"),
+        "decide_missing={decide_missing}"
+    );
+}
+
+#[test]
+fn collect_in_place_records_skipped_errors_without_fallbacks() {
+    ensure_isolated_state_home();
+    let tmp = tempfile::tempdir().unwrap();
+    let folder = tmp.path().join("notes-strict");
+    let store = tmp.path().join("store");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::create_dir_all(&store).unwrap();
+    let now = now_secs();
+
+    write_finished_in_place_run(&store, "T_BAD_RES", "s1", "a.txt", "a\n", "b\n", "");
+    std::fs::write(
+        store.join("T_BAD_RES.start.json"),
+        serde_json::json!({
+            "id": "T_BAD_RES",
+            "started_at": now.saturating_sub(60),
+            "pid": 999999u32,
+            "research": 42,
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    write_finished_in_place_run(&store, "T_BAD_TASKFILE", "s1", "a.txt", "a\n", "b\n", "");
+    let missing_task = tmp.path().join("does-not-exist-task.md");
+    std::fs::write(
+        store.join("T_BAD_TASKFILE.start.json"),
+        serde_json::json!({
+            "id": "T_BAD_TASKFILE",
+            "started_at": now.saturating_sub(60),
+            "pid": 999999u32,
+            "task_file": missing_task.display().to_string(),
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    write_finished_in_place_run(&store, "T_NO_TASKMD", "s1", "a.txt", "a\n", "b\n", "");
+    std::fs::remove_file(store.join("T_NO_TASKMD.task.md")).unwrap();
+
+    write_finished_in_place_run(&store, "T_NO_SECONDS", "s1", "a.txt", "a\n", "b\n", "");
+    std::fs::write(
+        store.join("T_NO_SECONDS.json"),
+        serde_json::json!({
+            "id": "T_NO_SECONDS",
+            "outcome": "finished",
+            "turns": 2,
+            "changed_files": ["a.txt"],
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    write_finished_in_place_run(&store, "T_NO_TURNS", "s1", "a.txt", "a\n", "b\n", "");
+    std::fs::write(
+        store.join("T_NO_TURNS.json"),
+        serde_json::json!({
+            "id": "T_NO_TURNS",
+            "outcome": "finished",
+            "seconds": 10,
+            "changed_files": ["a.txt"],
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    write_finished_in_place_run(&store, "T_BAD_TURNS", "s1", "a.txt", "a\n", "b\n", "");
+    std::fs::write(
+        store.join("T_BAD_TURNS.json"),
+        serde_json::json!({
+            "id": "T_BAD_TURNS",
+            "outcome": "finished",
+            "seconds": 10,
+            "turns": "three",
+            "changed_files": ["a.txt"],
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    write_finished_in_place_run(&store, "T_BAD_VERDICT", "s1", "a.txt", "a\n", "b\n", "");
+    std::fs::write(store.join("T_BAD_VERDICT.verdict.json"), "{broken").unwrap();
+
+    write_finished_in_place_run(&store, "T_UNREAD_VERDICT", "s1", "a.txt", "a\n", "b\n", "");
+    std::fs::create_dir_all(store.join("T_UNREAD_VERDICT.verdict.json")).unwrap();
+
+    std::fs::write(store.join("T_BAD_LOG.task.md"), "Running task\n").unwrap();
+    std::fs::write(
+        store.join("T_BAD_LOG.start.json"),
+        serde_json::json!({
+            "id": "T_BAD_LOG",
+            "started_at": now.saturating_sub(10),
+            "pid": std::process::id(),
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::create_dir_all(store.join("T_BAD_LOG.log")).unwrap();
+
+    let live = blyte_cli::live_runs::collect_in_place(&folder, &store, now, 14).unwrap();
+    assert!(live.runs.is_empty(), "runs={:?}", live.runs);
+    assert!(live.running.is_empty(), "running={:?}", live.running);
+
+    let reason_for = |id: &str| -> String {
+        live.skipped
+            .iter()
+            .find(|s| s.key.ends_with(&format!("/{id}")))
+            .unwrap_or_else(|| panic!("expected {id} in skipped: {:?}", live.skipped))
+            .reason
+            .clone()
+    };
+
+    assert!(reason_for("T_BAD_RES").contains("research"));
+    assert!(reason_for("T_BAD_TASKFILE").contains("does-not-exist-task.md"));
+    assert!(reason_for("T_NO_TASKMD").contains("T_NO_TASKMD.task.md"));
+    assert!(reason_for("T_NO_SECONDS").contains("seconds"));
+    assert!(reason_for("T_NO_TURNS").contains("turns"));
+    assert!(reason_for("T_BAD_TURNS").contains("turns"));
+    assert!(reason_for("T_BAD_VERDICT").contains("T_BAD_VERDICT.verdict.json"));
+    assert!(reason_for("T_UNREAD_VERDICT").contains("T_UNREAD_VERDICT.verdict.json"));
+    assert!(reason_for("T_BAD_LOG").contains("T_BAD_LOG.log"));
+}
