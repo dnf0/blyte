@@ -532,10 +532,12 @@ fn write_into_custom_blyte_state_dir_is_refused() {
         &json!({ "path": "custom_state/x", "content": "nope\n" }),
     );
     assert!(refused_custom.is_error, "{}", refused_custom.content);
+    assert_eq!(
+        refused_custom.content,
+        "write: custom_state/x is protected (blyte's own files); blyte does not write there"
+    );
     assert!(!custom_state.join("x").exists());
-    let calls = approver.take_calls();
-    assert_eq!(calls.len(), 1, "{calls:?}");
-    assert_eq!(calls[0].1, "inside blyte's own state or configuration");
+    assert!(approver.take_calls().is_empty());
 
     let refused_xdg = execute(
         home.path(),

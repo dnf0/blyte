@@ -312,3 +312,27 @@ fn without_home_the_write_is_an_error_naming_home() {
     assert!(empty.content.contains("HOME"), "{}", empty.content);
     assert!(!ws.path().join("notes.txt").exists());
 }
+
+#[test]
+fn write_tool_refuses_blyte_state_dir_in_a_background_run() {
+    let home = tempfile::tempdir().unwrap();
+    let custom_state = home.path().join("custom_state");
+    std::fs::create_dir_all(&custom_state).unwrap();
+    let _guard = EnvGuard::set(Some(home.path()), None, Some(&custom_state));
+
+    let shell = LocalShell::new();
+    let fs = LocalFs;
+    let out = execute(
+        home.path(),
+        &shell,
+        &fs,
+        "write",
+        &json!({ "path": "custom_state/x", "content": "nope\n" }),
+    );
+    assert!(out.is_error, "{}", out.content);
+    assert_eq!(
+        out.content,
+        "write: custom_state/x is protected (blyte's own files); blyte does not write there"
+    );
+    assert!(!custom_state.join("x").exists());
+}

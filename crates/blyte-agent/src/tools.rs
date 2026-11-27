@@ -775,16 +775,39 @@ fn check_protected_write(
         .ok_or_else(|| format!("{tool}: cannot check protected paths without HOME"))?;
     let real_target = resolve_real_target(fs, path)?;
     let home = resolve_host_prefix(fs, Path::new(&home_raw))?;
-    let state_dir = match crate::sandbox::state_blyte_dir() {
-        Some(dir) => Some(resolve_host_prefix(fs, &dir)?),
-        None => None,
+    let mut state_dirs: Vec<PathBuf> = Vec::new();
+    let mut push_state_dir = |raw: PathBuf| -> Result<(), String> {
+        let resolved = resolve_host_prefix(fs, &raw)?;
+        if !state_dirs.contains(&resolved) {
+            state_dirs.push(resolved);
+        }
+        Ok(())
     };
-    if let Some(reason) =
-        crate::write_guard::protected_write(&real_target, &home, state_dir.as_deref())
-    {
-        return Err(format!(
-            "{tool}: {raw_path} is protected ({reason}); blyte does not write there"
-        ));
+    if let Some(dir) = crate::sandbox::state_blyte_dir() {
+        push_state_dir(dir)?;
+    }
+    if let Some(dir) = std::env::var_os("BLYTE_STATE_DIR").filter(|d| !d.is_empty()) {
+        push_state_dir(PathBuf::from(dir))?;
+    }
+    if let Some(xdg) = std::env::var_os("XDG_STATE_HOME").filter(|d| !d.is_empty()) {
+        push_state_dir(PathBuf::from(xdg).join("blyte"))?;
+    }
+    if state_dirs.is_empty() {
+        if let Some(reason) = crate::write_guard::protected_write(&real_target, &home, None) {
+            return Err(format!(
+                "{tool}: {raw_path} is protected ({reason}); blyte does not write there"
+            ));
+        }
+    } else {
+        for dir in &state_dirs {
+            if let Some(reason) =
+                crate::write_guard::protected_write(&real_target, &home, Some(dir))
+            {
+                return Err(format!(
+                    "{tool}: {raw_path} is protected ({reason}); blyte does not write there"
+                ));
+            }
+        }
     }
     Ok(())
 }
