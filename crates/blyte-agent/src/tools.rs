@@ -719,6 +719,76 @@ fn append_skipped_line(mut text: String, skipped: usize) -> String {
     text
 }
 
+fn resolve_host_prefix(fs: &dyn Fs, path: &Path) -> Result<PathBuf, String> {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("cannot determine current directory: {e}"))?
+            .join(path)
+    };
+    let mut probe = abs.as_path();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        match fs.canonicalize(probe) {
+            Ok(mut resolved) => {
+                for part in tail.into_iter().rev() {
+                    resolved.push(part);
+                }
+                return Ok(resolved);
+            }
+            Err(e) => {
+                let not_present = match std::fs::symlink_metadata(probe) {
+                    Ok(_) => false,
+                    Err(meta_err) => matches!(
+                        meta_err.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ),
+                };
+                if !not_present {
+                    return Err(format!("cannot canonicalize {}: {e}", probe.display()));
+                }
+                let Some(name) = probe.file_name() else {
+                    return Err(format!("cannot canonicalize {}: {e}", probe.display()));
+                };
+                tail.push(name.to_os_string());
+                let Some(parent) = probe.parent() else {
+                    return Err(format!("cannot canonicalize {}: {e}", probe.display()));
+                };
+                probe = parent;
+            }
+        }
+    }
+}
+
+fn check_protected_write(
+    fs: &dyn Fs,
+    tool: &str,
+    raw_path: &str,
+    path: &Path,
+) -> Result<(), String> {
+    if !fs.is_local() {
+        return Ok(());
+    }
+    let home_raw = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .ok_or_else(|| format!("{tool}: cannot check protected paths without HOME"))?;
+    let real_target = resolve_real_target(fs, path)?;
+    let home = resolve_host_prefix(fs, Path::new(&home_raw))?;
+    let state_dir = match crate::sandbox::state_blyte_dir() {
+        Some(dir) => Some(resolve_host_prefix(fs, &dir)?),
+        None => None,
+    };
+    if let Some(reason) =
+        crate::write_guard::protected_write(&real_target, &home, state_dir.as_deref())
+    {
+        return Err(format!(
+            "{tool}: {raw_path} is protected ({reason}); blyte does not write there"
+        ));
+    }
+    Ok(())
+}
+
 pub fn check_write_scope(fs: &dyn Fs, tool: &str, path: &Path) -> Result<(), String> {
     let Some(scope) = write_scope() else {
         return Ok(());
@@ -1183,23 +1253,31 @@ fn execute_unbounded(
             ToolOutcome::ok(distil(&body, READ_LINE_BUDGET))
         }
         "write" => {
-            let path = match resolve_in_workspace(fs, root, &s("path")) {
+            let raw_path = s("path");
+            let path = match resolve_in_workspace(fs, root, &raw_path) {
                 Ok(p) => p,
                 Err(e) => return ToolOutcome::err(e),
             };
+            if let Err(e) = check_protected_write(fs, "write", &raw_path, &path) {
+                return ToolOutcome::err(e);
+            }
             if let Err(e) = check_write_scope(fs, "write", &path) {
                 return ToolOutcome::err(e);
             }
             match fs.write(&path, &s("content")) {
-                Ok(_) => ToolOutcome::ok(format!("wrote {}", s("path"))),
+                Ok(_) => ToolOutcome::ok(format!("wrote {raw_path}")),
                 Err(e) => ToolOutcome::err(e),
             }
         }
         "edit" => {
-            let path = match resolve_in_workspace(fs, root, &s("path")) {
+            let raw_path = s("path");
+            let path = match resolve_in_workspace(fs, root, &raw_path) {
                 Ok(p) => p,
                 Err(e) => return ToolOutcome::err(e),
             };
+            if let Err(e) = check_protected_write(fs, "edit", &raw_path, &path) {
+                return ToolOutcome::err(e);
+            }
             if let Err(e) = check_write_scope(fs, "edit", &path) {
                 return ToolOutcome::err(e);
             }

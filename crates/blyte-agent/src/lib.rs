@@ -26,3 +26,4 @@ pub mod search;
 pub mod shell;
 pub mod state;
 pub mod tools;
+pub mod write_guard;
