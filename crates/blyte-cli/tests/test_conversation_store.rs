@@ -303,3 +303,67 @@ fn cross_provider_digest_replaces_messages_and_rewrites_file() {
     assert_eq!(reloaded.model.as_deref(), Some("openai/gpt-test"));
     assert_eq!(reloaded.messages, loaded.messages);
 }
+
+#[test]
+fn rewrite_rejects_missing_or_empty_parent_directory() {
+    let empty_path = std::path::PathBuf::from("");
+    let mut empty_store = ConversationStore::new_for_fresh(empty_path).unwrap();
+    let err = empty_store
+        .rewrite(Some("openai/gpt-test"), None, &[])
+        .unwrap_err();
+    assert!(
+        err.contains("parent directory"),
+        "expected missing parent directory error: {err}"
+    );
+
+    let bare_path = std::path::PathBuf::from("nonexistent_bare_conversation_store_test.jsonl");
+    let mut bare_store = ConversationStore::new_for_fresh(bare_path.clone()).unwrap();
+    let err = bare_store
+        .rewrite(Some("openai/gpt-test"), None, &[])
+        .unwrap_err();
+    assert!(
+        err.contains(&bare_path.display().to_string()),
+        "error should name path: {err}"
+    );
+    assert!(
+        err.contains("parent directory"),
+        "expected missing parent directory error: {err}"
+    );
+}
+
+#[test]
+fn rewrite_rejects_missing_file_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("missing").join("..");
+    let mut store = ConversationStore::new_for_fresh(path.clone()).unwrap();
+    let err = store
+        .rewrite(Some("openai/gpt-test"), None, &[])
+        .unwrap_err();
+    assert!(
+        err.contains(&path.display().to_string()),
+        "error should name path: {err}"
+    );
+    assert!(
+        err.contains("file name"),
+        "expected missing file name error: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rewrite_rejects_non_utf8_file_name() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(OsStr::from_bytes(b"bad\xff.jsonl"));
+    let mut store = ConversationStore::new_for_fresh(path.clone()).unwrap();
+    let err = store
+        .rewrite(Some("openai/gpt-test"), None, &[])
+        .unwrap_err();
+    assert!(
+        err.contains(&path.display().to_string()),
+        "error should name path: {err}"
+    );
+    assert!(err.contains("UTF-8"), "expected UTF-8 error: {err}");
+}

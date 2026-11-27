@@ -1984,23 +1984,15 @@ where
             }
         }
     };
-    let resume_memory = match loaded_conversation.as_mut() {
+    let (resume_memory, needs_digest_rewrite) = match loaded_conversation.as_mut() {
         Some(loaded) if !loaded.messages.is_empty() => {
-            match crate::conversation_store::maybe_digest_for_provider(
-                &mut conversation_store,
-                loaded,
-                &model,
-            ) {
-                Ok(true) => crate::session::ResumeMemoryState::Summarized,
-                Ok(false) => crate::session::ResumeMemoryState::Loaded,
-                Err(e) => {
-                    let _ = writeln!(err, "blyte: {e}");
-                    let _ = err.flush();
-                    return 1;
-                }
+            if crate::conversation_store::digest_for_provider_in_memory(loaded, &model) {
+                (crate::session::ResumeMemoryState::Summarized, true)
+            } else {
+                (crate::session::ResumeMemoryState::Loaded, false)
             }
         }
-        _ => crate::session::ResumeMemoryState::NotLoaded,
+        _ => (crate::session::ResumeMemoryState::NotLoaded, false),
     };
 
     let started_dur = match now_duration() {
@@ -2124,18 +2116,40 @@ where
             Some(factory) => {
                 let (runner, tmpdir) = factory(&config, approver)?;
                 _private_tmp_guard = tmpdir.map(|path| PrivateTmpDirGuard { path });
+                if needs_digest_rewrite {
+                    if let Some(ref loaded) = loaded_conversation {
+                        conversation_store.rewrite(
+                            loaded.model.as_deref(),
+                            loaded.goal.as_deref(),
+                            &loaded.messages,
+                        )?;
+                    }
+                }
                 Ok(runner)
             }
             None => {
-                let runner = AgentRunner::try_new_with_conversation(
+                let rewrite_payload = if needs_digest_rewrite {
+                    loaded_conversation.clone()
+                } else {
+                    None
+                };
+                let mut runner = AgentRunner::try_new_with_conversation(
                     &config,
                     approver,
-                    Some(conversation_store),
+                    None,
                     loaded_conversation,
                 )?;
                 _private_tmp_guard = runner.private_tmpdir().map(|path| PrivateTmpDirGuard {
                     path: path.to_path_buf(),
                 });
+                if let Some(ref loaded) = rewrite_payload {
+                    conversation_store.rewrite(
+                        loaded.model.as_deref(),
+                        loaded.goal.as_deref(),
+                        &loaded.messages,
+                    )?;
+                }
+                runner.set_conversation_store(conversation_store);
                 Ok(Box::new(runner) as Box<dyn crate::session::PromptRunner>)
             }
         },

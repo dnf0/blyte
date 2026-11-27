@@ -654,6 +654,13 @@ impl AgentRunner {
         })
     }
 
+    pub fn set_conversation_store(
+        &mut self,
+        conversation_store: crate::conversation_store::ConversationStore,
+    ) {
+        self.conversation_store = Some(conversation_store);
+    }
+
     pub fn new(
         config: &crate::repl::ReplConfig,
         approver: Arc<dyn blyte_agent::approval::Approver>,
@@ -1101,6 +1108,20 @@ struct Shared {
     approval_cv: Condvar,
 }
 
+fn is_restart_notice(body: &EntryBody) -> bool {
+    matches!(
+        body,
+        EntryBody::Error { message }
+            if matches!(
+                message.as_str(),
+                RESTART_NOTICE_TEXT
+                    | RESUME_REMEMBERS_NOTICE_TEXT
+                    | RESUME_INTERRUPTED_NOTICE_TEXT
+                    | RESUME_SUMMARIZED_NOTICE_TEXT
+            )
+    )
+}
+
 impl Shared {
     fn new(model: String, effort: Option<String>) -> Self {
         Self {
@@ -1150,13 +1171,14 @@ impl Shared {
         let last_seq = entries.iter().map(|e| e.seq).max().unwrap_or(0);
         let next_approval_id = max_approval_id(&entries);
         let had_entries = !entries.is_empty();
-        let interrupted = match entries
+        let trailing_entries = match entries
             .iter()
             .rposition(|e| matches!(e.body, EntryBody::Idle { .. }))
         {
-            Some(idx) => idx + 1 < entries.len(),
-            None => had_entries,
+            Some(idx) => &entries[idx + 1..],
+            None => &entries[..],
         };
+        let interrupted = trailing_entries.iter().any(|e| !is_restart_notice(&e.body));
         let mut state = SessionState {
             entries,
             last_seq,

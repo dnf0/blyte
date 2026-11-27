@@ -126,16 +126,29 @@ fn rewrite_atomic(
     goal: Option<&str>,
     messages: &[Message],
 ) -> Result<(), String> {
-    ensure_parent_dir(path)?;
-    let buf = encode_full_file(model, goal, messages)?;
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let base_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("conversation.jsonl");
+        .ok_or_else(|| {
+            format!(
+                "cannot rewrite conversation file {}: path has no parent directory",
+                path.display()
+            )
+        })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        format!(
+            "cannot rewrite conversation file {}: path has no file name",
+            path.display()
+        )
+    })?;
+    let base_name = file_name.to_str().ok_or_else(|| {
+        format!(
+            "cannot rewrite conversation file {}: file name is not valid UTF-8",
+            path.display()
+        )
+    })?;
+    ensure_parent_dir(path)?;
+    let buf = encode_full_file(model, goal, messages)?;
     let pid = std::process::id();
     let mut attempt = 0u64;
     let (tmp_path, mut file) = loop {
@@ -478,6 +491,29 @@ impl ConversationStore {
     }
 }
 
+/// Replaces loaded messages with a single digest message in memory when the starting model's
+/// provider kind differs from the last recorded model's provider kind.
+pub fn digest_for_provider_in_memory(
+    loaded: &mut LoadedConversation,
+    starting_model: &str,
+) -> bool {
+    if loaded.messages.is_empty() {
+        return false;
+    }
+    let Some(ref saved_model) = loaded.model else {
+        return false;
+    };
+    let saved_kind = blyte_provider::detect_provider_kind(Some(saved_model.as_str()));
+    let starting_kind = blyte_provider::detect_provider_kind(Some(starting_model));
+    if saved_kind == starting_kind {
+        return false;
+    }
+    let summary = blyte_agent::context::digest(&loaded.messages, 1, loaded.messages.len());
+    loaded.messages = vec![summary];
+    loaded.model = Some(starting_model.to_string());
+    true
+}
+
 /// Replaces loaded messages with a single digest message and rewrites the store when the starting
 /// model's provider kind differs from the last recorded model's provider kind.
 pub fn maybe_digest_for_provider(
@@ -485,20 +521,9 @@ pub fn maybe_digest_for_provider(
     loaded: &mut LoadedConversation,
     starting_model: &str,
 ) -> Result<bool, String> {
-    if loaded.messages.is_empty() {
+    if !digest_for_provider_in_memory(loaded, starting_model) {
         return Ok(false);
     }
-    let Some(ref saved_model) = loaded.model else {
-        return Ok(false);
-    };
-    let saved_kind = blyte_provider::detect_provider_kind(Some(saved_model.as_str()));
-    let starting_kind = blyte_provider::detect_provider_kind(Some(starting_model));
-    if saved_kind == starting_kind {
-        return Ok(false);
-    }
-    let summary = blyte_agent::context::digest(&loaded.messages, 1, loaded.messages.len());
-    loaded.messages = vec![summary];
-    loaded.model = Some(starting_model.to_string());
     store.rewrite(
         Some(starting_model),
         loaded.goal.as_deref(),

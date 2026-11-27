@@ -785,3 +785,145 @@ fn clean_removes_conversation_file_for_old_stopped_surface() {
     assert!(!token_path.exists());
     assert!(!conv_path.exists());
 }
+
+#[test]
+fn resuming_twice_without_new_prompt_keeps_remembers_notice_instead_of_interrupted() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_git_repo(&repo);
+
+    let fake = FakeOpenAiServer::start(vec!["first reply"]);
+    let _env = setup_test_env(tmp.path(), Some(&fake.base_url()));
+
+    let first = start_surface(
+        &repo,
+        SurfaceArgs {
+            no_open: true,
+            ..Default::default()
+        },
+        "openai/gpt-test",
+    );
+    let surface_name = first.name.clone();
+    post_message(first.port, &first.token, "remember kestrel");
+    wait_for_idle_count(first.port, &first.token, 1, &first.out_buf, &first.err_buf);
+    assert_eq!(first.stop_and_join(), 0);
+
+    let resumed_once = start_surface(
+        &repo,
+        SurfaceArgs {
+            no_open: true,
+            resume: Some(surface_name.clone()),
+            ..Default::default()
+        },
+        "openai/gpt-test",
+    );
+    let entries_once = fetch_events(resumed_once.port, &resumed_once.token);
+    assert_eq!(resumed_once.stop_and_join(), 0);
+    assert!(
+        entries_once
+            .iter()
+            .any(|e| e["kind"] == "error" && e["message"] == RESUME_REMEMBERS_NOTICE_TEXT),
+        "expected remembers notice on first resume: {entries_once:?}"
+    );
+
+    let resumed_twice = start_surface(
+        &repo,
+        SurfaceArgs {
+            no_open: true,
+            resume: Some(surface_name),
+            ..Default::default()
+        },
+        "openai/gpt-test",
+    );
+    let entries_twice = fetch_events(resumed_twice.port, &resumed_twice.token);
+    assert_eq!(resumed_twice.stop_and_join(), 0);
+
+    assert!(
+        !entries_twice
+            .iter()
+            .any(|e| e["kind"] == "error" && e["message"] == RESUME_INTERRUPTED_NOTICE_TEXT),
+        "unexpected interrupted notice on second resume: {entries_twice:?}"
+    );
+    let remembers_count = entries_twice
+        .iter()
+        .filter(|e| e["kind"] == "error" && e["message"] == RESUME_REMEMBERS_NOTICE_TEXT)
+        .count();
+    assert_eq!(
+        remembers_count, 2,
+        "expected remembers notice on both resumes: {entries_twice:?}"
+    );
+}
+
+#[test]
+fn failed_cross_provider_resume_leaves_conversation_file_unchanged() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_git_repo(&repo);
+
+    let fake = FakeOpenAiServer::start(vec!["first reply"]);
+    let _env = setup_test_env(tmp.path(), Some(&fake.base_url()));
+
+    let first = start_surface(
+        &repo,
+        SurfaceArgs {
+            no_open: true,
+            ..Default::default()
+        },
+        "openai/gpt-test",
+    );
+    let health = fetch_health(first.port);
+    let surface_id = health["surface_id"].as_str().unwrap().to_string();
+    let surface_name = first.name.clone();
+    post_message(first.port, &first.token, "remember falcon");
+    wait_for_idle_count(first.port, &first.token, 1, &first.out_buf, &first.err_buf);
+    assert_eq!(first.stop_and_join(), 0);
+
+    let conv_path = conversation_path_for_id(&surface_id).unwrap();
+    let (mut store, _) = ConversationStore::load(conv_path.clone()).unwrap();
+    store
+        .rewrite(
+            Some("anthropic/claude-sonnet-4-5"),
+            Some("remember falcon"),
+            &[
+                Message::User("remember falcon".to_string()),
+                Message::Assistant("I will remember falcon".to_string()),
+            ],
+        )
+        .unwrap();
+    let conv_before = std::fs::read(&conv_path).unwrap();
+
+    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+    let occupied_port = occupied.local_addr().unwrap().port();
+
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut opener = |_: &str| {};
+    let code = run_with_hooks(
+        &SurfaceArgs {
+            no_open: true,
+            port: occupied_port,
+            resume: Some(surface_name),
+            ..Default::default()
+        },
+        default_repl_config(repo.clone(), "openai/gpt-test"),
+        &mut out,
+        &mut err,
+        &mut opener,
+        Arc::new(AtomicBool::new(false)),
+    );
+    drop(occupied);
+
+    assert_eq!(
+        code,
+        1,
+        "expected exit code 1 on occupied port, stderr={:?}",
+        String::from_utf8_lossy(&err)
+    );
+    assert_eq!(
+        std::fs::read(&conv_path).unwrap(),
+        conv_before,
+        "failed cross-provider resume must not overwrite conversation file"
+    );
+}
