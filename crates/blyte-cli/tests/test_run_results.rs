@@ -167,7 +167,7 @@ fn make_surface(root: PathBuf) -> (Surface, Arc<Mutex<Vec<String>>>) {
 }
 
 fn wait_for_prompts(prompts: &Arc<Mutex<Vec<String>>>, expected: usize) -> Vec<String> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         let current = prompts.lock().unwrap().clone();
         if current.len() >= expected {
@@ -175,7 +175,11 @@ fn wait_for_prompts(prompts: &Arc<Mutex<Vec<String>>>, expected: usize) -> Vec<S
         }
         std::thread::sleep(Duration::from_millis(2));
     }
-    prompts.lock().unwrap().clone()
+    let got = prompts.lock().unwrap().clone();
+    panic!(
+        "timed out waiting for {expected} prompts; got {}: {got:?}",
+        got.len()
+    );
 }
 
 fn get(surface: &Surface, path: &str) -> Request {

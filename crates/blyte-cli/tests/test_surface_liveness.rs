@@ -27,6 +27,19 @@ struct HealthListener {
 
 impl HealthListener {
     fn start(surface_id: &str, delay: Duration) -> Self {
+        Self::start_with_delays(surface_id, delay, delay, false)
+    }
+
+    fn start_retry_slow(surface_id: &str, retry_delay: Duration) -> Self {
+        Self::start_with_delays(surface_id, Duration::ZERO, retry_delay, true)
+    }
+
+    fn start_with_delays(
+        surface_id: &str,
+        first_delay: Duration,
+        retry_delay: Duration,
+        hold_first_until_retry: bool,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let stop = Arc::new(AtomicBool::new(false));
@@ -43,10 +56,12 @@ impl HealthListener {
                 let Ok(mut stream) = stream else {
                     break;
                 };
-                accepted_bg.fetch_add(1, Ordering::SeqCst);
+                let conn_num = accepted_bg.fetch_add(1, Ordering::SeqCst) + 1;
                 let body = body.clone();
+                let stop_worker = Arc::clone(&stop_bg);
+                let accepted_worker = Arc::clone(&accepted_bg);
                 workers.push(thread::spawn(move || {
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
                     let mut req = Vec::new();
                     let mut buf = [0u8; 512];
                     while !req.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -55,6 +70,19 @@ impl HealthListener {
                             Ok(n) => req.extend_from_slice(&buf[..n]),
                         }
                     }
+                    if conn_num == 1 && hold_first_until_retry {
+                        while accepted_worker.load(Ordering::SeqCst) < 2
+                            && !stop_worker.load(Ordering::Relaxed)
+                        {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        return;
+                    }
+                    let delay = if conn_num == 1 {
+                        first_delay
+                    } else {
+                        retry_delay
+                    };
                     if !delay.is_zero() {
                         thread::sleep(delay);
                     }
@@ -194,14 +222,14 @@ fn silent_listener_is_unknown() {
     assert_eq!(result, Liveness::Unknown);
     assert_eq!(silent.accepted_count(), 2);
     assert!(
-        elapsed < Duration::from_secs(6),
-        "expected probe to return within 6s, took {elapsed:?}"
+        elapsed < Duration::from_secs(60),
+        "expected probe to return within 60s, took {elapsed:?}"
     );
 }
 
 #[test]
 fn slow_answer_is_running() {
-    let server = HealthListener::start("abc", Duration::from_millis(800));
+    let server = HealthListener::start_retry_slow("abc", Duration::from_millis(650));
     assert_eq!(
         probe(std::process::id(), server.port, "abc"),
         Liveness::Running

@@ -76,7 +76,7 @@ impl PromptRunner for RecordingRunner {
 }
 
 fn wait_for_idle_count(session: &Session, expected: usize) -> Vec<Entry> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut after = 0;
     let mut all = Vec::new();
     while Instant::now() < deadline {
@@ -97,7 +97,7 @@ fn wait_for_idle_count(session: &Session, expected: usize) -> Vec<Entry> {
 }
 
 fn wait_until_idle(session: &Session) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if !session.info().busy {
             return;
@@ -145,7 +145,7 @@ fn a_peer_message_waits_for_the_running_turn() {
 
     session.submit("first turn", Vec::new()).unwrap();
     started
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(Duration::from_secs(30))
         .expect("first turn started");
 
     let delivery = session
@@ -291,7 +291,7 @@ fn queued_peer_messages_count_toward_the_limit() {
 
     session.submit("hold", Vec::new()).unwrap();
     started
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(Duration::from_secs(30))
         .expect("first turn started");
 
     let mut deliveries = Vec::new();

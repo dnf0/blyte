@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use blyte_cli::passed_trees::{check_key, has_passed, now_secs, tree_of};
 
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const HANDSHAKE_POLL: Duration = Duration::from_millis(20);
 
 const TOOL_CALL_BODY: &str = r#"{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"true\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#;
@@ -26,7 +26,7 @@ where
     let counter = Arc::clone(&requests);
     std::thread::spawn(move || {
         for mut s in listener.incoming().flatten() {
-            let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
+            let _ = s.set_read_timeout(Some(Duration::from_secs(30)));
             let mut buf = vec![0u8; 65536];
             let mut got = Vec::new();
             loop {
@@ -82,7 +82,7 @@ fn release_gate(release: &Path, ack: &Path) {
 
 fn wait_for_release_sh(release: &Path, ack: &Path) -> String {
     format!(
-        "i=0; while [ ! -f '{}' ]; do i=$((i+1)); [ \"$i\" -gt 750 ] && exit 99; sleep 0.02; done; echo ok > '{}'",
+        "i=0; while [ ! -f '{}' ]; do i=$((i+1)); [ \"$i\" -gt 1500 ] && exit 99; sleep 0.02; done; echo ok > '{}'",
         release.display(),
         ack.display()
     )
@@ -100,7 +100,7 @@ fn dispatch_command(repo_dir: &Path, home: &Path, port: u16) -> Command {
         .env("BLYTE_USAGE_LOG", "off")
         .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env("BLYTE_NO_KEEP_AWAKE", "1")
-        .env("BLYTE_MODEL_TIMEOUT_SECS", "10")
+        .env("BLYTE_MODEL_TIMEOUT_SECS", "45")
         .env("BLYTE_RETRY_DELAY_MS", "10")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")

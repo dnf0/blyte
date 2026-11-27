@@ -101,7 +101,7 @@ fn spawn_health_listener(body: String) -> (u16, thread::JoinHandle<()>) {
     let port = listener.local_addr().expect("local_addr").port();
     let handle = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept health probe");
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
         let req = read_http_request(&mut stream);
         assert_health_request(&req);
         let resp = format!(
@@ -125,14 +125,14 @@ fn spawn_held_health_listener(
     let (release_tx, release_rx) = mpsc::channel();
     let handle = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept held health probe");
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
         let req = read_http_request(&mut stream);
         assert_health_request(&req);
         stream
             .write_all(raw_response.as_bytes())
             .expect("write raw health response");
         stream.flush().expect("flush raw health response");
-        let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        let _ = release_rx.recv_timeout(Duration::from_secs(30));
         drop(stream);
     });
     (port, release_tx, handle)

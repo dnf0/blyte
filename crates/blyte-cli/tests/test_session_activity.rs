@@ -107,7 +107,7 @@ impl PromptRunner for ScriptedRunner {
 }
 
 fn wait_for_idle_count(session: &Session, expected: usize) -> Vec<Entry> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut after = 0;
     let mut all = Vec::new();
     while Instant::now() < deadline {

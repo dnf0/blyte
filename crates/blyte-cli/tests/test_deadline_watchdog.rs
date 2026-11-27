@@ -78,7 +78,7 @@ fn hung_model_request_is_ended_by_max_seconds() {
             connected_srv.store(true, Ordering::SeqCst);
             let mut buf = [0u8; 4096];
             let _ = stream.read(&mut buf);
-            let _ = done_rx.recv_timeout(Duration::from_secs(10));
+            let _ = done_rx.recv_timeout(Duration::from_secs(60));
         }
     });
 
