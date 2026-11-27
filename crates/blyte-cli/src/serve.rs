@@ -56,7 +56,10 @@ impl OpenCodes {
 
     pub fn issue(&self, now: u64) -> Result<String, String> {
         let code = generate_token()?;
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|e| format!("open codes lock poisoned: {e}"))?;
         while entries.len() >= MAX_OPEN_CODES {
             entries.pop_front();
         }
@@ -67,11 +70,14 @@ impl OpenCodes {
         Ok(code)
     }
 
-    pub fn redeem(&self, provided: &str, now: u64) -> bool {
+    pub fn redeem(&self, provided: &str, now: u64) -> Result<bool, String> {
         if provided.is_empty() {
-            return false;
+            return Ok(false);
         }
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|e| format!("open codes lock poisoned: {e}"))?;
         let mut matched_idx = None;
         for (idx, entry) in entries.iter().enumerate() {
             if constant_time_eq(provided.as_bytes(), entry.code.as_bytes()) {
@@ -80,11 +86,11 @@ impl OpenCodes {
         }
         let Some(idx) = matched_idx else {
             entries.retain(|e| now.saturating_sub(e.created_at) <= OPEN_CODE_TTL_SECS);
-            return false;
+            return Ok(false);
         };
         let entry = entries.remove(idx).unwrap();
         entries.retain(|e| now.saturating_sub(e.created_at) <= OPEN_CODE_TTL_SECS);
-        now.saturating_sub(entry.created_at) <= OPEN_CODE_TTL_SECS
+        Ok(now.saturating_sub(entry.created_at) <= OPEN_CODE_TTL_SECS)
     }
 }
 
@@ -1147,10 +1153,11 @@ fn handle_post_open(surface: &Surface, req: &Request, now: u64) -> Response {
     let Some(code) = value.get("code").and_then(|v| v.as_str()) else {
         return forbidden;
     };
-    if !surface.open_codes.redeem(code, now) {
-        return forbidden;
+    match surface.open_codes.redeem(code, now) {
+        Ok(true) => Response::json(200, &serde_json::json!({ "token": surface.token })),
+        Ok(false) => forbidden,
+        Err(e) => json_error(500, e),
     }
-    Response::json(200, &serde_json::json!({ "token": surface.token }))
 }
 
 pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
@@ -2369,8 +2376,7 @@ where
     let _ = writeln!(out, "blyte: surface {surface_name} at {url}");
     let _ = out.flush();
     if !args.no_open {
-        let now_secs = now_duration().map(|d| d.as_secs()).unwrap_or(started_at);
-        match open_codes.issue(now_secs) {
+        match issue_initial_open_code(&open_codes, now_duration()) {
             Ok(code) => {
                 let open_url = format!("http://127.0.0.1:{actual_port}/#open={code}");
                 opener(&open_url);
@@ -2428,6 +2434,14 @@ where
             1
         }
     }
+}
+
+fn issue_initial_open_code(
+    open_codes: &OpenCodes,
+    now: Result<Duration, String>,
+) -> Result<String, String> {
+    let now_secs = now?.as_secs();
+    open_codes.issue(now_secs)
 }
 
 fn canonicalize_attachments_dir(attachments_dir: &Path) -> Result<PathBuf, String> {
@@ -2504,5 +2518,45 @@ mod tests {
             err.contains(&blocker.display().to_string()),
             "expected error to name path, got: {err}"
         );
+    }
+
+    fn poisoned_open_codes() -> OpenCodes {
+        let codes = OpenCodes::new();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = codes.entries.lock().unwrap();
+            panic!("poison");
+        }));
+        codes
+    }
+
+    #[test]
+    fn open_codes_issue_errors_when_lock_poisoned() {
+        let codes = poisoned_open_codes();
+        let err = codes.issue(100).unwrap_err();
+        assert!(err.contains("open codes"), "unexpected error: {err}");
+        assert!(err.contains("poison"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn open_codes_redeem_errors_when_lock_poisoned() {
+        let codes = poisoned_open_codes();
+        let err = codes.redeem("some-code", 100).unwrap_err();
+        assert!(err.contains("open codes"), "unexpected error: {err}");
+        assert!(err.contains("poison"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn issue_initial_open_code_errors_when_clock_fails() {
+        let codes = OpenCodes::new();
+        let err = issue_initial_open_code(
+            &codes,
+            Err("system clock is before Unix epoch: test".to_string()),
+        )
+        .unwrap_err();
+        assert!(err.contains("system clock"), "unexpected error: {err}");
+        assert!(codes.entries.lock().unwrap().is_empty());
+
+        let code = issue_initial_open_code(&codes, Ok(Duration::from_secs(500))).unwrap();
+        assert!(codes.redeem(&code, 500).unwrap());
     }
 }

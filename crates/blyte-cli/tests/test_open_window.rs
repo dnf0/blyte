@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use blyte_cli::cli::SurfaceArgs;
 use blyte_cli::http::Request;
 use blyte_cli::open_window::{
-    open_command, resolve_open_in, OpenIn, OpenPlan, APP_FALLBACK_NOTICE, OPEN_IN_ENV,
+    open_command, resolve_open_in, resolve_open_in_os, OpenIn, OpenPlan, APP_FALLBACK_NOTICE,
+    OPEN_IN_ENV,
 };
 use blyte_cli::repl::ReplConfig;
 use blyte_cli::serve::{generate_token, route, run_with_hooks, OpenCodes, Surface, TOKEN_HEADER};
@@ -249,6 +250,42 @@ fn resolve_open_in_defaults_precedence_and_errors() {
     let env_err = resolve_open_in(None, Some("x")).unwrap_err();
     assert!(env_err.contains(OPEN_IN_ENV), "{env_err}");
     assert!(env_err.contains('x'), "{env_err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn resolve_open_in_rejects_non_utf8_env_value() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let raw = OsStr::from_bytes(b"bad\xff");
+    let err = resolve_open_in_os(None, Some(raw)).unwrap_err();
+    assert!(err.contains(OPEN_IN_ENV), "{err}");
+    assert!(err.contains("bad"), "{err}");
+
+    assert_eq!(
+        resolve_open_in_os(Some("browser"), Some(raw)).unwrap(),
+        OpenIn::Browser
+    );
+
+    let cli_out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .env(OPEN_IN_ENV, raw)
+        .output()
+        .unwrap();
+    assert_eq!(cli_out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&cli_out.stderr);
+    assert!(stderr.contains(OPEN_IN_ENV), "{stderr}");
+    assert!(stderr.contains("bad"), "{stderr}");
+
+    let open_out = Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(["open", "demo"])
+        .env(OPEN_IN_ENV, raw)
+        .output()
+        .unwrap();
+    assert_eq!(open_out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&open_out.stderr);
+    assert!(stderr.contains(OPEN_IN_ENV), "{stderr}");
+    assert!(stderr.contains("bad"), "{stderr}");
 }
 
 #[test]

@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -45,19 +46,29 @@ pub fn parse_open_in(raw: &str, source: &str) -> Result<OpenIn, String> {
     }
 }
 
-pub fn resolve_open_in(flag: Option<&str>, env: Option<&str>) -> Result<OpenIn, String> {
+pub fn resolve_open_in_os(flag: Option<&str>, env: Option<&OsStr>) -> Result<OpenIn, String> {
     if let Some(raw) = flag {
         return parse_open_in(raw, "--open-in");
     }
     if let Some(raw) = env {
-        return parse_open_in(raw, OPEN_IN_ENV);
+        return match raw.to_str() {
+            Some(s) => parse_open_in(s, OPEN_IN_ENV),
+            None => Err(format!(
+                "invalid value `{}` for {OPEN_IN_ENV}; expected `app` or `browser`",
+                raw.to_string_lossy()
+            )),
+        };
     }
     Ok(OpenIn::App)
 }
 
+pub fn resolve_open_in(flag: Option<&str>, env: Option<&str>) -> Result<OpenIn, String> {
+    resolve_open_in_os(flag, env.map(OsStr::new))
+}
+
 pub fn resolve_open_in_from_env(flag: Option<&str>) -> Result<OpenIn, String> {
-    let env_val = std::env::var(OPEN_IN_ENV).ok();
-    resolve_open_in(flag, env_val.as_deref())
+    let env_val = std::env::var_os(OPEN_IN_ENV);
+    resolve_open_in_os(flag, env_val.as_deref())
 }
 
 pub fn open_command(
