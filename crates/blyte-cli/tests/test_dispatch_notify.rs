@@ -123,20 +123,7 @@ fn surface_listener(summary_path: PathBuf) -> (u16, Arc<Mutex<Vec<RecordedNotify
     (port, recorded)
 }
 
-fn state_home() -> &'static Path {
-    static STATE_HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
-    STATE_HOME
-        .get_or_init(|| {
-            let dir = tempfile::tempdir().unwrap();
-            std::env::set_var("XDG_STATE_HOME", dir.path());
-            std::env::set_var("BLYTE_STATE_DIR", dir.path().join("blyte"));
-            dir
-        })
-        .path()
-}
-
-fn write_surface_files(repo_dir: &Path, surface_id: &str, port: u16, token: &str) {
-    let _ = state_home();
+fn write_surface_files(repo_dir: &Path, home: &Path, surface_id: &str, port: u16, token: &str) {
     blyte_cli::surface_dir::write_record_in(
         &blyte_cli::surface_dir::surface_dir(repo_dir, surface_id),
         &blyte_cli::surface_dir::SurfaceRecord {
@@ -149,7 +136,11 @@ fn write_surface_files(repo_dir: &Path, surface_id: &str, port: u16, token: &str
         },
     )
     .unwrap();
-    let token_path = blyte_agent::sandbox::surface_token_path_for_id(surface_id).unwrap();
+    blyte_agent::sandbox::validate_surface_id(surface_id).unwrap();
+    let token_path = home
+        .join("state")
+        .join("surface")
+        .join(format!("{surface_id}.token"));
     std::fs::create_dir_all(token_path.parent().unwrap()).unwrap();
     std::fs::write(&token_path, format!("{token}\n")).unwrap();
 }
@@ -159,8 +150,8 @@ fn dispatch_command(repo_dir: &Path, home: &Path, port: u16) -> Command {
     cmd.current_dir(repo_dir)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home)
-        .env("XDG_STATE_HOME", state_home())
-        .env("BLYTE_STATE_DIR", state_home().join("blyte"))
+        .env("XDG_STATE_HOME", home.join("xdg-state"))
+        .env("BLYTE_STATE_DIR", home.join("state"))
         .env("BLYTE_GATE_SLOT_DIR", home.join("slots"))
         .env("BLYTE_GATE_SLOTS", "16")
         .env("BLYTE_ENV_FILE", "")
@@ -287,7 +278,7 @@ fn dispatch_tells_the_surface_when_it_finishes() {
     let sid = "sa1b2c3d4e5f60718";
     let summary_path = repo_dir.join(".wt").join(format!("{id}.json"));
     let (surface_port, recorded) = surface_listener(summary_path);
-    write_surface_files(repo_dir, sid, surface_port, "secret-token-123");
+    write_surface_files(repo_dir, home.path(), sid, surface_port, "secret-token-123");
 
     let out = run_verified_dispatch(repo_dir, home.path(), id, Some(sid));
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -356,7 +347,13 @@ fn a_dead_surface_does_not_change_the_result() {
     let closed_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let closed_port = closed_listener.local_addr().unwrap().port();
     drop(closed_listener);
-    write_surface_files(dead_repo, sid, closed_port, "dead-surface-token");
+    write_surface_files(
+        dead_repo,
+        dead_home.path(),
+        sid,
+        closed_port,
+        "dead-surface-token",
+    );
 
     let dead_out = run_verified_dispatch(dead_repo, dead_home.path(), "T_DEAD_SURFACE", Some(sid));
     let dead_stdout = String::from_utf8_lossy(&dead_out.stdout);
@@ -391,7 +388,13 @@ fn a_blocked_run_tells_the_surface_too() {
     let sid = "sb10c4ed000001234";
     let summary_path = repo_dir.join(".wt").join(format!("{id}.json"));
     let (surface_port, recorded) = surface_listener(summary_path);
-    write_surface_files(repo_dir, sid, surface_port, "blocked-token-456");
+    write_surface_files(
+        repo_dir,
+        home.path(),
+        sid,
+        surface_port,
+        "blocked-token-456",
+    );
 
     let task_file = repo_dir.join("task.md");
     std::fs::write(&task_file, "Do something").unwrap();
