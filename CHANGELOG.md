@@ -1,3 +1,9 @@
+## v0.72.1 (2026-11-27)
+
+### Fix
+
+- **surface**: a starting surface is not listed until its session has started (#452)
+
 ## v0.72.0 (2026-11-27)
 
 ### Feat
