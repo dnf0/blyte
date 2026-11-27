@@ -146,7 +146,7 @@ fn old_finished_runs_are_skipped_without_reading_logs_or_start_json() {
     }
     assert!(
         elapsed < Duration::from_secs(60),
-        "collect_jobs took {:?}, expected < 60s",
+        "collect_jobs speed guard took {:?}, expected < 60 s (widened from 1 s for parallel suite load)",
         elapsed
     );
 }

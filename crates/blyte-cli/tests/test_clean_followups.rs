@@ -793,7 +793,7 @@ fn test_clean_timing_guard_40_runs_under_3s() {
     assert!(out.status.success());
     assert!(
         elapsed < std::time::Duration::from_secs(60),
-        "clean --dry-run took {:?}, expected < 60 s",
+        "clean --dry-run speed guard took {:?}, expected < 60 s (widened from 3 s for parallel suite load)",
         elapsed
     );
 }
