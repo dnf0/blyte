@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use blyte_agent::sandbox;
 use blyte_cli::dispatch::exit_code;
 use blyte_cli::dispatch_in_place::{
-    in_place_outcome, records_dir_for, unix_timestamp_secs, wrap_in_place_research,
-    wrap_in_place_task, IN_PLACE_RULES, NON_GIT_RESEARCH_NOTE,
+    finalize_research_report, in_place_outcome, records_dir_for, unix_timestamp_secs,
+    wrap_in_place_research, wrap_in_place_task, IN_PLACE_RULES, NON_GIT_RESEARCH_NOTE,
 };
 
 fn sandbox_can_apply() -> Result<(), &'static str> {
@@ -1428,4 +1428,191 @@ fn research_run_unverified_report_gets_banner_and_restart_reuses_scratch() {
     );
     let log = std::fs::read_to_string(store.join("R_RESTART.log")).unwrap();
     assert!(log.starts_with("prior line\n"));
+}
+
+#[test]
+fn finalize_research_report_metadata_io_error_fails_naming_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let not_a_dir = tmp.path().join("not-a-dir");
+    std::fs::write(&not_a_dir, "plain file\n").unwrap();
+    let scratch_report = not_a_dir.join("report.md");
+    let store_report = tmp.path().join("R_META.report.md");
+    let report_to = tmp.path().join("existing.md");
+    std::fs::write(&report_to, "pre-existing content\n").unwrap();
+
+    for report_outcome in ["verified", "gate_failed"] {
+        let (outcome, error, recorded_report) = finalize_research_report(
+            &scratch_report,
+            &store_report,
+            Some(&report_to),
+            None,
+            report_outcome,
+            Some(2),
+            None,
+        );
+        assert_eq!(
+            outcome, "error",
+            "metadata I/O error must fail for child outcome {report_outcome}"
+        );
+        let err = error.expect("metadata I/O error must produce an error message");
+        assert!(
+            err.contains(&scratch_report.display().to_string()),
+            "error must name scratch report path: {err}"
+        );
+        assert!(
+            !err.contains("missing or empty"),
+            "metadata I/O error must not be reported as missing or empty: {err}"
+        );
+        assert!(recorded_report.is_none());
+        assert!(!store_report.exists());
+        assert_eq!(
+            std::fs::read_to_string(&report_to).unwrap(),
+            "pre-existing content\n"
+        );
+    }
+}
+
+#[test]
+fn finalize_research_report_preserves_preexisting_report_to_and_marks_store_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let missing_scratch = tmp.path().join("missing.md");
+    let store_missing = tmp.path().join("R_MISS.report.md");
+    let preexisting = tmp.path().join("preexisting.md");
+    std::fs::write(&preexisting, "keep me\n").unwrap();
+
+    let (outcome, error, recorded) = finalize_research_report(
+        &missing_scratch,
+        &store_missing,
+        Some(&preexisting),
+        None,
+        "gate_failed",
+        Some(4),
+        None,
+    );
+    assert_eq!(outcome, "gate_failed");
+    assert!(error.is_none());
+    assert!(recorded.is_none());
+    assert_eq!(std::fs::read_to_string(&preexisting).unwrap(), "keep me\n");
+
+    let scratch_ok = tmp.path().join("scratch.md");
+    std::fs::write(&scratch_ok, "# Findings\n\nBody.\n").unwrap();
+    let store_ok = tmp.path().join("R_PARTIAL.report.md");
+    let report_to_dir = tmp.path().join("dest-is-dir");
+    std::fs::create_dir_all(&report_to_dir).unwrap();
+
+    let (outcome, error, recorded) = finalize_research_report(
+        &scratch_ok,
+        &store_ok,
+        Some(&report_to_dir),
+        None,
+        "verified",
+        Some(3),
+        None,
+    );
+    assert_eq!(outcome, "error");
+    let err = error.expect("copy failure must produce error");
+    assert!(
+        err.contains(&report_to_dir.display().to_string()),
+        "error should name failing report-to destination: {err}"
+    );
+    assert_eq!(recorded.as_deref(), Some(store_ok.to_str().unwrap()));
+    let marked = std::fs::read_to_string(&store_ok).unwrap();
+    assert_eq!(
+        marked.matches("> **Not verified.**").count(),
+        1,
+        "store report must be marked exactly once: {marked}"
+    );
+    assert!(
+        marked.contains("after 3 turns"),
+        "single banner should include turns: {marked}"
+    );
+
+    let store_is_dir = tmp.path().join("store-is-dir");
+    std::fs::create_dir_all(&store_is_dir).unwrap();
+    let untouched = tmp.path().join("untouched.md");
+    std::fs::write(&untouched, "untouched\n").unwrap();
+
+    let (outcome, error, recorded) = finalize_research_report(
+        &scratch_ok,
+        &store_is_dir,
+        Some(&untouched),
+        None,
+        "verified",
+        Some(2),
+        None,
+    );
+    assert_eq!(outcome, "error");
+    assert!(error.is_some());
+    assert!(recorded.is_none());
+    assert_eq!(std::fs::read_to_string(&untouched).unwrap(), "untouched\n");
+}
+
+#[test]
+fn research_run_copy_failure_and_empty_report_leave_report_to_unmutated() {
+    let env = TestEnv::new();
+    let preexisting = env._tmp.path().join("preexisting-report.md");
+    std::fs::write(&preexisting, "prior report\n").unwrap();
+
+    let (port1, _req1) = start_recording_server(vec![read_tool_turn("call_noop", "missing.txt")]);
+    let out1 = env.blyte(
+        &[
+            "dispatch",
+            "R_NOREPORT",
+            env.task_file.to_str().unwrap(),
+            "--research",
+            "--sandbox",
+            "off",
+            "--max-turns",
+            "1",
+            "--report-to",
+            preexisting.to_str().unwrap(),
+        ],
+        Some(port1),
+    );
+    assert_eq!(
+        out1.status.code(),
+        Some(exit_code("budget_exhausted")),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out1.stdout),
+        String::from_utf8_lossy(&out1.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&preexisting).unwrap(),
+        "prior report\n"
+    );
+
+    let bad_dest = env._tmp.path().join("dest-dir");
+    std::fs::create_dir_all(&bad_dest).unwrap();
+    let (port2, _req2) = start_recording_server(vec![
+        write_tool_turn("report.md", "# Findings\n\nBody.\n"),
+        stop_turn("done"),
+    ]);
+    let out2 = env.blyte(
+        &[
+            "dispatch",
+            "R_CPFAIL",
+            env.task_file.to_str().unwrap(),
+            "--research",
+            "--sandbox",
+            "off",
+            "--report-to",
+            bad_dest.to_str().unwrap(),
+        ],
+        Some(port2),
+    );
+    assert_eq!(
+        out2.status.code(),
+        Some(exit_code("error")),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out2.stdout),
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    let summary: serde_json::Value = serde_json::from_slice(&out2.stdout).expect("JSON summary");
+    assert_eq!(summary["outcome"], "error");
+    let store_report = std::fs::read_to_string(env.run_store().join("R_CPFAIL.report.md")).unwrap();
+    assert_eq!(
+        store_report.matches("> **Not verified.**").count(),
+        1,
+        "store report should have banner exactly once: {store_report}"
+    );
 }

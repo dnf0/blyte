@@ -988,7 +988,7 @@ impl Drop for BaseWorktreeGuard {
     }
 }
 
-fn copy_report_file(
+pub(crate) fn copy_report_file(
     scratch_report: &Path,
     dest: &Path,
     research_sources: Option<&str>,
@@ -1075,7 +1075,7 @@ pub(crate) fn create_research_scratch_dir(worktree_dir: &Path) -> Result<(), Str
     Ok(())
 }
 
-pub(crate) fn copy_research_reports(
+fn copy_research_reports(
     scratch_report: &Path,
     research_report_path: &Path,
     report_to: Option<&Path>,

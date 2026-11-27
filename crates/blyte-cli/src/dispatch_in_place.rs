@@ -3,11 +3,10 @@ use std::process::Command;
 
 use crate::cli::DispatchArgs;
 use crate::dispatch::{
-    copy_research_reports, create_research_scratch_dir, exit_code, load_task_text,
-    parse_pass_report, pass_report_from_error, quick_steps, research_budgets, research_gate,
-    research_outcome, research_source_block, resolve_max_cost, run_implementer_pass,
-    unreadable_paths, wrap_research, write_start_record, write_summary_to_dir, DispatchSummary,
-    ImplementerConfig,
+    copy_report_file, create_research_scratch_dir, exit_code, load_task_text, parse_pass_report,
+    pass_report_from_error, quick_steps, research_budgets, research_gate, research_outcome,
+    research_source_block, resolve_max_cost, run_implementer_pass, unreadable_paths, wrap_research,
+    write_start_record, write_summary_to_dir, DispatchSummary, ImplementerConfig,
 };
 
 pub const NON_GIT_RESEARCH_NOTE: &str =
@@ -153,6 +152,85 @@ fn copy_after_files(root: &Path, after_dir: &Path, changed_files: &[String]) -> 
             .map_err(|e| format!("cannot copy {} to {}: {e}", src.display(), dst.display()))?;
     }
     Ok(())
+}
+
+pub fn finalize_research_report(
+    scratch_report: &Path,
+    research_report_path: &Path,
+    report_to: Option<&Path>,
+    research_sources: Option<&str>,
+    report_outcome: &str,
+    report_turns: Option<u64>,
+    pass_error: Option<String>,
+) -> (&'static str, Option<String>, Option<String>) {
+    let scratch_report_status = match std::fs::metadata(scratch_report) {
+        Ok(m) => Ok(m.len() > 0),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!(
+            "cannot inspect research report {}: {e}",
+            scratch_report.display()
+        )),
+    };
+    let mut wrote_store_report = false;
+    let mut wrote_report_to = false;
+    let (outcome, error) = match scratch_report_status {
+        Err(err_msg) => ("error", Some(err_msg)),
+        Ok(is_non_empty) => {
+            let mut copy_error = None;
+            if is_non_empty {
+                match copy_report_file(scratch_report, research_report_path, research_sources) {
+                    Ok(()) => {
+                        wrote_store_report = true;
+                        if let Some(dest) = report_to {
+                            match copy_report_file(scratch_report, dest, research_sources) {
+                                Ok(()) => wrote_report_to = true,
+                                Err(err_msg) => copy_error = Some(err_msg),
+                            }
+                        }
+                    }
+                    Err(err_msg) => copy_error = Some(err_msg),
+                }
+            }
+            if let Some(err_msg) = copy_error {
+                ("error", Some(err_msg))
+            } else {
+                let outcome = research_outcome(report_outcome);
+                if outcome == "verified" && !is_non_empty {
+                    (
+                        "error",
+                        Some(format!(
+                            "research report {} is missing or empty",
+                            scratch_report.display()
+                        )),
+                    )
+                } else {
+                    (outcome, pass_error)
+                }
+            }
+        }
+    };
+    if wrote_store_report {
+        if let Err(err) =
+            crate::provenance::mark_if_unverified(research_report_path, outcome, report_turns)
+        {
+            eprintln!(
+                "error: could not mark {} as not verified: {err}",
+                research_report_path.display()
+            );
+        }
+    }
+    if wrote_report_to {
+        if let Some(dest) = report_to {
+            if let Err(err) = crate::provenance::mark_if_unverified(dest, outcome, report_turns) {
+                eprintln!(
+                    "error: could not mark {} as not verified: {err}",
+                    dest.display()
+                );
+            }
+        }
+    }
+    let research_report = wrote_store_report.then(|| research_report_path.display().to_string());
+    (outcome, error, research_report)
 }
 
 struct FreshStartGuard {
@@ -534,75 +612,15 @@ pub fn run(args: &DispatchArgs) -> i32 {
 
     let (changed_files, outcome, error, research_report) = if args.research {
         let scratch_report = scratch_dir.join("report.md");
-        let is_non_empty = std::fs::metadata(&scratch_report)
-            .map(|m| m.len() > 0)
-            .unwrap_or(false);
-        let mut copy_error = None;
-        if is_non_empty {
-            if let Err(err_msg) = copy_research_reports(
-                &scratch_report,
-                &research_report_path,
-                args.report_to.as_deref(),
-                research_sources.as_deref(),
-            ) {
-                if research_report_path.exists() {
-                    if let Err(err) =
-                        crate::provenance::mark_if_unverified(&research_report_path, "error", None)
-                    {
-                        eprintln!(
-                            "error: could not mark {} as not verified: {err}",
-                            research_report_path.display()
-                        );
-                    }
-                }
-                copy_error = Some(err_msg);
-            }
-        }
-        let (outcome, error) = if let Some(err_msg) = copy_error {
-            ("error", Some(err_msg))
-        } else {
-            let outcome = research_outcome(&pass.report_outcome);
-            if outcome == "verified" && !is_non_empty {
-                (
-                    "error",
-                    Some(format!(
-                        "research report {} is missing or empty",
-                        scratch_report.display()
-                    )),
-                )
-            } else {
-                (outcome, pass.error)
-            }
-        };
-        if research_report_path.exists() {
-            if let Err(err) = crate::provenance::mark_if_unverified(
-                &research_report_path,
-                outcome,
-                pass.report_turns,
-            ) {
-                eprintln!(
-                    "error: could not mark {} as not verified: {err}",
-                    research_report_path.display()
-                );
-            }
-        }
-        if let Some(ref report_to) = args.report_to {
-            if report_to.exists() {
-                if let Err(err) =
-                    crate::provenance::mark_if_unverified(report_to, outcome, pass.report_turns)
-                {
-                    eprintln!(
-                        "error: could not mark {} as not verified: {err}",
-                        report_to.display()
-                    );
-                }
-            }
-        }
-        let research_report = if research_report_path.exists() {
-            Some(research_report_path.display().to_string())
-        } else {
-            None
-        };
+        let (outcome, error, research_report) = finalize_research_report(
+            &scratch_report,
+            &research_report_path,
+            args.report_to.as_deref(),
+            research_sources.as_deref(),
+            &pass.report_outcome,
+            pass.report_turns,
+            pass.error,
+        );
         (Vec::new(), outcome, error, research_report)
     } else {
         let snapshot_result =
