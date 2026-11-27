@@ -1370,7 +1370,7 @@ fn execute_unbounded(
             if let Err(e) = check_protected_write(fs, root, "write", &raw_path, &path) {
                 return ToolOutcome::err(e);
             }
-            if let Err(e) = check_in_place_lock(fs, root) {
+            if let Err(e) = check_in_place_lock(fs, root, &path) {
                 return ToolOutcome::err(e);
             }
             if let Err(e) = check_write_scope(fs, "write", &path) {
@@ -1390,7 +1390,7 @@ fn execute_unbounded(
             if let Err(e) = check_protected_write(fs, root, "edit", &raw_path, &path) {
                 return ToolOutcome::err(e);
             }
-            if let Err(e) = check_in_place_lock(fs, root) {
+            if let Err(e) = check_in_place_lock(fs, root, &path) {
                 return ToolOutcome::err(e);
             }
             if let Err(e) = check_write_scope(fs, "edit", &path) {
@@ -2133,8 +2133,15 @@ fn write_inline_task(tasks_dir: &Path, id: &str, text: &str) -> Result<PathBuf, 
     }
 }
 
-fn check_in_place_lock(fs: &dyn Fs, root: &Path) -> Result<(), String> {
+fn check_in_place_lock(fs: &dyn Fs, root: &Path, path: &Path) -> Result<(), String> {
     if !fs.is_local() || crate::sandbox::is_git_repository(root) {
+        return Ok(());
+    }
+    let root_c = fs
+        .canonicalize(root)
+        .map_err(|e| format!("workspace root unreadable: {e}"))?;
+    let real_target = resolve_real_target(fs, path)?;
+    if !real_target.starts_with(&root_c) {
         return Ok(());
     }
     let lock_path = match in_place_lock_path() {
@@ -2423,5 +2430,50 @@ mod tests {
         let err = serialize_dispatch_args(&FailingSerialize).unwrap_err();
         assert!(err.contains("serialize"), "got: {err}");
         assert!(err.contains("unsupported map key"), "got: {err}");
+    }
+
+    #[test]
+    fn check_in_place_lock_ignores_targets_outside_root() {
+        struct LockReset;
+        impl Drop for LockReset {
+            fn drop(&mut self) {
+                set_blyte_tool(None);
+                set_in_place_lock_path(None);
+            }
+        }
+        let _reset = LockReset;
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let lock_path = lock_dir.path().join("in-place.lock");
+        let fs = crate::fs::LocalFs;
+
+        set_blyte_tool(Some(lock_dir.path().join("blyte-stub")));
+        set_in_place_lock_path(None);
+
+        let outside_file = outside.path().join("scratch.txt");
+        let inside_file = root.path().join("note.txt");
+
+        assert!(check_in_place_lock(&fs, root.path(), &outside_file).is_ok());
+        let missing = check_in_place_lock(&fs, root.path(), &inside_file).unwrap_err();
+        assert!(missing.contains("lock"), "{missing}");
+
+        set_in_place_lock_path(Some(lock_path.clone()));
+        let _held = crate::folder_lock::acquire(
+            &lock_path,
+            &crate::folder_lock::Holder {
+                pid: std::process::id(),
+                kind: "run".to_string(),
+                id: "R9".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert!(check_in_place_lock(&fs, root.path(), &outside_file).is_ok());
+        let held_err = check_in_place_lock(&fs, root.path(), &inside_file).unwrap_err();
+        assert_eq!(
+            held_err,
+            "run R9 is editing this folder; wait for it to finish"
+        );
     }
 }

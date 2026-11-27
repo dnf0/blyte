@@ -11,6 +11,8 @@ use blyte_agent::shell::LocalShell;
 use blyte_agent::state::State;
 use blyte_cli::conversation_text::{
     build_with_sandbox, DEFAULT_PROCESS, REFERENCE, REFERENCE_DISPATCH_TOOL,
+    SANDBOX_OFF_NO_REPO_PARAGRAPH, SANDBOX_OFF_PARAGRAPH, SANDBOX_ON_NO_REPO_PARAGRAPH,
+    SANDBOX_ON_PARAGRAPH,
 };
 use blyte_cli::repl::{render_banner_to, ReplConfig, ReplSession};
 use blyte_provider::{Provider, ProviderError, Request, Response};
@@ -300,6 +302,13 @@ fn assembled_instructions_explain_working_without_a_git_repository() {
 #[test]
 fn assembled_instructions_for_non_repository_describe_in_place_runs_and_undo() {
     let root = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let status = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
     let xdg = tempfile::tempdir().unwrap();
     let _guard = XdgGuard::set(xdg.path());
 
@@ -324,6 +333,21 @@ fn assembled_instructions_for_non_repository_describe_in_place_runs_and_undo() {
         "{}",
         built.instructions
     );
+    assert!(
+        built.instructions.contains(SANDBOX_ON_NO_REPO_PARAGRAPH),
+        "{}",
+        built.instructions
+    );
+    assert!(
+        !built.instructions.contains(SANDBOX_ON_PARAGRAPH),
+        "{}",
+        built.instructions
+    );
+    assert!(
+        !built.instructions.contains("write only in `.wt/tasks`"),
+        "{}",
+        built.instructions
+    );
 
     let built_off = build_with_sandbox(false, Answers::Person, root.path(), false, 0).unwrap();
     assert!(
@@ -335,5 +359,45 @@ fn assembled_instructions_for_non_repository_describe_in_place_runs_and_undo() {
         !built_off.instructions.contains("there are no runs"),
         "{}",
         built_off.instructions
+    );
+    assert!(
+        built_off
+            .instructions
+            .contains(SANDBOX_OFF_NO_REPO_PARAGRAPH),
+        "{}",
+        built_off.instructions
+    );
+    assert!(
+        !built_off
+            .instructions
+            .contains(SANDBOX_ON_NO_REPO_PARAGRAPH),
+        "{}",
+        built_off.instructions
+    );
+
+    let repo_on = build_with_sandbox(false, Answers::Person, repo.path(), true, 0).unwrap();
+    assert!(
+        repo_on.instructions.contains(SANDBOX_ON_PARAGRAPH),
+        "{}",
+        repo_on.instructions
+    );
+    assert!(
+        !repo_on.instructions.contains(SANDBOX_ON_NO_REPO_PARAGRAPH),
+        "{}",
+        repo_on.instructions
+    );
+
+    let repo_off = build_with_sandbox(false, Answers::Person, repo.path(), false, 0).unwrap();
+    assert!(
+        repo_off.instructions.contains(SANDBOX_OFF_PARAGRAPH),
+        "{}",
+        repo_off.instructions
+    );
+    assert!(
+        !repo_off
+            .instructions
+            .contains(SANDBOX_OFF_NO_REPO_PARAGRAPH),
+        "{}",
+        repo_off.instructions
     );
 }

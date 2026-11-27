@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -8,9 +9,9 @@ use blyte_agent::folder_lock::{acquire, Holder};
 use blyte_agent::fs::LocalFs;
 use blyte_agent::shell::LocalShell;
 use blyte_agent::tools::{
-    execute, set_approval, set_blyte_request, set_blyte_run_store, set_blyte_started_by,
-    set_blyte_surface, set_blyte_tasks_dir, set_blyte_tool, set_in_place_lock_path,
-    set_publish_tool, set_write_scope, PublishTool, WriteScope,
+    check_write_scope, execute, set_approval, set_blyte_request, set_blyte_run_store,
+    set_blyte_started_by, set_blyte_surface, set_blyte_tasks_dir, set_blyte_tool,
+    set_in_place_lock_path, set_publish_tool, set_write_scope, PublishTool, WriteScope,
 };
 use serde_json::json;
 
@@ -317,6 +318,25 @@ fn inline_task_writes_file_and_enforces_conflicts_and_errors() {
     );
     assert!(non_dispatch.is_error, "{}", non_dispatch.content);
 
+    struct StateDirEnvGuard {
+        prev: Option<OsString>,
+    }
+    impl Drop for StateDirEnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("BLYTE_STATE_DIR", v),
+                None => std::env::remove_var("BLYTE_STATE_DIR"),
+            }
+        }
+    }
+
+    let lock_dir = tempfile::tempdir().unwrap();
+    set_in_place_lock_path(Some(lock_dir.path().join("in-place.lock")));
+    set_write_scope(Some(WriteScope {
+        allowed: Vec::new(),
+        edit_worktrees: None,
+    }));
+
     let model_write_tasks = execute(
         root.path(),
         &LocalShell,
@@ -325,7 +345,70 @@ fn inline_task_writes_file_and_enforces_conflicts_and_errors() {
         &json!({"path": tasks.path().join("T9.md").display().to_string(), "content": "nope"}),
     );
     assert!(model_write_tasks.is_error, "{}", model_write_tasks.content);
+    assert!(
+        model_write_tasks.content.contains("escapes the workspace"),
+        "{}",
+        model_write_tasks.content
+    );
     assert!(!tasks.path().join("T9.md").exists());
+
+    let scope_err = check_write_scope(&LocalFs, "write", &tasks.path().join("T9.md")).unwrap_err();
+    assert!(
+        scope_err.contains("write was not made"),
+        "expected write scope refusal, got: {scope_err}"
+    );
+    assert!(
+        scope_err.contains("outside the directories this conversation may write"),
+        "expected write scope refusal, got: {scope_err}"
+    );
+
+    let state_in_root = root.path().join("blyte-state");
+    let tasks_in_root = state_in_root.join("tasks");
+    std::fs::create_dir_all(&tasks_in_root).unwrap();
+    let prev_state_dir = std::env::var_os("BLYTE_STATE_DIR");
+    std::env::set_var("BLYTE_STATE_DIR", &state_in_root);
+    let state_guard = StateDirEnvGuard {
+        prev: prev_state_dir,
+    };
+    let protected_write = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "write",
+        &json!({"path": "blyte-state/tasks/T9.md", "content": "nope"}),
+    );
+    assert!(protected_write.is_error, "{}", protected_write.content);
+    assert!(
+        protected_write
+            .content
+            .contains("is protected (blyte's own files)"),
+        "{}",
+        protected_write.content
+    );
+    assert!(!tasks_in_root.join("T9.md").exists());
+    drop(state_guard);
+
+    let scoped_write = execute(
+        root.path(),
+        &LocalShell,
+        &LocalFs,
+        "write",
+        &json!({"path": "blyte-state/tasks/T9.md", "content": "nope"}),
+    );
+    assert!(scoped_write.is_error, "{}", scoped_write.content);
+    assert!(
+        scoped_write.content.contains("write was not made"),
+        "{}",
+        scoped_write.content
+    );
+    assert!(
+        scoped_write
+            .content
+            .contains("outside the directories this conversation may write"),
+        "{}",
+        scoped_write.content
+    );
+    assert!(!tasks_in_root.join("T9.md").exists());
 
     let bad_tasks_dir = tempfile::tempdir().unwrap();
     let blocking_file = bad_tasks_dir.path().join("not-a-dir");
