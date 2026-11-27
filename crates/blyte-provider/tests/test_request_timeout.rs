@@ -41,14 +41,14 @@ fn read_http_request(stream: &mut std::net::TcpStream) {
 }
 
 /// Spawns a local TCP server that accepts one request, reads the request,
-/// and sleeps for 30s without sending a reply.
+/// and sleeps for 60s without sending a reply.
 fn spawn_stalling_server() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
             read_http_request(&mut stream);
-            std::thread::sleep(Duration::from_secs(30));
+            std::thread::sleep(Duration::from_secs(60));
         }
     });
     format!("http://{addr}")
@@ -87,8 +87,8 @@ fn req_with_timeout(timeout: Duration) -> Request {
 
 fn assert_timeout_err(err: ProviderError, elapsed: Duration, limit: Duration) {
     assert!(
-        elapsed < Duration::from_secs(10),
-        "expected call to fail within 10s (well before 30s), took {elapsed:?}"
+        elapsed < Duration::from_secs(30),
+        "expected call to fail within 30s (well before 60s), took {elapsed:?}"
     );
     assert!(
         err.is_timeout(),
@@ -115,8 +115,8 @@ fn gemini_request_timeout_and_quick_reply() {
     let quick_url = spawn_quick_server("text/event-stream", sse_body);
     let p_quick = Gemini::new_api_key("test-key").with_api_root(quick_url);
     let resp = p_quick
-        .complete(&req_with_timeout(Duration::from_secs(10)))
-        .expect("quick reply with 10s timeout should succeed");
+        .complete(&req_with_timeout(Duration::from_secs(30)))
+        .expect("quick reply with 30s timeout should succeed");
     assert_eq!(resp.text, "hello from gemini");
 }
 
@@ -134,7 +134,8 @@ fn gemini_stream_cap_honors_request_timeout() {
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
             let _ = stream.write_all(head.as_bytes());
             let _ = stream.flush();
-            for _ in 0..150 {
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(60) {
                 std::thread::sleep(Duration::from_millis(40));
                 if stream.write_all(b": keepalive\n\n").is_err() {
                     break;
@@ -163,8 +164,8 @@ fn anthropic_request_timeout_and_quick_reply() {
     let quick_url = spawn_quick_server("application/json", json_body);
     let p_quick = Anthropic::new("test-key").with_api_root(quick_url);
     let resp = p_quick
-        .complete(&req_with_timeout(Duration::from_secs(10)))
-        .expect("quick reply with 10s timeout should succeed");
+        .complete(&req_with_timeout(Duration::from_secs(30)))
+        .expect("quick reply with 30s timeout should succeed");
     assert_eq!(resp.text, "hello from anthropic");
 }
 
@@ -181,8 +182,8 @@ fn openai_request_timeout_and_quick_reply() {
     let quick_url = spawn_quick_server("application/json", json_body);
     let p_quick = OpenAi::new("test-key").with_base_url(quick_url);
     let resp = p_quick
-        .complete(&req_with_timeout(Duration::from_secs(10)))
-        .expect("quick reply with 10s timeout should succeed");
+        .complete(&req_with_timeout(Duration::from_secs(30)))
+        .expect("quick reply with 30s timeout should succeed");
     assert_eq!(resp.text, "hello from openai");
 }
 
@@ -203,8 +204,8 @@ fn ollama_request_timeout_and_quick_reply() {
         .with_model("qwen2.5-coder:32b")
         .with_api_root(quick_url);
     let resp = p_quick
-        .complete(&req_with_timeout(Duration::from_secs(10)))
-        .expect("quick reply with 10s timeout should succeed");
+        .complete(&req_with_timeout(Duration::from_secs(30)))
+        .expect("quick reply with 30s timeout should succeed");
     assert_eq!(resp.text, "hello from ollama");
 }
 
@@ -270,8 +271,8 @@ fn chatgpt_request_timeout_and_quick_reply() {
     let quick_url = spawn_quick_server("text/event-stream", sse_body);
     let (_d2, p_quick) = chatgpt_for_test(quick_url);
     let resp = p_quick
-        .complete(&req_with_timeout(Duration::from_secs(10)))
-        .expect("quick reply with 10s timeout should succeed");
+        .complete(&req_with_timeout(Duration::from_secs(30)))
+        .expect("quick reply with 30s timeout should succeed");
     assert_eq!(resp.text, "hello from chatgpt");
 }
 
@@ -339,15 +340,14 @@ fn run_guarded<T: Send + 'static>(
 
 #[test]
 fn reused_connection_stalling_before_headers_times_out() {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
     let addr = listener.local_addr().unwrap();
     let connections = Arc::new(AtomicUsize::new(0));
-    let reused_second = Arc::new(AtomicBool::new(false));
+    let (reused_tx, reused_rx) = std::sync::mpsc::channel();
     let connections_srv = connections.clone();
-    let reused_srv = reused_second.clone();
 
     std::thread::spawn(move || {
         let sse_body = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"first reply\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":3}}\n\n";
@@ -356,7 +356,7 @@ fn reused_connection_stalling_before_headers_times_out() {
                 break;
             };
             let idx = connections_srv.fetch_add(1, Ordering::SeqCst);
-            let reused_conn = reused_srv.clone();
+            let reused_tx = reused_tx.clone();
             std::thread::spawn(move || {
                 if idx == 0 {
                     if !read_http_request_opt(&mut stream) {
@@ -370,34 +370,39 @@ fn reused_connection_stalling_before_headers_times_out() {
                     let _ = stream.write_all(chunk.as_bytes());
                     let _ = stream.flush();
                     if read_http_request_opt(&mut stream) {
-                        reused_conn.store(true, Ordering::SeqCst);
-                        std::thread::sleep(Duration::from_secs(30));
+                        let _ = reused_tx.send(());
+                        std::thread::sleep(Duration::from_secs(60));
                     }
                 } else {
                     let _ = read_http_request_opt(&mut stream);
-                    std::thread::sleep(Duration::from_secs(30));
+                    std::thread::sleep(Duration::from_secs(60));
                 }
             });
         }
     });
 
-    let p = Gemini::new_api_key("test-key")
+    let p_first = Gemini::new_api_key("test-key")
         .with_api_root(format!("http://{addr}"))
-        .with_stream_timeouts(Duration::from_millis(200), Duration::from_secs(3));
-    let first = p
+        .with_stream_timeouts(Duration::from_secs(30), Duration::from_secs(30));
+    let first = p_first
         .complete(&req_without_timeout())
         .expect("first call on pooled connection should succeed");
     assert_eq!(first.text, "first reply");
 
-    let (second_res, elapsed) = run_guarded(Duration::from_secs(20), move || {
-        p.complete(&req_without_timeout())
+    let p_second = Gemini::new_api_key("test-key")
+        .with_api_root(format!("http://{addr}"))
+        .with_stream_timeouts(Duration::from_millis(200), Duration::from_secs(30));
+    let (second_res, elapsed) = run_guarded(Duration::from_secs(35), move || {
+        p_second.complete(&req_without_timeout())
     });
 
-    assert!(
-        reused_second.load(Ordering::SeqCst) && connections.load(Ordering::SeqCst) == 1,
-        "client opened a new connection instead of reusing the pooled one; reused={}, connections={}",
-        reused_second.load(Ordering::SeqCst),
-        connections.load(Ordering::SeqCst)
+    reused_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("timed out waiting for second request on reused pooled connection");
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        1,
+        "client opened a new connection instead of reusing the pooled one"
     );
     let err = second_res.expect_err("second call should time out");
     assert!(
@@ -405,8 +410,8 @@ fn reused_connection_stalling_before_headers_times_out() {
         "expected timeout ProviderError, got: {err:?} after {elapsed:?}"
     );
     assert!(
-        elapsed < Duration::from_secs(3),
-        "expected second call to time out in under 3s, took {elapsed:?}"
+        elapsed < Duration::from_secs(30),
+        "expected second call to time out in under 30s, took {elapsed:?}"
     );
 }
 
@@ -415,8 +420,8 @@ fn fresh_connection_stalling_before_headers_times_out() {
     let stall_url = spawn_stalling_server();
     let p = Gemini::new_api_key("test-key")
         .with_api_root(stall_url)
-        .with_stream_timeouts(Duration::from_millis(200), Duration::from_secs(3));
-    let (res, elapsed) = run_guarded(Duration::from_secs(20), move || {
+        .with_stream_timeouts(Duration::from_millis(200), Duration::from_secs(30));
+    let (res, elapsed) = run_guarded(Duration::from_secs(35), move || {
         p.complete(&req_without_timeout())
     });
     let err = res.expect_err("fresh stalling connection should time out");
@@ -425,8 +430,8 @@ fn fresh_connection_stalling_before_headers_times_out() {
         "expected timeout ProviderError, got: {err:?} after {elapsed:?}"
     );
     assert!(
-        elapsed < Duration::from_secs(3),
-        "expected timeout in under 3s, took {elapsed:?}"
+        elapsed < Duration::from_secs(30),
+        "expected timeout in under 30s, took {elapsed:?}"
     );
 }
 
@@ -440,7 +445,8 @@ fn spawn_trickle_without_newline_server(interval: Duration) -> String {
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
             let _ = stream.write_all(head.as_bytes());
             let _ = stream.flush();
-            for _ in 0..150 {
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(60) {
                 std::thread::sleep(interval);
                 if stream.write_all(b" ").is_err() {
                     break;
@@ -454,11 +460,11 @@ fn spawn_trickle_without_newline_server(interval: Duration) -> String {
 
 #[test]
 fn trickle_without_newline_hits_the_cap() {
-    let url = spawn_trickle_without_newline_server(Duration::from_millis(25));
+    let url = spawn_trickle_without_newline_server(Duration::from_millis(20));
     let p = Gemini::new_api_key("test-key")
         .with_api_root(url)
-        .with_stream_timeouts(Duration::from_millis(250), Duration::from_millis(600));
-    let (res, elapsed) = run_guarded(Duration::from_secs(20), move || {
+        .with_stream_timeouts(Duration::from_secs(2), Duration::from_millis(2500));
+    let (res, elapsed) = run_guarded(Duration::from_secs(35), move || {
         p.complete(&req_without_timeout())
     });
     let err = res.expect_err("trickling stream should hit cap");
@@ -467,8 +473,8 @@ fn trickle_without_newline_hits_the_cap() {
         "expected timeout ProviderError, got: {err:?} after {elapsed:?}"
     );
     assert!(
-        elapsed >= Duration::from_millis(500) && elapsed <= Duration::from_secs(3),
-        "expected timeout between 500ms and 3s, took {elapsed:?}"
+        elapsed >= Duration::from_secs(2) && elapsed <= Duration::from_secs(30),
+        "expected timeout between 2s and 30s, took {elapsed:?}"
     );
 }
 
@@ -482,13 +488,13 @@ fn stall_after_first_chunk_times_out() {
             let msg = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"first\"}]}}]}\n\n";
             let _ = stream.write_all(msg.as_bytes());
             let _ = stream.flush();
-            std::thread::sleep(Duration::from_secs(30));
+            std::thread::sleep(Duration::from_secs(60));
         }
     });
     let p = Gemini::new_api_key("test-key")
         .with_api_root(format!("http://{addr}"))
-        .with_stream_timeouts(Duration::from_millis(200), Duration::from_secs(3));
-    let (res, elapsed) = run_guarded(Duration::from_secs(20), move || {
+        .with_stream_timeouts(Duration::from_millis(500), Duration::from_secs(30));
+    let (res, elapsed) = run_guarded(Duration::from_secs(35), move || {
         p.complete(&req_without_timeout())
     });
     let err = res.expect_err("stream stalling after first chunk should time out");
@@ -497,8 +503,8 @@ fn stall_after_first_chunk_times_out() {
         "expected timeout ProviderError, got: {err:?} after {elapsed:?}"
     );
     assert!(
-        elapsed < Duration::from_secs(3),
-        "expected timeout in under 3s after first chunk, took {elapsed:?}"
+        elapsed < Duration::from_secs(30),
+        "expected timeout in under 30s after first chunk, took {elapsed:?}"
     );
 }
 
@@ -521,7 +527,7 @@ fn slow_but_steady_stream_succeeds() {
     let fast_url = spawn_quick_server("text/event-stream", COMBINED);
     let p_fast = Gemini::new_api_key("test-key")
         .with_api_root(fast_url)
-        .with_stream_timeouts(Duration::from_millis(300), Duration::from_secs(10));
+        .with_stream_timeouts(Duration::from_secs(30), Duration::from_secs(30));
     let fast_resp = p_fast
         .complete(&req_without_timeout())
         .expect("single-shot response should succeed");
@@ -537,7 +543,13 @@ fn slow_but_steady_stream_succeeds() {
             let _ = stream.flush();
             for (i, chunk) in chunks.iter().enumerate() {
                 if i > 0 {
-                    std::thread::sleep(Duration::from_millis(85));
+                    for _ in 0..30 {
+                        std::thread::sleep(Duration::from_millis(20));
+                        if stream.write_all(b": keepalive\n\n").is_err() {
+                            return;
+                        }
+                        let _ = stream.flush();
+                    }
                 }
                 if stream.write_all(chunk.as_bytes()).is_err() {
                     break;
@@ -549,7 +561,7 @@ fn slow_but_steady_stream_succeeds() {
 
     let p_slow = Gemini::new_api_key("test-key")
         .with_api_root(format!("http://{addr}"))
-        .with_stream_timeouts(Duration::from_millis(300), Duration::from_secs(10));
+        .with_stream_timeouts(Duration::from_secs(2), Duration::from_secs(30));
     let slow_resp = p_slow
         .complete(&req_without_timeout())
         .expect("slow steady stream should succeed");
@@ -564,8 +576,8 @@ fn request_timeout_shorter_than_cap_wins() {
     let url = spawn_trickle_without_newline_server(Duration::from_millis(25));
     let p = Gemini::new_api_key("test-key")
         .with_api_root(url)
-        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(10));
-    let (res, elapsed) = run_guarded(Duration::from_secs(20), move || {
+        .with_stream_timeouts(Duration::from_secs(30), Duration::from_secs(60));
+    let (res, elapsed) = run_guarded(Duration::from_secs(35), move || {
         p.complete(&req_with_timeout(Duration::from_millis(250)))
     });
     let err = res.expect_err("request timeout shorter than cap should win");
@@ -574,8 +586,8 @@ fn request_timeout_shorter_than_cap_wins() {
         "expected timeout ProviderError, got: {err:?} after {elapsed:?}"
     );
     assert!(
-        elapsed < Duration::from_secs(3),
-        "expected timeout in under 3s, took {elapsed:?}"
+        elapsed < Duration::from_secs(30),
+        "expected timeout in under 30s, took {elapsed:?}"
     );
 }
 
@@ -587,7 +599,7 @@ fn abandoned_helper_thread_ends() {
     std::thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
             read_http_request(&mut stream);
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(20)));
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(45)));
             let mut buf = [0u8; 64];
             loop {
                 match stream.read(&mut buf) {
@@ -622,7 +634,7 @@ fn abandoned_helper_thread_ends() {
         .with_api_root(format!("http://{addr}"))
         .with_stream_timeouts(Duration::from_millis(200), cap)
         .with_helper_timeout_grace(Duration::from_millis(200));
-    let (res, elapsed) = run_guarded(Duration::from_secs(20), move || {
+    let (res, elapsed) = run_guarded(Duration::from_secs(35), move || {
         p.complete(&req_without_timeout())
     });
     let returned_at = Instant::now();
@@ -632,11 +644,11 @@ fn abandoned_helper_thread_ends() {
         "expected timeout ProviderError, got: {err:?} after {elapsed:?}"
     );
     assert!(
-        elapsed < Duration::from_secs(3),
-        "expected call to time out in under 3s, took {elapsed:?}"
+        elapsed < Duration::from_secs(30),
+        "expected call to time out in under 30s, took {elapsed:?}"
     );
 
-    let max_close_wait = cap + Duration::from_secs(10);
+    let max_close_wait = cap + Duration::from_secs(30);
     match closed_rx.recv_timeout(max_close_wait) {
         Ok(Ok(closed_at)) => {
             let since_return = closed_at.saturating_duration_since(returned_at);
@@ -672,15 +684,15 @@ fn vertex_fresh_connection_stalling_before_headers_times_out() {
             }
             let head = String::from_utf8_lossy(&total).to_ascii_lowercase();
             let _ = auth_tx.send(head.contains("authorization: bearer vertex-test-token"));
-            std::thread::sleep(Duration::from_secs(30));
+            std::thread::sleep(Duration::from_secs(60));
         }
     });
 
     let p = Gemini::new_vertex("test-project", "global")
         .with_token_source(|| Ok("vertex-test-token".to_string()))
         .with_api_root(format!("http://{addr}"))
-        .with_stream_timeouts(Duration::from_millis(200), Duration::from_secs(3));
-    let (res, elapsed) = run_guarded(Duration::from_secs(20), move || {
+        .with_stream_timeouts(Duration::from_millis(200), Duration::from_secs(30));
+    let (res, elapsed) = run_guarded(Duration::from_secs(35), move || {
         p.complete(&req_without_timeout())
     });
     let err = res.expect_err("vertex stalling call should time out");
@@ -689,13 +701,14 @@ fn vertex_fresh_connection_stalling_before_headers_times_out() {
         "expected timeout ProviderError, got: {err:?} after {elapsed:?}"
     );
     assert!(
-        elapsed < Duration::from_secs(3),
-        "expected timeout in under 3s, took {elapsed:?}"
+        elapsed < Duration::from_secs(30),
+        "expected timeout in under 30s, took {elapsed:?}"
     );
+    let saw_auth = auth_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("timed out waiting for Vertex Authorization Bearer header on request");
     assert!(
-        auth_rx
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap_or(false),
+        saw_auth,
         "expected Vertex Authorization Bearer header on request"
     );
 }

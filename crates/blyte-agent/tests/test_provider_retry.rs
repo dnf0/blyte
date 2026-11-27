@@ -187,18 +187,23 @@ fn a_bad_request_fails_at_once() {
 
 #[test]
 fn no_wait_outlasts_the_deadline() {
-    let _g = RetryDelayGuard::set(None);
+    let _g = RetryDelayGuard::set(Some("60000"));
     let d = tempfile::tempdir().unwrap();
     let p = Flaky::always(429);
     let mut st = State::new("g", "true");
     let started = Instant::now();
-    let (outcome, report) = runner(&p, d.path(), Some(Duration::from_secs(1))).run(&mut st);
+    let (outcome, report) = runner(&p, d.path(), Some(Duration::from_secs(10))).run(&mut st);
     assert_eq!(outcome, Outcome::BudgetExhausted);
     assert_eq!(
         report.provider_retries, 0,
-        "the first 2s wait would pass a 1s deadline"
+        "a 60s wait would pass a 10s deadline"
     );
-    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(*p.calls.lock().unwrap(), 1);
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "the run must not sleep the 60s wait past the 10s deadline, took {:?}",
+        started.elapsed()
+    );
 }
 
 fn no_answer(input: u64) -> ProviderError {

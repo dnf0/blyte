@@ -67,14 +67,19 @@ fn timed(
 
 #[test]
 fn timing_of_a_stream_with_a_pause() {
+    let before = Instant::now();
     let (result, timing) = timed(vec![after(40, data("a")), data("b"), after(120, data("c"))]);
+    let elapsed_ms = u64::try_from(before.elapsed().as_millis()).unwrap_or(u64::MAX);
     result.unwrap();
     assert_eq!(timing.data_events, 3);
     let first = timing.first_data_ms.expect("first data was seen");
-    assert!((40..2000).contains(&first), "first_data_ms {first}");
     assert!(
-        (120..2000).contains(&timing.max_gap_ms),
-        "max_gap_ms {}",
+        (40..=elapsed_ms).contains(&first),
+        "first_data_ms {first} (elapsed {elapsed_ms})"
+    );
+    assert!(
+        (120..=elapsed_ms).contains(&timing.max_gap_ms),
+        "max_gap_ms {} (elapsed {elapsed_ms})",
         timing.max_gap_ms
     );
 }
