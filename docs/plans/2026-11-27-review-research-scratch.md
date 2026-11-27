@@ -113,3 +113,58 @@ Run with `cargo test -p blyte --test test_session`.
 builds an `Idle` entry by hand. No fallbacks.
 
 **Commit message:** `feat(surface): each reply shows how long it took`
+
+### Task AT1: model activity moves out of the chat into an Activity tab
+
+**Depends on:** ST1 (same file). **Siblings:** none running.
+
+**Why.** In the Design view every tool call (`bash ls …  exit 0`, `read …`) and every
+`conversation model · turn N` label is drawn in the chat, so one reply that runs ten commands
+pushes the conversation off the screen. The chat should hold the conversation; what the model did
+belongs on its own screen, with only a summary in the chat.
+
+**Files:** `crates/blyte-cli/assets/surface/index.html`, `crates/blyte-cli/tests/test_surface_page.rs`.
+No server change: the page already receives every entry.
+
+**What to build.**
+
+1. A third tab button `id="mode-activity"`, text `Activity`, after `mode-design` and
+   `mode-review` in the same tab list, with the same classes and `role="tab"`. The mode becomes one
+   of `design`, `review`, `activity`; `renderModeChrome` shows exactly one of three panes and sets
+   `active` / `aria-selected` on exactly one tab. The new pane is `id="activity"`.
+2. **Activity pane.** Everything the chat drew for the model's work is drawn here instead, in
+   order, grouped under one heading per user message (the first 80 characters of the message, with
+   its time): the `conversation model · turn N` labels, tool calls with their status
+   (`exit 0`, errors, "still waiting"), and thinking, if the page draws it today. Reuse the existing
+   drawing code and classes; move, do not duplicate.
+3. **Chat (Design view) keeps only:** the user's messages; the model's text replies; approval
+   requests and their answers (the user must act on them, so they stay in the chat, exactly as
+   now); errors that end a reply; the no-repository notice; and the line under a finished reply
+   (turns, cost, time).
+4. **Summary line.** Where a reply ran at least one tool call, the chat shows one line for that
+   reply, placed before the reply's text, of class `activity-summary`:
+   `3 commands · 1 file read · 1 failed`, built by counting that reply's tool entries by tool name
+   (`bash` → commands; `read` → files read; `write`/`edit` → files changed; every other tool by its
+   own name, e.g. `2 blyte`), plus `N failed` when any had an error; parts with a count of zero are
+   left out. It is a button: clicking it switches to the Activity tab and scrolls to that reply's
+   heading. While the reply is still running the same line reads `working · <the latest tool call,
+   one line, truncated>` and updates in place.
+5. A tool name the page does not know is counted under its own name. **No fallbacks**: do not drop
+   an entry kind from both views; any entry kind the chat stops drawing must be drawn in Activity.
+
+**Tests** in `crates/blyte-cli/tests/test_surface_page.rs`, in the style already used there (read
+it first):
+
+1. `surface_page_has_an_activity_tab`: the page contains `id="mode-activity"` and `id="activity"`.
+2. `surface_page_summarises_activity_in_the_chat`: the page contains `activity-summary`.
+3. If that file has a way to run the page's script functions (for example under `node`), add a test
+   that a reply with two `bash` calls, one `read` and one failed call yields
+   `2 commands · 1 file read · 1 failed`; if it has none, keep the summary-building code in one
+   function named `activitySummaryText(entries)` and test that the page defines it.
+
+Run with `cargo test -p blyte --test test_surface_page`.
+
+**Constraints.** Existing tests pass; a test that asserts tool calls are drawn in the chat may be
+changed to assert they are drawn in Activity, and say so in the report. Touch only the two files.
+
+**Commit message:** `feat(surface): model activity has its own tab; the chat shows a summary`
