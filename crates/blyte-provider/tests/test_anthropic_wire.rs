@@ -6,7 +6,7 @@
 use std::sync::Mutex;
 
 use blyte_provider::anthropic::Anthropic;
-use blyte_provider::{Message, Provider, ProviderError, Request, ToolSpec, Usage};
+use blyte_provider::{Message, Provider, ProviderError, Request, ToolSpec, Usage, UserPart};
 use serde_json::json;
 
 /// Lock to serialize tests modifying process-wide environment variables.
@@ -308,4 +308,99 @@ fn with_model_updates_model_and_model_id() {
     let _guard = ENV_LOCK.lock().unwrap();
     let a = anthropic().with_model("claude-opus-4");
     assert_eq!(a.model_id(), "anthropic/claude-opus-4");
+}
+
+#[test]
+fn user_parts_wire_shape() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let parts = vec![
+        UserPart::Text("look".into()),
+        UserPart::Image {
+            mime_type: "image/png".into(),
+            data: std::sync::Arc::from("QUJD"),
+        },
+    ];
+    let single = anthropic().body(&Request {
+        messages: vec![Message::UserParts(parts.clone())],
+        ..Default::default()
+    });
+    assert_eq!(
+        single["messages"][0],
+        json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "QUJD"
+                    },
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ]
+        })
+    );
+
+    let followed = anthropic().body(&Request {
+        messages: vec![Message::UserParts(parts), Message::Assistant("seen".into())],
+        ..Default::default()
+    });
+    assert_eq!(
+        followed["messages"][0],
+        json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "QUJD"
+                    }
+                }
+            ]
+        })
+    );
+}
+
+#[test]
+fn consecutive_user_and_user_parts_coalesce_into_single_turn() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let b = anthropic().body(&Request {
+        messages: vec![
+            Message::User("first".into()),
+            Message::UserParts(vec![
+                UserPart::Text("look".into()),
+                UserPart::Image {
+                    mime_type: "image/png".into(),
+                    data: std::sync::Arc::from("QUJD"),
+                },
+            ]),
+        ],
+        ..Default::default()
+    });
+    let msgs = b["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(
+        msgs[0],
+        json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "first"},
+                {"type": "text", "text": "look"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "QUJD"
+                    },
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ]
+        })
+    );
 }

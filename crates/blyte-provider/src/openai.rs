@@ -14,7 +14,9 @@
 
 use serde_json::{json, Value};
 
-use crate::{Message, ModelInfo, Provider, ProviderError, Request, Response, ToolCall, Usage};
+use crate::{
+    Message, ModelInfo, Provider, ProviderError, Request, Response, ToolCall, Usage, UserPart,
+};
 
 /// OpenAI-compatible provider adapter.
 #[derive(Debug, Clone)]
@@ -154,6 +156,27 @@ impl OpenAi {
                     messages.push(json!({
                         "role": "user",
                         "content": text,
+                    }));
+                }
+                Message::UserParts(parts) => {
+                    let content: Vec<Value> = parts
+                        .iter()
+                        .map(|part| match part {
+                            UserPart::Text(text) => json!({
+                                "type": "text",
+                                "text": text,
+                            }),
+                            UserPart::Image { mime_type, data } => json!({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": format!("data:{mime_type};base64,{data}"),
+                                },
+                            }),
+                        })
+                        .collect();
+                    messages.push(json!({
+                        "role": "user",
+                        "content": content,
                     }));
                 }
                 Message::Assistant(text) => {

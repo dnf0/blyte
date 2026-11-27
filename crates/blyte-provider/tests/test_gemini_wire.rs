@@ -4,7 +4,7 @@
 //! offline so they stay in the normal test loop rather than being skipped for want of a key.
 
 use blyte_provider::gemini::Gemini;
-use blyte_provider::{Message, Request, ToolSpec, Usage};
+use blyte_provider::{Message, Request, ToolSpec, Usage, UserPart};
 use serde_json::json;
 
 fn gemini() -> Gemini {
@@ -730,4 +730,29 @@ fn parse_stream_exceeding_cap_gives_timed_out_transport_error() {
         }
         other => panic!("expected Transport, got {other:?}"),
     }
+}
+
+#[test]
+fn user_parts_wire_shape() {
+    let req = Request {
+        messages: vec![Message::UserParts(vec![
+            UserPart::Text("look".into()),
+            UserPart::Image {
+                mime_type: "image/png".into(),
+                data: std::sync::Arc::from("QUJD"),
+            },
+        ])],
+        ..Default::default()
+    };
+    let b = gemini().body(&req);
+    assert_eq!(
+        b["contents"][0],
+        json!({
+            "role": "user",
+            "parts": [
+                {"text": "look"},
+                {"inlineData": {"mimeType": "image/png", "data": "QUJD"}}
+            ]
+        })
+    );
 }

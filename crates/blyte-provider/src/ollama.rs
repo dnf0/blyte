@@ -13,7 +13,9 @@
 
 use serde_json::{json, Value};
 
-use crate::{Message, ModelInfo, Provider, ProviderError, Request, Response, ToolCall, Usage};
+use crate::{
+    Message, ModelInfo, Provider, ProviderError, Request, Response, ToolCall, Usage, UserPart,
+};
 
 /// Default model identifier when `BLYTE_MODEL` is not specified in the environment.
 const DEFAULT_MODEL: &str = "qwen2.5-coder:32b";
@@ -197,6 +199,31 @@ impl Ollama {
                         "role": "user",
                         "content": text,
                     }));
+                }
+                Message::UserParts(parts) => {
+                    let content = parts
+                        .iter()
+                        .filter_map(|p| match p {
+                            UserPart::Text(t) => Some(t.as_str()),
+                            UserPart::Image { .. } => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let images: Vec<&str> = parts
+                        .iter()
+                        .filter_map(|p| match p {
+                            UserPart::Image { data, .. } => Some(data.as_ref()),
+                            UserPart::Text(_) => None,
+                        })
+                        .collect();
+                    let mut entry = json!({
+                        "role": "user",
+                        "content": content,
+                    });
+                    if !images.is_empty() {
+                        entry["images"] = json!(images);
+                    }
+                    messages.push(entry);
                 }
                 Message::Assistant(text) => {
                     messages.push(json!({

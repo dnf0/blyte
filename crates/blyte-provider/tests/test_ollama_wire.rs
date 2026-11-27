@@ -6,7 +6,7 @@
 use std::sync::Mutex;
 
 use blyte_provider::ollama::Ollama;
-use blyte_provider::{Message, Provider, ProviderError, Request, ToolSpec, Usage};
+use blyte_provider::{Message, Provider, ProviderError, Request, ToolSpec, Usage, UserPart};
 use serde_json::json;
 
 /// Lock to serialize tests modifying process-wide environment variables.
@@ -339,4 +339,28 @@ fn builder_methods_work() {
     assert_eq!(o.model_id(), "ollama/llama3.1:8b");
     assert_eq!(o.api_root(), "https://custom.ollama.local/api");
     assert_eq!(o.api_key(), Some("custom-key"));
+}
+
+#[test]
+fn user_parts_wire_shape() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let req = Request {
+        messages: vec![Message::UserParts(vec![
+            UserPart::Text("look".into()),
+            UserPart::Image {
+                mime_type: "image/png".into(),
+                data: std::sync::Arc::from("QUJD"),
+            },
+        ])],
+        ..Default::default()
+    };
+    let b = ollama_cloud().body(&req);
+    assert_eq!(
+        b["messages"][0],
+        json!({
+            "role": "user",
+            "content": "look",
+            "images": ["QUJD"]
+        })
+    );
 }

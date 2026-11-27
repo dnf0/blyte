@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use blyte_provider::gemini::{vertex_url, Gemini};
 use blyte_provider::registry::{detect_provider_kind, ProviderKind};
-use blyte_provider::{pricing, resolve_provider, Message, Provider, ProviderError, Request, Usage};
+use blyte_provider::{
+    pricing, resolve_provider, Message, Provider, ProviderError, Request, Usage, UserPart,
+};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -234,4 +236,30 @@ fn test_vertex_from_env_custom_location() {
     );
 
     clear_vertex_env();
+}
+
+#[test]
+fn vertex_user_parts_wire_shape() {
+    let g = Gemini::new_vertex("p", "global").with_model("gemini-4-argon");
+    let req = Request {
+        messages: vec![Message::UserParts(vec![
+            UserPart::Text("look".into()),
+            UserPart::Image {
+                mime_type: "image/png".into(),
+                data: Arc::from("QUJD"),
+            },
+        ])],
+        ..Default::default()
+    };
+    let b = g.body(&req);
+    assert_eq!(
+        b["contents"][0],
+        serde_json::json!({
+            "role": "user",
+            "parts": [
+                {"text": "look"},
+                {"inlineData": {"mimeType": "image/png", "data": "QUJD"}}
+            ]
+        })
+    );
 }

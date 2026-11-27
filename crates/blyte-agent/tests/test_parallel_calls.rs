@@ -74,7 +74,7 @@ fn batched(turns: usize, body_chars: usize) -> Vec<Message> {
 fn kinds(msgs: &[Message]) -> Vec<String> {
     msgs.iter()
         .map(|m| match m {
-            Message::User(_) => "U".into(),
+            Message::User(_) | Message::UserParts(_) => "U".into(),
             Message::Assistant(_) => "A".into(),
             Message::ToolCall { id, .. } => format!("C:{id}"),
             Message::ToolResult { id, .. } => format!("R:{id}"),

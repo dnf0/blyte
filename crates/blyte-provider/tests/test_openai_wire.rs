@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use blyte_provider::openai::OpenAi;
 use blyte_provider::registry::{detect_provider_kind, ProviderKind};
-use blyte_provider::{resolve_provider, Message, ProviderError, Request, ToolSpec};
+use blyte_provider::{resolve_provider, Message, ProviderError, Request, ToolSpec, UserPart};
 use serde_json::json;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -183,4 +183,29 @@ fn prefixes_route_before_the_ollama_colon_rule() {
     let p = resolve_provider(Some("openai/gpt-5.5")).unwrap();
     assert_eq!(p.model_id(), "openai/gpt-5.5");
     clear_env();
+}
+
+#[test]
+fn user_parts_wire_shape() {
+    let req = Request {
+        messages: vec![Message::UserParts(vec![
+            UserPart::Text("look".into()),
+            UserPart::Image {
+                mime_type: "image/png".into(),
+                data: std::sync::Arc::from("QUJD"),
+            },
+        ])],
+        ..Default::default()
+    };
+    let b = provider().body(&req);
+    assert_eq!(
+        b["messages"][0],
+        json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}}
+            ]
+        })
+    );
 }
