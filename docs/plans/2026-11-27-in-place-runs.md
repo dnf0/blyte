@@ -41,8 +41,8 @@ skip.
 
 ## Order
 
-IC1, IC2 and IC3 are independent and run in parallel. IC4 (dispatch in place) needs all three.
-IC5 (review, the surface, the `blyte` tool and the prompts) needs IC4. IC4 and IC5 are outlined
+IC1, IC2 and IC3 are independent and run in parallel. IC4a (the child run) needs all three; IC4b (dispatch) needs IC4a; IC4c (research runs) needs
+IC4b. IC5 (review, the surface, the `blyte` tool and the prompts) needs IC4. IC4 and IC5 are outlined
 here and get their full task text once IC1 to IC3 have merged, against the code as it then stands.
 
 ---
@@ -245,19 +245,184 @@ final message and do not weaken the guard). No fallbacks.
 
 ---
 
-### Task IC4: dispatch in place (outline; full text after IC1 to IC3)
+### Task IC4a: a run that edits a folder in place (the child run)
 
-**Depends on:** IC1, IC2, IC3.
+**Depends on:** IC1, IC2, IC3 (all on this branch). **Siblings:** none running. IC4b (the
+`dispatch` side) comes after this task and is **not** in this worktree: do not change
+`dispatch.rs`, `wait.rs` or `clean.rs` here.
 
-`blyte dispatch` in a folder that is not a git repository: records in the run store (IC1); takes
-the folder lock for a non-research run (IC3); no worktree, branch, base commit, commits, fix round
-or combine; the run's file system is `SnapshotFs` and its shell sandbox does not list the folder
-as writable; outcome `finished` or `no_changes` without a gate; `changed_files` and `<id>.diff`
-from the manifest; the task prompt says "this folder", not "this worktree", and tells the run that
-the shell cannot change files here. `status`, `wait` and `clean` find the run store. Research runs
-start from a non-repository folder. A finished run notifies its surface (`surface_notify.rs`).
-Resumable: the manifest and saved originals are written as the run goes, and a run restarted with
-the same id continues from them.
+**Goal.** Give the child run (`blyte <prompt> --gate ...`, the process `blyte dispatch` spawns;
+`crates/blyte-cli/src/task_runner.rs`) a mode in which it edits the folder it runs in, with every
+change recorded and the shell unable to write that folder. **Why:** a folder that is not a git
+repository has no worktree to isolate a run, so the record of saved originals is the only way to
+review or undo what a run did.
+
+**Files.**
+- `crates/blyte-cli/src/cli.rs`: two hidden flags on the top-level `Cli` (next to `read_roots`,
+  `no_gate_slot`): `--snapshot-dir <DIR>` (`snapshot_dir: Option<PathBuf>`) and
+  `--snapshot-manifest <FILE>` (`snapshot_manifest: Option<PathBuf>`). Each `requires` the other;
+  both `conflicts_with` `container` and `converse`.
+- `crates/blyte-cli/src/task_runner.rs`: `TaskConfig` gains
+  `in_place: Option<InPlace>` where `pub struct InPlace { pub before_dir: PathBuf, pub manifest: PathBuf }`,
+  filled from the two flags.
+- `crates/blyte-cli/tests/test_in_place_child.rs` (new).
+- Any other place that builds a `TaskConfig` literal gets `in_place: None`.
+
+**What to build.** When `config.in_place` is `Some`:
+1. **File system.** The `Fs` the tools use is
+   `blyte_agent::snapshot_fs::SnapshotFs::new(LocalFs, config.root.clone(), before_dir, manifest)`.
+   If `new` fails, the run fails before the first model call with that error (no fallback to
+   `LocalFs`).
+2. **Shell sandbox.** `build_sandbox_for_root` returns the same profile as the `config.converse`
+   branch (`blyte_agent::sandbox::conversation_sandbox_net(root, &config.allow_read, network)`),
+   with its private `TMPDIR`: the shell can read the folder and cannot write it. If
+   `config.sandbox != "on"` or `blyte_agent::sandbox::available()` is false, the run fails before
+   the first model call with `in-place runs need the sandbox: <what is missing>`; an in-place run
+   never runs with an unsandboxed shell.
+3. **Rollback** is off whatever `--rollback` says (there is no commit to roll back to).
+4. **Outcome with no gate.** With an empty gate the runner returns `Outcome::Finished`
+   (`crates/blyte-agent/src/run.rs`). Make sure the report file written by `--report` then carries
+   the outcome string `finished` (find how the report maps outcomes today; if `Finished` already
+   maps to `finished`, change nothing and say so in your final message).
+5. Nothing else changes: turn and time budgets, the gate when one is given, the log.
+
+The write guard from IC2 (`write_guard::protected_write`) already applies to these runs through
+`tools.rs`; do not add a second check.
+
+**Tests** (`crates/blyte-cli/tests/test_in_place_child.rs`; use the scripted-model approach the
+existing child-run tests use, for example `tests/test_report_timing.rs`; run with
+`cargo test -p blyte --test test_in_place_child`):
+- a run whose scripted model overwrites `a.txt` and creates `sub/b.txt` with the write tool:
+  both files have the new content, `<before_dir>/a.txt` holds the old content, the manifest lists
+  `a.txt` with `existed: true` and `sub/b.txt` with `existed: false`, and the report's outcome is
+  `finished`;
+- a run whose scripted model runs `echo x > a.txt` in the shell: `a.txt` is unchanged and the
+  manifest is empty (skip this test, with a printed reason, only where
+  `blyte_agent::sandbox::available()` is false);
+- with `--sandbox off` and the two flags: the process exits non-zero and its error contains
+  `in-place runs need the sandbox`, and no model call was made;
+- `--snapshot-dir` without `--snapshot-manifest` is a usage error; so is either with `--converse`;
+- a second run with the same `--snapshot-dir` and `--snapshot-manifest` that overwrites `a.txt`
+  again leaves `<before_dir>/a.txt` holding the content from before the *first* run (resumable).
+
+**Constraints.** No fallbacks: every missing or failing piece is an error that names it.
+Resumable: nothing is held in memory until the end; the manifest and saved originals are written
+as the run goes (IC3 does this; do not buffer). Existing tests pass unmodified; if one cannot,
+stop and report it instead of editing it. No home-directory paths in code or tests.
+
+**Commit message:** `feat(run): a run can edit its folder in place with every change recorded`
+
+### Task IC4b: `blyte dispatch` in a folder that is not a git repository
+
+**Depends on:** IC4a. **Siblings:** none running. IC5 (review, undo, the surface, the `blyte`
+tool, prompts) and IC4c (research runs) come later and are **not** in this worktree: do not
+change `queue_actions.rs`, `serve.rs`, `clean.rs`, `surface_notify.rs`, the agent crate or any
+asset.
+
+**Goal.** `blyte dispatch <id> <task.md>` works when the current directory is not inside a git
+repository: the run edits that folder in place, one run at a time, and its records live in the
+folder's run store. `blyte status <id>` and `blyte wait` find such a run. **Why:** the surface
+can then hand work off in any folder instead of doing everything in the chat.
+
+**Files.**
+- `crates/blyte-cli/src/dispatch_in_place.rs` (new) and its `mod` line.
+- `crates/blyte-cli/src/dispatch.rs`: only (a) the branch at the top of `run_dispatch`, (b)
+  `exit_code`, (c) making existing private helpers `pub(crate)` so the new module can call them
+  (`run_implementer_pass`, `ImplementerConfig`, the summary writer, the task-text loader for
+  `--plan`/`--plan-task`), (d) `run_status`.
+- `crates/blyte-cli/src/wait.rs`.
+- `crates/blyte-cli/tests/test_dispatch_in_place.rs` (new).
+
+**What to build.**
+
+1. **The branch.** In `run_dispatch`, when `git rev-parse --show-toplevel` runs and exits
+   non-zero, call `crate::dispatch_in_place::run(args)` and return its code, instead of printing
+   `error: not a git repository`. `git` missing stays the error it is today. Inside a git
+   repository nothing changes.
+
+2. **`pub fn records_dir_for(cwd: &Path) -> Result<PathBuf, String>`** in the new module: inside
+   a git repository, `<main checkout>/.wt` (from `crate::clean::find_repo_root`); otherwise
+   `crate::surface_dir::run_store(&state_dir, &canonical cwd)`, with the state directory from
+   `crate::surface_registry::state_dir()`. An unresolvable state directory is an error.
+   `run_status` and `wait.rs` use it in place of their own `find_repo_root()` + `.wt`.
+
+3. **`pub fn run(args: &DispatchArgs) -> i32`**, in this order. Every refusal prints
+   `error: <reason>` to stderr and returns 2.
+   - Root is the canonical current directory. Refuse `--research` with
+     `research runs in a folder that is not a git repository are not supported yet`. Refuse
+     `--base` other than its default `HEAD` with `--base needs a git repository`.
+   - Store: `run_store`, created if absent. Records are `<store>/<id>.task.md`, `.start.json`,
+     `.log`, `.report.json`, `.json`, `.changes.json`, `.diff` and the directory `<store>/<id>.before/`.
+   - If `<store>/<id>.json` exists: refuse with `run <id> has already finished here; use a new id`.
+     If `<store>/<id>.start.json` exists without it, this is a restart of an interrupted run:
+     carry on with the same records (the manifest and saved originals are kept; the log is
+     appended to).
+   - Lock: `blyte_agent::folder_lock::acquire(&in_place_lock_path, &Holder { pid, kind: "run", id })`.
+     On failure refuse with the lock's error, which names the holder. Hold it until the summary
+     is written.
+   - Gate: `--gate` when given; otherwise the `[dispatch].gate` of a `blyte.toml` in the root when
+     that file exists; otherwise no gate (empty). A `blyte.toml` that exists and does not parse is
+     an error. No comment step, base check, setup command, fix round, model review, passed-tree
+     record or background clean.
+   - Task text: as today (`<task.md>` or `--plan`/`--plan-task`), wrapped with in-place rules in
+     place of `DISPATCH_RULES`. The rules say: you are working directly in the user's folder, not
+     a copy; change files only with the write and edit tools, because shell commands cannot write
+     this folder; there is no git here, so do not commit; change only what the task needs; finish
+     with a short report of what you changed.
+   - Start record `<id>.start.json`: the fields an ordinary run writes, with `"in_place": true`,
+     `"worktree"` = the root, `"branch": ""`, `"base": null`, `"base_sha": null`.
+   - Child: `run_implementer_pass` with the root as its working directory and
+     `--snapshot-dir <store>/<id>.before --snapshot-manifest <store>/<id>.changes.json --rollback=false`.
+   - After the child: `changed_files` from
+     `blyte_agent::snapshot_fs::changed_files(root, before_dir, manifest)`; write
+     `blyte_agent::snapshot_fs::unified_diff(...)` to `<store>/<id>.diff`. Either failing is an
+     `error` outcome whose `error` field carries the reason.
+   - Outcome, from the child report's outcome and `changed_files`:
+
+     | report | gate | files changed | outcome |
+     |---|---|---|---|
+     | `finished` | none | yes | `finished` |
+     | `finished` | none | no | `no_changes` |
+     | `verified` | given | yes | `verified` |
+     | `verified` | given | no | `no_changes` |
+     | `gate_failed`, `budget_exhausted`, `error` | any | any | the same |
+     | anything else | any | any | `error`, naming the unexpected value |
+
+     `exit_code("finished")` is 0.
+   - Summary `<id>.json`: a `DispatchSummary` with `worktree` = the root, `branch` = `""`,
+     `commits` empty, `changed_files` as above, `gate_source` = `"flag"`, `"config"` or `"none"`
+     (use the existing strings for the first two), printed to stdout as today.
+   - Do not call `surface_notify` (IC5 does that once it can find a non-repository surface).
+
+**Tests** (`crates/blyte-cli/tests/test_dispatch_in_place.rs`; scripted model as in
+`tests/test_dispatch_research.rs`; every test sets `BLYTE_STATE_DIR` to its own temporary
+directory and runs in its own temporary folder with no `.git`; run with
+`cargo test -p blyte --test test_dispatch_in_place`):
+- a run that overwrites `a.txt`: exit 0, summary outcome `finished`, `changed_files == ["a.txt"]`,
+  `branch == ""`, `<store>/T1.diff` contains both the old and the new line, and the folder
+  contains no `.wt` directory and no file the run did not write;
+- a run that changes nothing: outcome `no_changes`, exit 4;
+- `--gate 'test -f made.txt'` with a model that creates `made.txt`: outcome `verified`;
+- a second dispatch while the lock is held by a live process (take the lock in the test with
+  `folder_lock::acquire`): exit 2, stderr names the holder's id, and no start record is written;
+- the same id after it finished: exit 2, `already finished here`;
+- `--research`: exit 2 with the message above; `--base main`: exit 2;
+- `blyte status T1` in that folder after the run prints `outcome: finished`;
+- `blyte wait T1` in that folder prints the finished line for `T1`;
+- in a git repository, `records_dir_for` returns `<root>/.wt` (and the existing dispatch tests
+  still pass unmodified).
+
+**Constraints.** No fallbacks. Resumable, as described under "a restart of an interrupted run".
+Existing tests pass unmodified; if one cannot, stop and report it instead of editing it. No
+home-directory paths in code or tests.
+
+**Commit message:** `feat(dispatch): dispatch runs in place in a folder that is not a git repository`
+
+### Task IC4c: research runs in a folder that is not a git repository (outline)
+
+**Depends on:** IC4b. The scratch folder goes in the run store, the run takes no folder lock, and
+the quote and claim checks list the folder's files without `git ls-files`. Written in full once
+IC4b has merged.
 
 ### Task IC5: review, the surface, the `blyte` tool and the prompts (outline)
 
