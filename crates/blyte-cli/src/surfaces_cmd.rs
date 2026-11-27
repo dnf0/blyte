@@ -92,6 +92,63 @@ pub fn run_surfaces(dir: &Path, json: bool, out: &mut dyn Write, err: &mut dyn W
     0
 }
 
+pub fn surface_url(entry: &RegistryEntry) -> Result<String, String> {
+    let token_path = blyte_agent::sandbox::surface_token_path_for_id(&entry.id)?;
+    let raw_token = std::fs::read_to_string(&token_path).map_err(|_| {
+        format!(
+            "surface {} has no usable token at {}",
+            entry.name,
+            token_path.display()
+        )
+    })?;
+    let token = raw_token.trim();
+    if token.is_empty() || token.contains(['\n', '\r']) {
+        return Err(format!(
+            "surface {} has no usable token at {}",
+            entry.name,
+            token_path.display()
+        ));
+    }
+    Ok(format!("http://127.0.0.1:{}/#token={token}", entry.port))
+}
+
+pub fn surfaces_payload(
+    registry_dir: &Path,
+    current_id: &str,
+) -> Result<serde_json::Value, String> {
+    let mut entries = live_entries(registry_dir)?;
+    entries.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| a.started_at.cmp(&b.started_at))
+    });
+    if !entries.iter().any(|entry| entry.id == current_id) {
+        return Err(format!(
+            "current surface {current_id} is not in the surface registry"
+        ));
+    }
+    let surfaces: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|entry| {
+            let (url, error) = match surface_url(entry) {
+                Ok(url) => (Some(url), None),
+                Err(err) => (None, Some(err)),
+            };
+            serde_json::json!({
+                "id": entry.id,
+                "name": entry.name,
+                "root": entry.root.to_string_lossy(),
+                "branch": entry.branch,
+                "doing": entry.doing,
+                "current": entry.id == current_id,
+                "url": url,
+                "error": error,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({ "surfaces": surfaces }))
+}
+
 pub fn run_open(
     dir: &Path,
     name: &str,
@@ -107,39 +164,14 @@ pub fn run_open(
         }
     };
 
-    let token_path = match blyte_agent::sandbox::surface_token_path_for_id(&entry.id) {
-        Ok(path) => path,
+    let url = match surface_url(&entry) {
+        Ok(url) => url,
         Err(e) => {
             let _ = writeln!(err, "blyte: {e}");
             return 1;
         }
     };
 
-    let raw_token = match std::fs::read_to_string(&token_path) {
-        Ok(text) => text,
-        Err(_) => {
-            let _ = writeln!(
-                err,
-                "blyte: surface {} has no usable token at {}",
-                entry.name,
-                token_path.display()
-            );
-            return 1;
-        }
-    };
-
-    let token = raw_token.trim();
-    if token.is_empty() || token.contains(['\n', '\r']) {
-        let _ = writeln!(
-            err,
-            "blyte: surface {} has no usable token at {}",
-            entry.name,
-            token_path.display()
-        );
-        return 1;
-    }
-
-    let url = format!("http://127.0.0.1:{}/#token={token}", entry.port);
     opener(&url);
     let _ = writeln!(out, "blyte: opened surface {}", entry.name);
     0

@@ -148,6 +148,17 @@ fn parse_json_object(body: &[u8]) -> Result<serde_json::Map<String, serde_json::
         .ok_or_else(|| json_error(400, "request body must be a JSON object"))
 }
 
+fn handle_surfaces(surface: &Surface) -> Response {
+    let registry_dir = match crate::surface_registry::registry_dir() {
+        Ok(dir) => dir,
+        Err(e) => return json_error(500, e),
+    };
+    match crate::surfaces_cmd::surfaces_payload(&registry_dir, &surface.surface_id) {
+        Ok(payload) => Response::json(200, &payload),
+        Err(e) => json_error(500, e),
+    }
+}
+
 fn health_response(surface: &Surface) -> Response {
     Response::json(
         200,
@@ -994,6 +1005,12 @@ pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
     }
 
     match req.path.as_str() {
+        "/api/surfaces" => {
+            if req.method != "GET" {
+                return method_not_allowed(req);
+            }
+            handle_surfaces(surface)
+        }
         "/api/session/messages" => {
             if req.method != "POST" {
                 return method_not_allowed(req);

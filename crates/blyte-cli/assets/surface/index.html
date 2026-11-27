@@ -273,6 +273,167 @@
       background: var(--color-page);
     }
 
+    .surface-switcher-wrap {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    button.repo-name {
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      line-height: 1.3;
+    }
+
+    button.repo-name::after {
+      content: "▾";
+      font-size: 10px;
+      color: var(--color-muted);
+    }
+
+    button.repo-name:hover,
+    button.repo-name[aria-expanded="true"] {
+      color: var(--color-strong);
+      border-color: var(--brand-rust);
+    }
+
+    .surface-switcher-list {
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 0;
+      z-index: 20;
+      min-width: 320px;
+      max-width: min(460px, calc(100vw - 32px));
+      max-height: 70vh;
+      overflow-y: auto;
+      background: var(--color-card);
+      border: 1px solid var(--color-line-dark);
+      border-radius: 4px;
+      padding: 4px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .surface-switcher-list[hidden] {
+      display: none;
+    }
+
+    .surface-switcher-row {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      width: 100%;
+      text-align: left;
+      padding: 7px 9px;
+      border-radius: 4px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--color-text);
+    }
+
+    button.surface-switcher-item {
+      cursor: pointer;
+    }
+
+    button.surface-switcher-item:hover,
+    button.surface-switcher-item:focus-visible {
+      background: var(--color-page);
+      border-color: var(--brand-rust);
+    }
+
+    .surface-switcher-current {
+      background: var(--color-page);
+      border-color: var(--color-line);
+    }
+
+    button.surface-switcher-disabled {
+      opacity: 0.65;
+      cursor: default;
+    }
+
+    .surface-switcher-head {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .surface-switcher-name {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--color-strong);
+    }
+
+    .surface-switcher-branch {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+      padding: 1px 5px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line);
+      background: var(--color-page);
+    }
+
+    .surface-switcher-badge {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 1px 5px;
+      border-radius: 4px;
+      background: var(--brand-rust-soft);
+      border: 1px solid var(--brand-rust);
+      color: var(--brand-rust);
+    }
+
+    .surface-switcher-root {
+      font-size: 11px;
+      color: var(--color-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      direction: rtl;
+      text-align: left;
+    }
+
+    .surface-switcher-doing {
+      font-size: 12px;
+      color: var(--color-text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .surface-switcher-row-error {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--status-red);
+      word-break: break-word;
+    }
+
+    .surface-switcher-empty,
+    .surface-switcher-loading {
+      padding: 8px 9px;
+      font-size: 12px;
+      color: var(--color-muted);
+    }
+
+    .surface-switcher-error {
+      padding: 8px 9px;
+      border-radius: 4px;
+      background: var(--fail-soft);
+      border: 1px solid var(--fail);
+      color: var(--color-strong);
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      word-break: break-word;
+    }
+
     .no-repo-badge {
       font-family: var(--font-mono);
       font-size: 11px;
@@ -2675,7 +2836,10 @@
             </svg>
             <span class="brand-word">blyte</span>
           </span>
-          <span id="repo-name" class="repo-name"></span>
+          <div id="surface-switcher-wrap" class="surface-switcher-wrap">
+            <button id="surface-switcher" class="repo-name" type="button" aria-haspopup="listbox" aria-expanded="false"></button>
+            <div id="surface-switcher-list" class="surface-switcher-list" role="listbox" aria-label="Running surfaces" hidden></div>
+          </div>
           <span id="no-repo-badge" class="no-repo-badge" hidden></span>
           <span id="working-indicator" class="working-pill" hidden>working</span>
         </div>
@@ -2772,6 +2936,8 @@
     let sessionBusy = false;
     let lastSeqSeen = 0;
     let initialEventsLoaded = false;
+    let surfaceSwitcherOpen = false;
+    let surfaceSwitcherReqId = 0;
 
     const seenSeqs = new Set();
     const logEntries = [];
@@ -3350,12 +3516,179 @@
       updateReviewTabCounter(state.undecidedArrived.length);
     }
 
+    function formatSurfaceTitle(surfaceName, busy) {
+      return busy ? surfaceName + ": working - blyte" : surfaceName + " - blyte";
+    }
+
+    function updateDocumentTitle(surfaceName) {
+      if (typeof document === "undefined") return;
+      const name = typeof surfaceName === "string" && surfaceName
+        ? surfaceName
+        : (sessionState && typeof sessionState.surface_name === "string" ? sessionState.surface_name : "");
+      if (name) {
+        document.title = formatSurfaceTitle(name, sessionBusy);
+      }
+    }
+
     function updateWorkingState() {
       if (typeof document === "undefined") return;
       const workingEl = document.getElementById("working-indicator");
       if (workingEl) workingEl.hidden = !sessionBusy;
       const sendBtn = document.getElementById("conversation-send");
       if (sendBtn) sendBtn.textContent = sessionBusy ? "Queue" : "Send";
+      updateDocumentTitle();
+    }
+
+    function validateSurfaces(data) {
+      if (!isPlainObject(data) || !Array.isArray(data.surfaces)) {
+        return "/api/surfaces: missing surfaces array";
+      }
+      for (let i = 0; i < data.surfaces.length; i++) {
+        const s = data.surfaces[i];
+        if (!isPlainObject(s)) {
+          return "/api/surfaces: surfaces[" + i + "] must be an object";
+        }
+        for (const f of ["id", "name", "root", "doing"]) {
+          if (typeof s[f] !== "string") {
+            return "/api/surfaces: surfaces[" + i + "] missing or invalid field " + f;
+          }
+        }
+        if (typeof s.current !== "boolean") {
+          return "/api/surfaces: surfaces[" + i + "] missing or invalid field current";
+        }
+        for (const f of ["branch", "url", "error"]) {
+          if (!hasOwn(s, f) || (s[f] !== null && typeof s[f] !== "string")) {
+            return "/api/surfaces: surfaces[" + i + "] missing or invalid field " + f;
+          }
+        }
+      }
+      return null;
+    }
+
+    function renderSurfaceList(surfaces) {
+      const list = Array.isArray(surfaces) ? surfaces : [];
+      const rows = list.map(s => {
+        const isCurrent = Boolean(s && s.current);
+        const hasUrl = Boolean(s && typeof s.url === "string" && s.url.length > 0);
+        const idAttr = escapeHtml(s && s.id != null ? String(s.id) : "");
+        const nameHtml = '<span class="surface-switcher-name">' + escapeHtml(s && s.name != null ? String(s.name) : "") + '</span>';
+        const branchHtml = s && s.branch !== null && s.branch !== undefined
+          ? '<span class="surface-switcher-branch">' + escapeHtml(String(s.branch)) + '</span>'
+          : '';
+        const badgeHtml = isCurrent ? '<span class="surface-switcher-badge">current</span>' : '';
+        const rootHtml = '<div class="surface-switcher-root mono" title="' + escapeHtml(s && s.root != null ? String(s.root) : "") + '">&lrm;' + escapeHtml(s && s.root != null ? String(s.root) : "") + '</div>';
+        const doingHtml = '<div class="surface-switcher-doing">' + escapeHtml(s && s.doing != null ? String(s.doing) : "") + '</div>';
+        const errorHtml = !hasUrl
+          ? '<div class="surface-switcher-row-error">' + escapeHtml(s && s.error != null ? String(s.error) : "surface unavailable") + '</div>'
+          : '';
+        const inner =
+          '<div class="surface-switcher-head">' + nameHtml + branchHtml + badgeHtml + '</div>' +
+          rootHtml +
+          doingHtml +
+          errorHtml;
+        if (isCurrent) {
+          return '<div class="surface-switcher-row surface-switcher-current" role="option" aria-selected="true" aria-current="true" data-surface-id="' + idAttr + '">' +
+            inner +
+            '</div>';
+        }
+        if (!hasUrl) {
+          return '<button type="button" class="surface-switcher-row surface-switcher-disabled" role="option" aria-selected="false" aria-disabled="true" disabled data-surface-id="' + idAttr + '">' +
+            inner +
+            '</button>';
+        }
+        return '<button type="button" class="surface-switcher-row surface-switcher-item" role="option" aria-selected="false" data-surface-id="' + idAttr + '" data-surface-url="' + escapeHtml(s.url) + '">' +
+          inner +
+          '</button>';
+      });
+      if (!list.some(s => !s || !s.current)) {
+        rows.push('<div class="surface-switcher-empty">No other surfaces are running. Start one by running blyte in another folder.</div>');
+      }
+      return rows.join("");
+    }
+
+    function renderSurfaceListError(message) {
+      return '<div class="surface-switcher-error" role="alert">' + escapeHtml(message) + '</div>';
+    }
+
+    function closeSurfaceSwitcher() {
+      surfaceSwitcherOpen = false;
+      surfaceSwitcherReqId += 1;
+      if (typeof document === "undefined") return;
+      const btn = document.getElementById("surface-switcher");
+      if (btn) btn.setAttribute("aria-expanded", "false");
+      const list = document.getElementById("surface-switcher-list");
+      if (list) list.hidden = true;
+    }
+
+    function navigateToSurface(url) {
+      closeSurfaceSwitcher();
+      if (typeof window === "undefined" || !window.location) return;
+      let sameOrigin = false;
+      try {
+        const currentOrigin = window.location.origin;
+        const nextOrigin = new URL(url, window.location.href).origin;
+        sameOrigin = Boolean(currentOrigin) && nextOrigin === currentOrigin;
+      } catch (_) {
+        sameOrigin = false;
+      }
+      window.location.href = url;
+      if (sameOrigin && typeof window.location.reload === "function") {
+        window.location.reload();
+      }
+    }
+
+    async function openSurfaceSwitcher() {
+      if (typeof document === "undefined") return;
+      const btn = document.getElementById("surface-switcher");
+      const list = document.getElementById("surface-switcher-list");
+      if (!btn || !list) return;
+      surfaceSwitcherOpen = true;
+      const reqId = ++surfaceSwitcherReqId;
+      btn.setAttribute("aria-expanded", "true");
+      list.innerHTML = '<div class="surface-switcher-loading">Loading surfaces...</div>';
+      list.hidden = false;
+      const headers = {};
+      if (surfaceToken) {
+        headers[TOKEN_HEADER] = surfaceToken;
+      }
+      let res;
+      try {
+        res = await fetch("/api/surfaces", { headers });
+      } catch (err) {
+        if (!surfaceSwitcherOpen || reqId !== surfaceSwitcherReqId) return;
+        list.innerHTML = renderSurfaceListError(
+          "/api/surfaces failed: " + (err && err.message ? err.message : String(err))
+        );
+        return;
+      }
+      if (!surfaceSwitcherOpen || reqId !== surfaceSwitcherReqId) return;
+      if (res.status === 403) {
+        stopAllPolling();
+        clearSurfaceToken();
+      }
+      if (!res.ok) {
+        const errMsg = await parseErrorPayload(res, "/api/surfaces");
+        if (!surfaceSwitcherOpen || reqId !== surfaceSwitcherReqId) return;
+        list.innerHTML = renderSurfaceListError(errMsg);
+        return;
+      }
+      let data;
+      try {
+        data = await res.json();
+      } catch (err) {
+        if (!surfaceSwitcherOpen || reqId !== surfaceSwitcherReqId) return;
+        list.innerHTML = renderSurfaceListError(
+          "/api/surfaces returned invalid JSON: " + (err && err.message ? err.message : String(err))
+        );
+        return;
+      }
+      if (!surfaceSwitcherOpen || reqId !== surfaceSwitcherReqId) return;
+      const err = validateSurfaces(data);
+      if (err) {
+        list.innerHTML = renderSurfaceListError(err);
+        return;
+      }
+      list.innerHTML = renderSurfaceList(data.surfaces);
     }
 
     function renderModelsSelect() {
@@ -3387,6 +3720,8 @@
         sessionBusy = data.busy;
       }
       if (typeof document === "undefined") return;
+      const switcherEl = document.getElementById("surface-switcher");
+      if (switcherEl) switcherEl.textContent = data.repo;
       const repoEl = document.getElementById("repo-name");
       if (repoEl) repoEl.textContent = data.repo;
       const noRepoEl = document.getElementById("no-repo-badge");
@@ -3396,7 +3731,7 @@
         noRepoEl.hidden = !notice;
       }
       if (typeof data.surface_name === "string" && data.surface_name) {
-        document.title = data.surface_name + " - blyte";
+        updateDocumentTitle(data.surface_name);
       }
       renderModelsSelect();
       const effortEl = document.getElementById("effort-select");
@@ -7282,7 +7617,45 @@
         }
       });
 
+      const switcherBtn = document.getElementById("surface-switcher");
+      if (switcherBtn) {
+        switcherBtn.addEventListener("click", () => {
+          if (surfaceSwitcherOpen) {
+            closeSurfaceSwitcher();
+          } else {
+            openSurfaceSwitcher();
+          }
+        });
+      }
+
+      const switcherList = document.getElementById("surface-switcher-list");
+      if (switcherList) {
+        switcherList.addEventListener("click", (e) => {
+          const item = e.target.closest("[data-surface-url]");
+          if (item && !item.disabled && item.dataset.surfaceUrl) {
+            navigateToSurface(item.dataset.surfaceUrl);
+          }
+        });
+      }
+
+      document.addEventListener("click", (e) => {
+        if (!surfaceSwitcherOpen) return;
+        const wrap = document.getElementById("surface-switcher-wrap");
+        if (wrap && !wrap.contains(e.target)) {
+          closeSurfaceSwitcher();
+        }
+      });
+
       document.addEventListener("keydown", (e) => {
+        if (surfaceSwitcherOpen && e.key === "Escape") {
+          e.preventDefault();
+          closeSurfaceSwitcher();
+          const btn = document.getElementById("surface-switcher");
+          if (btn && typeof btn.focus === "function") {
+            btn.focus();
+          }
+          return;
+        }
         if (openReportKey !== null && e.key === "Escape") {
           e.preventDefault();
           closeReport();

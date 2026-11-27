@@ -3088,3 +3088,165 @@ const assert = require("node:assert");
 "#;
     run_surface_script(harness);
 }
+
+#[test]
+fn surface_switcher_renders_list_escapes_values_and_formats_title() {
+    let html = load_surface_html();
+    assert!(
+        html.contains(
+            r#"<button id="surface-switcher" class="repo-name" type="button" aria-haspopup="listbox" aria-expanded="false">"#
+        ),
+        "surface page must render #surface-switcher button with listbox aria attributes"
+    );
+
+    let harness = r#"
+const assert = require("node:assert");
+
+assert.strictEqual(formatSurfaceTitle("x", true), "x: working - blyte");
+assert.strictEqual(formatSurfaceTitle("x", false), "x - blyte");
+
+const multiHtml = renderSurfaceList([
+  {
+    id: "s1",
+    name: "alpha",
+    root: "/tmp/alpha",
+    branch: "main",
+    doing: "idle",
+    current: true,
+    url: "http://127.0.0.1:4100/#token=t1",
+    error: null,
+  },
+  {
+    id: "s2",
+    name: "beta<script>alert(1)</script>",
+    root: "/tmp/beta",
+    branch: null,
+    doing: "fixing tests",
+    current: false,
+    url: "http://127.0.0.1:4101/#token=t2",
+    error: null,
+  },
+  {
+    id: "s3",
+    name: "gamma",
+    root: "/tmp/gamma",
+    branch: "feat/x",
+    doing: "working",
+    current: false,
+    url: null,
+    error: "surface gamma has no usable token at /tmp/tok",
+  },
+]);
+
+assert.ok(multiHtml.includes("surface-switcher-current"), multiHtml);
+assert.ok(multiHtml.includes('aria-current="true"'), multiHtml);
+assert.ok(!multiHtml.includes('data-surface-url="http://127.0.0.1:4100/#token=t1"'), multiHtml);
+assert.ok(multiHtml.includes('data-surface-url="http://127.0.0.1:4101/#token=t2"'), multiHtml);
+assert.ok(!multiHtml.includes("<script>"), multiHtml);
+assert.ok(multiHtml.includes("beta&lt;script&gt;alert(1)&lt;/script&gt;"), multiHtml);
+assert.ok(multiHtml.includes("surface-switcher-disabled"), multiHtml);
+assert.ok(multiHtml.includes(" disabled "), multiHtml);
+assert.ok(multiHtml.includes("surface gamma has no usable token at /tmp/tok"), multiHtml);
+assert.ok(!multiHtml.includes("No other surfaces are running."), multiHtml);
+
+const singleHtml = renderSurfaceList([
+  {
+    id: "s1",
+    name: "solo",
+    root: "/tmp/solo",
+    branch: "main",
+    doing: "idle",
+    current: true,
+    url: "http://127.0.0.1:4100/#token=t1",
+    error: null,
+  },
+]);
+assert.ok(
+  singleHtml.includes("No other surfaces are running. Start one by running blyte in another folder."),
+  singleHtml
+);
+assert.ok(singleHtml.includes("surface-switcher-current"), singleHtml);
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn surface_switcher_fetch_errors_navigation_and_working_title_updates() {
+    let harness = format!(
+        "{}\n{}",
+        review_queue_test_prelude(),
+        r#"
+(async () => {
+  applySessionState({
+    session_id: "sess-1",
+    surface_name: "demo",
+    repo: "demo",
+    repository: true,
+    started_at: 1700000000,
+    model: "gemini-4-neon",
+    effort: null,
+    effort_supported: false,
+    busy: false,
+    queued: 0,
+    last_seq: 0,
+  }, true);
+  assert.strictEqual(document.title, "demo - blyte");
+  assert.strictEqual(elements["surface-switcher"].textContent, "demo");
+
+  sessionBusy = true;
+  updateWorkingState();
+  assert.strictEqual(document.title, "demo: working - blyte");
+
+  sessionBusy = false;
+  updateWorkingState();
+  assert.strictEqual(document.title, "demo - blyte");
+
+  surfaceToken = "tok-current";
+  const calls = [];
+  global.fetch = async (url, opts) => {
+    calls.push({ url, opts });
+    return {
+      ok: false,
+      status: 500,
+      async json() { return { error: "registry unreadable" }; },
+      async text() { return '{"error":"registry unreadable"}'; },
+    };
+  };
+
+  await openSurfaceSwitcher();
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(calls[0].url, "/api/surfaces");
+  assert.strictEqual(calls[0].opts.headers["X-Blyte-Token"], "tok-current");
+  assert.strictEqual(elements["surface-switcher"].getAttribute("aria-expanded"), "true");
+  assert.strictEqual(elements["surface-switcher-list"].hidden, false);
+  assert.ok(
+    elements["surface-switcher-list"].innerHTML.includes("registry unreadable"),
+    elements["surface-switcher-list"].innerHTML
+  );
+
+  let reloaded = 0;
+  global.window = {
+    location: {
+      origin: "http://127.0.0.1:4100",
+      href: "http://127.0.0.1:4100/",
+      reload() { reloaded += 1; },
+    },
+  };
+  navigateToSurface("http://127.0.0.1:4101/#token=other");
+  assert.strictEqual(window.location.href, "http://127.0.0.1:4101/#token=other");
+  assert.strictEqual(reloaded, 0);
+  assert.strictEqual(elements["surface-switcher"].getAttribute("aria-expanded"), "false");
+  assert.strictEqual(elements["surface-switcher-list"].hidden, true);
+
+  window.location.href = "http://127.0.0.1:4100/";
+  navigateToSurface("http://127.0.0.1:4100/#token=same-origin");
+  assert.strictEqual(window.location.href, "http://127.0.0.1:4100/#token=same-origin");
+  assert.strictEqual(reloaded, 1);
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"#
+    );
+    run_surface_script(&harness);
+}
