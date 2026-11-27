@@ -194,7 +194,9 @@ fn background_rules_and_async_dispatch() {
     let marker = scripts.path().join("done");
     let _gate_guard = GateGuard(gate.clone());
     let g = BlyteToolGuard::acquire_script(&format!(
-        "until [ -f '{}' ]; do sleep 0.01; done\n: > '{}'\n",
+        "until [ -f '{}' ] || [ ! -d '{}' ]; do sleep 0.01; done\nif [ -f '{}' ]; then : > '{}'; fi\n",
+        gate.display(),
+        scripts.path().display(),
         gate.display(),
         marker.display()
     ));
@@ -749,7 +751,9 @@ fn background_dispatch_still_running_after_startup_wait_reports_started_and_outp
     let marker = scripts.path().join("done");
     let _gate_guard = GateGuard(gate.clone());
     let g = BlyteToolGuard::acquire_script(&format!(
-        "until [ -f '{}' ]; do sleep 0.01; done\n: > '{}'\n",
+        "until [ -f '{}' ] || [ ! -d '{}' ]; do sleep 0.01; done\nif [ -f '{}' ]; then : > '{}'; fi\n",
+        gate.display(),
+        scripts.path().display(),
         gate.display(),
         marker.display()
     ));

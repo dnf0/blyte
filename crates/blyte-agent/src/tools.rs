@@ -196,12 +196,16 @@ pub fn set_background_startup_wait(wait: Option<Duration>) {
     }
 }
 
-fn background_startup_wait() -> Duration {
-    BACKGROUND_STARTUP_WAIT_OVERRIDE
-        .read()
-        .map(|r| *r)
-        .unwrap_or_else(|e| *e.into_inner())
-        .unwrap_or(BACKGROUND_STARTUP_WAIT)
+fn read_background_startup_wait(
+    lock: &std::sync::RwLock<Option<Duration>>,
+) -> Result<Duration, String> {
+    lock.read()
+        .map(|r| r.unwrap_or(BACKGROUND_STARTUP_WAIT))
+        .map_err(|e| format!("background startup wait lock is poisoned: {e}"))
+}
+
+fn background_startup_wait() -> Result<Duration, String> {
+    read_background_startup_wait(&BACKGROUND_STARTUP_WAIT_OVERRIDE)
 }
 
 pub fn blyte_tool() -> Option<PathBuf> {
@@ -2185,6 +2189,10 @@ fn run_background_dispatch(
     out_dir: &Path,
     id: &str,
 ) -> ToolOutcome {
+    let startup_wait = match background_startup_wait() {
+        Ok(d) => d,
+        Err(e) => return ToolOutcome::err(e),
+    };
     let out_path = out_dir.join(format!("{id}.dispatch.out"));
     if let Err(e) = std::fs::create_dir_all(out_dir) {
         return ToolOutcome::err(format!(
@@ -2223,7 +2231,7 @@ fn run_background_dispatch(
     };
     drop(cmd_builder);
 
-    let deadline = std::time::Instant::now() + background_startup_wait();
+    let deadline = std::time::Instant::now() + startup_wait;
     let exited = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
@@ -2492,5 +2500,30 @@ mod tests {
             held_err,
             "run R9 is editing this folder; wait for it to finish"
         );
+    }
+
+    #[test]
+    fn read_background_startup_wait_returns_error_when_lock_is_poisoned() {
+        let lock = std::sync::RwLock::new(None);
+        assert_eq!(
+            read_background_startup_wait(&lock).unwrap(),
+            BACKGROUND_STARTUP_WAIT
+        );
+
+        let override_wait = Duration::from_millis(50);
+        *lock.write().unwrap() = Some(override_wait);
+        assert_eq!(read_background_startup_wait(&lock).unwrap(), override_wait);
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = lock.write().unwrap();
+            panic!("poison background startup wait lock");
+        }));
+
+        let err = read_background_startup_wait(&lock).unwrap_err();
+        assert!(
+            err.contains("background startup wait lock"),
+            "unexpected error: {err}"
+        );
+        assert!(err.contains("poisoned"), "unexpected error: {err}");
     }
 }
