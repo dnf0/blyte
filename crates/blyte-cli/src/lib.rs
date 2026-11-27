@@ -10,6 +10,7 @@ pub mod cost;
 pub mod dashboard;
 pub mod direct_edit;
 pub mod dispatch;
+pub mod dispatch_in_place;
 pub mod env_file;
 pub mod fallback_check;
 pub mod fix_round;

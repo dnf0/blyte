@@ -1,0 +1,684 @@
+use std::collections::BTreeSet;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use blyte_agent::sandbox;
+use blyte_cli::dispatch::exit_code;
+use blyte_cli::dispatch_in_place::{
+    in_place_outcome, records_dir_for, wrap_in_place_task, IN_PLACE_RULES,
+};
+
+fn sandbox_can_apply() -> Result<(), &'static str> {
+    if !sandbox::available() {
+        return Err("sandbox is unavailable");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let probe = Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+            .output();
+        if let Ok(out) = probe {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if out.status.code() == Some(71) && stderr.contains("Operation not permitted") {
+                return Err("nested sandbox-exec is not permitted in this environment");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_http_body(stream: &mut TcpStream) -> String {
+    let mut buf = vec![0u8; 65536];
+    let mut got = Vec::new();
+    let mut header_end = None;
+    let mut content_len = 0usize;
+    loop {
+        let n = stream.read(&mut buf).unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        got.extend_from_slice(&buf[..n]);
+        if header_end.is_none() {
+            let text = String::from_utf8_lossy(&got);
+            if let Some(i) = text.find("\r\n\r\n") {
+                header_end = Some(i + 4);
+                content_len = text[..i]
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                    })
+                    .unwrap_or(0);
+            }
+        }
+        if let Some(end) = header_end {
+            if got.len() >= end + content_len {
+                break;
+            }
+        }
+    }
+    match header_end {
+        Some(end) => String::from_utf8_lossy(&got[end..]).into_owned(),
+        None => String::new(),
+    }
+}
+
+fn start_scripted_server(turns: Vec<serde_json::Value>) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let idx = AtomicUsize::new(0);
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let _ = read_http_body(&mut stream);
+            let i = idx.fetch_add(1, Ordering::SeqCst);
+            let body = turns
+                .get(i)
+                .unwrap_or_else(|| turns.last().unwrap())
+                .to_string();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    port
+}
+
+fn write_tool_turn(path: &str, content: &str) -> serde_json::Value {
+    let args = serde_json::json!({
+        "path": path,
+        "content": content,
+    })
+    .to_string();
+    serde_json::json!({
+        "id": "r-write",
+        "object": "chat.completion",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "write",
+                        "arguments": args,
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 30,
+            "total_tokens": 130,
+        }
+    })
+}
+
+fn stop_turn(message: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": "r-done",
+        "object": "chat.completion",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": message,
+            },
+            "finish_reason": "stop",
+        }],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+        }
+    })
+}
+
+struct TestEnv {
+    _tmp: tempfile::TempDir,
+    folder: PathBuf,
+    home: PathBuf,
+    state_dir: PathBuf,
+    task_file: PathBuf,
+}
+
+impl TestEnv {
+    fn new() -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("folder");
+        let home = tmp.path().join("home");
+        let state_dir = tmp.path().join("state");
+        let task_file = tmp.path().join("task.md");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(&task_file, "Do the task.\n").unwrap();
+        Self {
+            _tmp: tmp,
+            folder,
+            home,
+            state_dir,
+            task_file,
+        }
+    }
+
+    fn canonical_folder(&self) -> PathBuf {
+        self.folder.canonicalize().unwrap()
+    }
+
+    fn run_store(&self) -> PathBuf {
+        blyte_cli::surface_dir::run_store(&self.state_dir, &self.canonical_folder()).unwrap()
+    }
+
+    fn lock_path(&self) -> PathBuf {
+        blyte_cli::surface_dir::in_place_lock_path(&self.state_dir, &self.canonical_folder())
+            .unwrap()
+    }
+
+    fn blyte(&self, args: &[&str], port: Option<u16>) -> Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_blyte"));
+        cmd.args(args)
+            .current_dir(&self.folder)
+            .env("HOME", &self.home)
+            .env("XDG_CONFIG_HOME", &self.home)
+            .env("BLYTE_STATE_DIR", &self.state_dir)
+            .env("BLYTE_NO_UPDATE_CHECK", "1")
+            .env("BLYTE_NO_KEEP_AWAKE", "1")
+            .env("BLYTE_USAGE_LOG", "off")
+            .env("BLYTE_GATE_SLOT_DIR", self.home.join("slots"))
+            .env("BLYTE_GATE_SLOTS", "16")
+            .env("BLYTE_ENV_FILE", "")
+            .env_remove("GEMINI_API_KEY")
+            .env_remove("GOOGLE_API_KEY")
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("OPENROUTER_API_KEY")
+            .env_remove("OLLAMA_HOST")
+            .env_remove("OLLAMA_API_KEY")
+            .env_remove("OPENAI_BASE_URL")
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("BLYTE_MODEL")
+            .env_remove("BLYTE_MODEL_SHELL");
+        if let Some(p) = port {
+            cmd.env("OPENAI_BASE_URL", format!("http://127.0.0.1:{p}/v1"))
+                .env("OPENAI_API_KEY", "test")
+                .env("BLYTE_MODEL", "openai/gemini-3.8-flash");
+        }
+        cmd.output().unwrap()
+    }
+}
+
+fn dir_entries(dir: &Path) -> BTreeSet<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn overwrite_file_finishes_with_diff_and_clean_folder() {
+    if let Err(reason) = sandbox_can_apply() {
+        eprintln!("skipping overwrite_file_finishes_with_diff_and_clean_folder: {reason}");
+        return;
+    }
+
+    let env = TestEnv::new();
+    std::fs::write(env.folder.join("a.txt"), "old line\n").unwrap();
+    let port = start_scripted_server(vec![
+        write_tool_turn("a.txt", "new line\n"),
+        stop_turn("updated a.txt"),
+    ]);
+
+    let out = env.blyte(
+        &["dispatch", "T1", env.task_file.to_str().unwrap()],
+        Some(port),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON summary");
+    assert_eq!(summary["outcome"], "finished");
+    assert_eq!(summary["branch"], "");
+    assert_eq!(summary["commits"], serde_json::json!([]));
+    assert_eq!(summary["changed_files"], serde_json::json!(["a.txt"]));
+    assert_eq!(summary["gate_source"], "none");
+    assert_eq!(
+        summary["worktree"],
+        env.canonical_folder().display().to_string()
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(env.folder.join("a.txt")).unwrap(),
+        "new line\n"
+    );
+    assert!(!env.folder.join(".wt").exists());
+    assert_eq!(
+        dir_entries(&env.folder),
+        BTreeSet::from(["a.txt".to_string()])
+    );
+
+    let store = env.run_store();
+    let diff = std::fs::read_to_string(store.join("T1.diff")).unwrap();
+    assert!(diff.contains("-old line"), "diff missing old line: {diff}");
+    assert!(diff.contains("+new line"), "diff missing new line: {diff}");
+
+    let start: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(store.join("T1.start.json")).unwrap())
+            .unwrap();
+    assert_eq!(start["in_place"], true);
+    assert_eq!(start["branch"], "");
+    assert!(start["base"].is_null());
+    assert!(start["base_sha"].is_null());
+    assert_eq!(
+        start["worktree"],
+        env.canonical_folder().display().to_string()
+    );
+
+    let status = env.blyte(&["status", "T1"], None);
+    assert_eq!(status.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&status.stdout).contains("outcome: finished"));
+
+    let wait = env.blyte(&["wait", "T1"], None);
+    assert_eq!(wait.status.code(), Some(0));
+    let wait_out = String::from_utf8_lossy(&wait.stdout);
+    assert!(wait_out.contains("T1") && wait_out.contains("finished"));
+
+    let reuse = env.blyte(&["dispatch", "T1", env.task_file.to_str().unwrap()], None);
+    assert_eq!(reuse.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&reuse.stderr).contains("already finished here"));
+}
+
+#[test]
+fn no_changes_returns_exit_4() {
+    if let Err(reason) = sandbox_can_apply() {
+        eprintln!("skipping no_changes_returns_exit_4: {reason}");
+        return;
+    }
+
+    let env = TestEnv::new();
+    std::fs::write(env.folder.join("a.txt"), "unchanged\n").unwrap();
+    let port = start_scripted_server(vec![stop_turn("nothing to change")]);
+
+    let out = env.blyte(
+        &["dispatch", "T1", env.task_file.to_str().unwrap()],
+        Some(port),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON summary");
+    assert_eq!(summary["outcome"], "no_changes");
+    assert_eq!(summary["changed_files"], serde_json::json!([]));
+}
+
+#[test]
+fn gate_flag_with_created_file_returns_verified() {
+    if let Err(reason) = sandbox_can_apply() {
+        eprintln!("skipping gate_flag_with_created_file_returns_verified: {reason}");
+        return;
+    }
+
+    let env = TestEnv::new();
+    let port = start_scripted_server(vec![
+        write_tool_turn("made.txt", "created\n"),
+        stop_turn("created made.txt"),
+    ]);
+
+    let out = env.blyte(
+        &[
+            "dispatch",
+            "T1",
+            env.task_file.to_str().unwrap(),
+            "--gate",
+            "test -f made.txt",
+        ],
+        Some(port),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON summary");
+    assert_eq!(summary["outcome"], "verified");
+    assert_eq!(summary["changed_files"], serde_json::json!(["made.txt"]));
+    assert_eq!(summary["gate_source"], "flag");
+}
+
+#[test]
+fn second_dispatch_while_locked_refuses_without_start_record() {
+    let env = TestEnv::new();
+    let lock_path = env.lock_path();
+    let holder = blyte_agent::folder_lock::Holder {
+        pid: std::process::id(),
+        kind: "run".to_string(),
+        id: "HOLDER1".to_string(),
+    };
+    let _lock = blyte_agent::folder_lock::acquire(&lock_path, &holder).unwrap();
+
+    let out = env.blyte(&["dispatch", "T2", env.task_file.to_str().unwrap()], None);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("HOLDER1"),
+        "stderr should name holder id: {stderr}"
+    );
+    assert!(!env.run_store().join("T2.start.json").exists());
+}
+
+#[test]
+fn reusing_finished_id_is_refused() {
+    let env = TestEnv::new();
+    let store = env.run_store();
+    std::fs::write(
+        store.join("T1.json"),
+        serde_json::json!({"id": "T1", "outcome": "finished"}).to_string(),
+    )
+    .unwrap();
+
+    let out = env.blyte(&["dispatch", "T1", env.task_file.to_str().unwrap()], None);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("already finished here"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn research_and_base_flags_are_refused() {
+    let env = TestEnv::new();
+
+    let research = env.blyte(
+        &[
+            "dispatch",
+            "R1",
+            env.task_file.to_str().unwrap(),
+            "--research",
+        ],
+        None,
+    );
+    assert_eq!(research.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&research.stderr);
+    assert!(
+        stderr.contains(
+            "research runs in a folder that is not a git repository are not supported yet"
+        ),
+        "unexpected stderr: {stderr}"
+    );
+
+    let base = env.blyte(
+        &[
+            "dispatch",
+            "B1",
+            env.task_file.to_str().unwrap(),
+            "--base",
+            "main",
+        ],
+        None,
+    );
+    assert_eq!(base.status.code(), Some(2));
+    let base_stderr = String::from_utf8_lossy(&base.stderr);
+    assert!(
+        base_stderr.contains("--base needs a git repository"),
+        "unexpected stderr: {base_stderr}"
+    );
+}
+
+#[test]
+fn status_and_wait_read_in_place_store_records() {
+    let env = TestEnv::new();
+    let store = env.run_store();
+    std::fs::write(
+        store.join("T1.start.json"),
+        serde_json::json!({
+            "id": "T1",
+            "pid": 999999,
+            "started_at": 1700000000,
+            "in_place": true,
+            "worktree": env.canonical_folder().display().to_string(),
+            "branch": "",
+            "base": null,
+            "base_sha": null
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        store.join("T1.report.json"),
+        serde_json::json!({
+            "outcome": "finished",
+            "turns": 2,
+            "cost_usd": 0.01,
+            "duration_seconds": 3.0,
+            "final_message": "updated a.txt"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        store.join("T1.json"),
+        serde_json::json!({
+            "id": "T1",
+            "worktree": env.canonical_folder().display().to_string(),
+            "branch": "",
+            "outcome": "finished",
+            "exit": 0,
+            "turns": 2,
+            "cost_usd": 0.01,
+            "changed_files": ["a.txt"],
+            "commits": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let status = env.blyte(&["status", "T1"], None);
+    assert_eq!(
+        status.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status_out = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        status_out.contains("outcome: finished"),
+        "unexpected status output: {status_out}"
+    );
+
+    let wait = env.blyte(&["wait", "T1"], None);
+    assert_eq!(
+        wait.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&wait.stderr)
+    );
+    let wait_out = String::from_utf8_lossy(&wait.stdout);
+    assert!(
+        wait_out.contains("T1") && wait_out.contains("finished"),
+        "unexpected wait output: {wait_out}"
+    );
+}
+
+#[test]
+fn restart_of_interrupted_run_preserves_originals_and_appends_log() {
+    if let Err(reason) = sandbox_can_apply() {
+        eprintln!(
+            "skipping restart_of_interrupted_run_preserves_originals_and_appends_log: {reason}"
+        );
+        return;
+    }
+
+    let env = TestEnv::new();
+    let store = env.run_store();
+    std::fs::write(env.folder.join("a.txt"), "mid\n").unwrap();
+    let before_dir = store.join("R1.before");
+    std::fs::create_dir_all(&before_dir).unwrap();
+    std::fs::write(before_dir.join("a.txt"), "original\n").unwrap();
+    std::fs::write(
+        store.join("R1.changes.json"),
+        "{\"path\":\"a.txt\",\"existed\":true,\"ts\":1}\n",
+    )
+    .unwrap();
+    std::fs::write(store.join("R1.log"), "prior log line\n").unwrap();
+    std::fs::write(store.join("R1.start.json"), "{\"id\":\"R1\"}\n").unwrap();
+
+    let port = start_scripted_server(vec![
+        write_tool_turn("a.txt", "final\n"),
+        stop_turn("finished after restart"),
+    ]);
+
+    let out = env.blyte(
+        &["dispatch", "R1", env.task_file.to_str().unwrap()],
+        Some(port),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON summary");
+    assert_eq!(summary["outcome"], "finished");
+    assert_eq!(summary["changed_files"], serde_json::json!(["a.txt"]));
+
+    let diff = std::fs::read_to_string(store.join("R1.diff")).unwrap();
+    assert!(
+        diff.contains("-original"),
+        "diff should use saved original: {diff}"
+    );
+    assert!(
+        diff.contains("+final"),
+        "diff should show final text: {diff}"
+    );
+
+    let log = std::fs::read_to_string(store.join("R1.log")).unwrap();
+    assert!(
+        log.starts_with("prior log line\n"),
+        "log should be appended to: {log}"
+    );
+}
+
+#[test]
+fn invalid_blyte_toml_is_refused() {
+    let env = TestEnv::new();
+    std::fs::write(env.folder.join("blyte.toml"), "not valid toml = = [\n").unwrap();
+    let bad = env.blyte(&["dispatch", "C1", env.task_file.to_str().unwrap()], None);
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("error:"));
+}
+
+#[test]
+fn config_gate_returns_verified() {
+    if let Err(reason) = sandbox_can_apply() {
+        eprintln!("skipping config_gate_returns_verified: {reason}");
+        return;
+    }
+
+    let env = TestEnv::new();
+    std::fs::write(
+        env.folder.join("blyte.toml"),
+        "[dispatch]\ngate = \"test -f from_cfg.txt\"\n",
+    )
+    .unwrap();
+    let port = start_scripted_server(vec![
+        write_tool_turn("from_cfg.txt", "ok\n"),
+        stop_turn("created from_cfg.txt"),
+    ]);
+    let ok = env.blyte(
+        &["dispatch", "C2", env.task_file.to_str().unwrap()],
+        Some(port),
+    );
+    assert_eq!(
+        ok.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&ok.stdout),
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    let summary: serde_json::Value = serde_json::from_slice(&ok.stdout).expect("JSON summary");
+    assert_eq!(summary["outcome"], "verified");
+    assert_eq!(summary["gate_source"], "blyte.toml");
+}
+
+#[test]
+fn records_dir_for_returns_dot_wt_in_git_repository() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    assert!(init.success());
+
+    let expected = repo.canonicalize().unwrap().join(".wt");
+    assert_eq!(records_dir_for(&repo).unwrap(), expected);
+}
+
+#[test]
+fn outcome_table_and_in_place_rules() {
+    assert_eq!(
+        in_place_outcome("finished", false, true),
+        ("finished", None)
+    );
+    assert_eq!(
+        in_place_outcome("finished", false, false),
+        ("no_changes", None)
+    );
+    assert_eq!(in_place_outcome("verified", true, true), ("verified", None));
+    assert_eq!(
+        in_place_outcome("verified", true, false),
+        ("no_changes", None)
+    );
+    assert_eq!(
+        in_place_outcome("gate_failed", true, true),
+        ("gate_failed", None)
+    );
+    assert_eq!(
+        in_place_outcome("budget_exhausted", false, false),
+        ("budget_exhausted", None)
+    );
+    assert_eq!(in_place_outcome("error", false, false), ("error", None));
+
+    let (out, err) = in_place_outcome("blocked", false, true);
+    assert_eq!(out, "error");
+    assert!(err.unwrap().contains("blocked"));
+
+    let (out, err) = in_place_outcome("finished", true, true);
+    assert_eq!(out, "error");
+    assert!(err.unwrap().contains("finished"));
+
+    let (out, err) = in_place_outcome("verified", false, true);
+    assert_eq!(out, "error");
+    assert!(err.unwrap().contains("verified"));
+
+    assert_eq!(exit_code("finished"), 0);
+    assert_eq!(exit_code("verified"), 0);
+    assert_eq!(exit_code("no_changes"), 4);
+
+    let wrapped = wrap_in_place_task("  Update a.txt\n");
+    assert!(wrapped.contains("Update a.txt"));
+    assert!(wrapped.ends_with(IN_PLACE_RULES));
+    assert!(IN_PLACE_RULES.contains("write and edit"));
+    assert!(IN_PLACE_RULES.contains("do not commit"));
+}
