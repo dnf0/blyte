@@ -1,10 +1,16 @@
 use std::fmt::Write as _;
-use std::io::Write;
+use std::io::{ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
+use crate::serve::TOKEN_HEADER;
 use crate::session::{Entry, EntryBody};
 use crate::surface_dir::{is_running, list_records_for_root};
 use crate::surface_registry::{find_by_name, first_line, live_entries, RegistryEntry};
+
+const OPEN_CODE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_OPEN_CODE_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// A stopped surface belonging to a folder.
 ///
@@ -310,7 +316,7 @@ pub fn run_surfaces(dir: &Path, json: bool, out: &mut dyn Write, err: &mut dyn W
     0
 }
 
-pub fn surface_url(entry: &RegistryEntry) -> Result<String, String> {
+fn read_surface_token(entry: &RegistryEntry) -> Result<String, String> {
     let token_path = blyte_agent::sandbox::surface_token_path_for_id(&entry.id)?;
     let raw_token = std::fs::read_to_string(&token_path).map_err(|_| {
         format!(
@@ -327,7 +333,147 @@ pub fn surface_url(entry: &RegistryEntry) -> Result<String, String> {
             token_path.display()
         ));
     }
+    Ok(token.to_string())
+}
+
+pub fn surface_url(entry: &RegistryEntry) -> Result<String, String> {
+    let token = read_surface_token(entry)?;
     Ok(format!("http://127.0.0.1:{}/#token={token}", entry.port))
+}
+
+fn parse_http_status(head: &str) -> Result<u16, String> {
+    let status_line = head.lines().next().unwrap_or("").trim_end_matches('\r');
+    let mut parts = status_line.split_whitespace();
+    let version = parts
+        .next()
+        .ok_or_else(|| "empty HTTP response".to_string())?;
+    if !version.starts_with("HTTP/") {
+        return Err("invalid HTTP response".to_string());
+    }
+    let code_str = parts
+        .next()
+        .ok_or_else(|| "missing HTTP status code".to_string())?;
+    code_str
+        .parse::<u16>()
+        .map_err(|_| "invalid HTTP status code".to_string())
+}
+
+pub fn request_open_code(entry: &RegistryEntry, token: &str) -> Result<String, String> {
+    let deadline = Instant::now() + OPEN_CODE_TIMEOUT;
+    let addr = SocketAddr::from(([127, 0, 0, 1], entry.port));
+    let mut stream = TcpStream::connect_timeout(&addr, OPEN_CODE_TIMEOUT).map_err(|e| {
+        if e.kind() == ErrorKind::ConnectionRefused {
+            format!(
+                "surface {} refused the connection on port {}",
+                entry.name, entry.port
+            )
+        } else {
+            format!(
+                "cannot connect to surface {} on port {}: {e}",
+                entry.name, entry.port
+            )
+        }
+    })?;
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(format!(
+            "surface {} timed out on port {}",
+            entry.name, entry.port
+        ));
+    }
+    let _ = stream.set_write_timeout(Some(remaining));
+
+    let req = format!(
+        "POST /api/session/open-codes HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n{TOKEN_HEADER}: {token}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",
+        entry.port
+    );
+    stream.write_all(req.as_bytes()).map_err(|e| {
+        format!(
+            "failed to request an open code from surface {}: {e}",
+            entry.name
+        )
+    })?;
+
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        if raw.len() >= MAX_OPEN_CODE_RESPONSE_BYTES {
+            return Err(format!(
+                "surface {} gave an answer blyte does not understand",
+                entry.name
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "surface {} timed out on port {}",
+                entry.name, entry.port
+            ));
+        }
+        let _ = stream.set_read_timeout(Some(remaining));
+        let max_read = (MAX_OPEN_CODE_RESPONSE_BYTES - raw.len()).min(chunk.len());
+        match stream.read(&mut chunk[..max_read]) {
+            Ok(0) => break,
+            Ok(n) => raw.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == ErrorKind::TimedOut || e.kind() == ErrorKind::WouldBlock => {
+                return Err(format!(
+                    "surface {} timed out on port {}",
+                    entry.name, entry.port
+                ));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "failed to read answer from surface {}: {e}",
+                    entry.name
+                ));
+            }
+        }
+    }
+
+    let text = std::str::from_utf8(&raw).map_err(|_| {
+        format!(
+            "surface {} gave an answer blyte does not understand",
+            entry.name
+        )
+    })?;
+    let (head, resp_body) = text.split_once("\r\n\r\n").ok_or_else(|| {
+        format!(
+            "surface {} gave an answer blyte does not understand",
+            entry.name
+        )
+    })?;
+    let status = parse_http_status(head).map_err(|_| {
+        format!(
+            "surface {} gave an answer blyte does not understand",
+            entry.name
+        )
+    })?;
+    if status != 200 {
+        return Err(format!(
+            "surface {} could not create an open code (HTTP {status})",
+            entry.name
+        ));
+    }
+    let parsed: serde_json::Value = serde_json::from_str(resp_body).map_err(|_| {
+        format!(
+            "surface {} gave an answer blyte does not understand",
+            entry.name
+        )
+    })?;
+    let code = parsed
+        .get("code")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "surface {} gave an answer blyte does not understand",
+                entry.name
+            )
+        })?;
+    Ok(code.to_string())
 }
 
 pub fn surfaces_payload(
@@ -384,14 +530,23 @@ pub fn run_open(
         }
     };
 
-    let url = match surface_url(&entry) {
-        Ok(url) => url,
+    let token = match read_surface_token(&entry) {
+        Ok(token) => token,
         Err(e) => {
             let _ = writeln!(err, "blyte: {e}");
             return 1;
         }
     };
 
+    let code = match request_open_code(&entry, &token) {
+        Ok(code) => code,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            return 1;
+        }
+    };
+
+    let url = format!("http://127.0.0.1:{}/#open={code}", entry.port);
     opener(&url);
     let _ = writeln!(out, "blyte: opened surface {}", entry.name);
     0

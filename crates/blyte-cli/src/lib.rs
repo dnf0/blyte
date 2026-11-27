@@ -27,6 +27,7 @@ pub mod map;
 pub mod map_python;
 pub mod map_rust;
 pub mod model_review;
+pub mod open_window;
 pub mod outside_env;
 pub mod passed_trees;
 pub mod plan_cmd;

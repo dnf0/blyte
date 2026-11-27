@@ -3252,35 +3252,50 @@
     const TOKEN_HEADER = "X-Blyte-Token";
     const TOKEN_STORAGE_KEY = "blyte.surface.token";
     const MISSING_TOKEN_MSG = "Cannot send until this page is opened from the URL blyte printed.";
+    const OPEN_CODE_REFUSED_MSG = "This link has been used or has expired. Run blyte open <name> to open this surface.";
     let surfaceToken = null;
+    let openCodeRefused = false;
 
-    function readSurfaceToken() {
+    function storeSurfaceToken(token) {
+      if (typeof window === "undefined") return;
+      try {
+        window.sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
+      } catch (_) {}
+    }
+
+    function consumeHashParam(name) {
       if (typeof window === "undefined") return null;
-      let token = null;
       try {
         const rawHash = window.location && window.location.hash
           ? window.location.hash.replace(/^#/, "")
           : "";
-        if (rawHash) {
-          const params = new URLSearchParams(rawHash);
-          const fromHash = params.get("token");
-          if (fromHash) {
-            token = fromHash;
-            try {
-              window.sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
-            } catch (_) {}
-            params.delete("token");
-            const nextHash = params.toString();
-            const nextUrl =
-              window.location.pathname +
-              window.location.search +
-              (nextHash ? "#" + nextHash : "");
-            if (window.history && typeof window.history.replaceState === "function") {
-              window.history.replaceState(null, "", nextUrl);
-            }
-          }
+        if (!rawHash) return null;
+        const params = new URLSearchParams(rawHash);
+        if (!params.has(name)) return null;
+        const value = params.get(name);
+        params.delete(name);
+        const nextHash = params.toString();
+        const nextUrl =
+          window.location.pathname +
+          window.location.search +
+          (nextHash ? "#" + nextHash : "");
+        if (window.history && typeof window.history.replaceState === "function") {
+          window.history.replaceState(null, "", nextUrl);
         }
-      } catch (_) {}
+        return value;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function readSurfaceToken() {
+      if (typeof window === "undefined") return null;
+      let token = null;
+      const fromHash = consumeHashParam("token");
+      if (fromHash) {
+        token = fromHash;
+        storeSurfaceToken(token);
+      }
       if (!token) {
         try {
           const stored = window.sessionStorage.getItem(TOKEN_STORAGE_KEY);
@@ -3288,6 +3303,42 @@
         } catch (_) {}
       }
       return token;
+    }
+
+    function readOpenCode() {
+      return consumeHashParam("open");
+    }
+
+    async function exchangeOpenCode(code) {
+      let res;
+      try {
+        res = await fetch("/api/open", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code }),
+        });
+      } catch (_) {
+        openCodeRefused = true;
+        return null;
+      }
+      if (!res || !res.ok) {
+        openCodeRefused = true;
+        return null;
+      }
+      let data;
+      try {
+        data = await res.json();
+      } catch (_) {
+        openCodeRefused = true;
+        return null;
+      }
+      if (!data || typeof data.token !== "string" || !data.token) {
+        openCodeRefused = true;
+        return null;
+      }
+      openCodeRefused = false;
+      storeSurfaceToken(data.token);
+      return data.token;
     }
 
     function clearSurfaceToken() {
@@ -3304,7 +3355,10 @@
       if (typeof document === "undefined") return;
       const missing = !surfaceToken;
       const bar = document.getElementById("missing-token");
-      if (bar) bar.hidden = !missing;
+      if (bar) {
+        bar.textContent = openCodeRefused ? OPEN_CODE_REFUSED_MSG : MISSING_TOKEN_MSG;
+        bar.hidden = !missing;
+      }
       const input = document.getElementById("conversation-input");
       if (input) {
         input.disabled = missing;
@@ -4174,8 +4228,6 @@
           switcherEl.textContent = data.repo;
         }
       }
-      const repoEl = document.getElementById("repo-name");
-      if (repoEl) repoEl.textContent = data.repo;
       const noRepoEl = document.getElementById("no-repo-badge");
       if (noRepoEl) {
         const notice = renderNoRepoNotice(data.repository);
@@ -8754,11 +8806,38 @@
     }
 
     async function init() {
-      surfaceToken = readSurfaceToken();
+      const openCode = readOpenCode();
+      if (openCode !== null) {
+        surfaceToken = await exchangeOpenCode(openCode);
+      } else {
+        openCodeRefused = false;
+        surfaceToken = readSurfaceToken();
+      }
       if (typeof window !== "undefined") {
-        window.addEventListener("hashchange", () => {
+        window.addEventListener("hashchange", async () => {
+          const nextOpen = readOpenCode();
+          if (nextOpen !== null) {
+            const exchanged = await exchangeOpenCode(nextOpen);
+            if (exchanged) {
+              surfaceToken = exchanged;
+              updateMissingTokenUI();
+              if (pollingStopped) {
+                await loadInitialSession();
+                if (!pollingStopped) {
+                  loadModels();
+                  startPolling();
+                }
+              }
+            } else {
+              surfaceToken = null;
+              stopAllPolling();
+              updateMissingTokenUI();
+            }
+            return;
+          }
           const next = readSurfaceToken();
           if (next) {
+            openCodeRefused = false;
             surfaceToken = next;
             updateMissingTokenUI();
             if (pollingStopped) {
@@ -8770,6 +8849,10 @@
       bindEvents();
       updateMissingTokenUI();
       renderAll(true);
+      if (openCodeRefused) {
+        stopAllPolling();
+        return;
+      }
       await loadInitialSession();
       if (pollingStopped) {
         return;

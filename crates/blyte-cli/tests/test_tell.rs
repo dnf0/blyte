@@ -141,11 +141,9 @@ fn start_surface(repo: &Path, name: &str) -> RunningSurface {
     let err_bg = Arc::clone(&err_buf);
     let stop_bg = Arc::clone(&stop);
     let args = SurfaceArgs {
-        port: 0,
         no_open: true,
-        days: 14,
         name: Some(name.to_string()),
-        resume: None,
+        ..SurfaceArgs::default()
     };
     let handle = std::thread::spawn(move || {
         let cfg = default_repl_config(repo_bg);

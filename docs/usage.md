@@ -3,10 +3,12 @@
 ## Live surface
 
 ```bash
-blyte [--port N] [--no-open] [--days N]
+blyte [--port N] [--no-open] [--open-in app|browser] [--days N]
 ```
 
-Running bare `blyte` inside a git repository starts the live surface for that repository, prints `blyte: surface at http://127.0.0.1:<port>/#token=<token>`, opens it in the browser unless `--no-open` is passed, and serves until `SIGINT` or `SIGTERM`. It starts the surface whether or not standard input is a terminal (so it can be run under a service manager or with `< /dev/null`). Pass `blyte --terminal` to run the interactive terminal session instead.
+Running bare `blyte` inside a git repository starts the live surface for that repository, prints `blyte: surface at http://127.0.0.1:<port>/#token=<token>`, opens it unless `--no-open` is passed, and serves until `SIGINT` or `SIGTERM`. It starts the surface whether or not standard input is a terminal (so it can be run under a service manager or with `< /dev/null`). Pass `blyte --terminal` to run the interactive terminal session instead.
+
+By default (`--open-in app`, or `BLYTE_OPEN_IN=app`), `blyte` and `blyte open <name>` open the surface in its own app window: a dedicated Chrome, Chromium, Microsoft Edge or Brave window with no address bar or browser tabs, launched via a one-time open code so the surface token never appears in process arguments. If none of those browsers is installed, blyte opens the surface in the default browser instead and prints on stderr: `blyte: no Chrome, Chromium, Edge or Brave found for an app window; opening in the default browser (--open-in browser stops this notice)`. Pass `--open-in browser` (or set `BLYTE_OPEN_IN=browser`) to open directly in the default browser without the notice; the flag overrides `BLYTE_OPEN_IN`.
 
 ## Headless runs
 

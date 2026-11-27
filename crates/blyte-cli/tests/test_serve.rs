@@ -220,6 +220,7 @@ fn make_surface(
         days: 14,
         token: generate_token().unwrap(),
         message_credential: generate_token().unwrap(),
+        open_codes: blyte_cli::serve::OpenCodes::new(),
         requests: Arc::new(blyte_cli::requests::RequestsState::new()),
         publisher: Arc::new(blyte_cli::requests::RealPublisher),
         reconcile_lock: Mutex::new(()),
@@ -2899,6 +2900,7 @@ fn make_busy_surface(root: PathBuf) -> (Surface, BlockingHandle) {
         days: 14,
         token: generate_token().unwrap(),
         message_credential: generate_token().unwrap(),
+        open_codes: blyte_cli::serve::OpenCodes::new(),
         requests: Arc::new(blyte_cli::requests::RequestsState::new()),
         publisher: Arc::new(blyte_cli::requests::RealPublisher),
         reconcile_lock: Mutex::new(()),
@@ -3803,11 +3805,8 @@ fn started_surface_writes_registry_entry_with_metadata_and_idle() {
     let running = start_stoppable_surface_with_args(
         &repo,
         SurfaceArgs {
-            port: 0,
             no_open: true,
-            days: 14,
-            name: None,
-            resume: None,
+            ..SurfaceArgs::default()
         },
         None,
     );
@@ -3841,11 +3840,8 @@ fn stopped_surface_removes_registry_entry_and_keeps_surface_record() {
     let running = start_stoppable_surface_with_args(
         &repo,
         SurfaceArgs {
-            port: 0,
             no_open: true,
-            days: 14,
-            name: None,
-            resume: None,
+            ..SurfaceArgs::default()
         },
         None,
     );
@@ -3877,22 +3873,16 @@ fn second_surface_in_different_repo_with_same_dir_name_gets_dash_2() {
     let first = start_stoppable_surface_with_args(
         &repo1,
         SurfaceArgs {
-            port: 0,
             no_open: true,
-            days: 14,
-            name: None,
-            resume: None,
+            ..SurfaceArgs::default()
         },
         None,
     );
     let second = start_stoppable_surface_with_args(
         &repo2,
         SurfaceArgs {
-            port: 0,
             no_open: true,
-            days: 14,
-            name: None,
-            resume: None,
+            ..SurfaceArgs::default()
         },
         None,
     );
@@ -3919,11 +3909,9 @@ fn explicit_name_used_in_different_repo_fails_and_writes_no_registry_entry() {
     let first = start_stoppable_surface_with_args(
         &repo1,
         SurfaceArgs {
-            port: 0,
             no_open: true,
-            days: 14,
             name: Some("reg-cross-repo-name".to_string()),
-            resume: None,
+            ..SurfaceArgs::default()
         },
         None,
     );
@@ -3934,11 +3922,9 @@ fn explicit_name_used_in_different_repo_fails_and_writes_no_registry_entry() {
     let stop = Arc::new(AtomicBool::new(false));
     let code = run_with_hooks(
         &SurfaceArgs {
-            port: 0,
             no_open: true,
-            days: 14,
             name: Some("reg-cross-repo-name".to_string()),
-            resume: None,
+            ..SurfaceArgs::default()
         },
         default_repl_config(repo2.clone()),
         &mut out,
@@ -4016,11 +4002,8 @@ fn stale_registry_entry_does_not_block_name_and_is_removed() {
     let running = start_stoppable_surface_with_args(
         &repo,
         SurfaceArgs {
-            port: 0,
             no_open: true,
-            days: 14,
-            name: None,
-            resume: None,
+            ..SurfaceArgs::default()
         },
         None,
     );
@@ -4045,11 +4028,9 @@ fn resume_fails_when_name_is_running_in_another_repository() {
     let first = start_stoppable_surface_with_args(
         &repo1,
         SurfaceArgs {
-            port: 0,
             no_open: true,
-            days: 14,
             name: Some("reg-resume-taken".to_string()),
-            resume: None,
+            ..SurfaceArgs::default()
         },
         None,
     );
@@ -4059,11 +4040,9 @@ fn resume_fails_when_name_is_running_in_another_repository() {
     let second = start_stoppable_surface_with_args(
         &repo2,
         SurfaceArgs {
-            port: 0,
             no_open: true,
-            days: 14,
             name: Some("reg-resume-taken".to_string()),
-            resume: None,
+            ..SurfaceArgs::default()
         },
         None,
     );
@@ -4087,11 +4066,9 @@ fn resume_fails_when_name_is_running_in_another_repository() {
     });
     let code = run_with_hooks(
         &SurfaceArgs {
-            port: 0,
             no_open: true,
-            days: 14,
-            name: None,
             resume: Some("reg-resume-taken".to_string()),
+            ..SurfaceArgs::default()
         },
         default_repl_config(repo1),
         &mut out,
@@ -4134,11 +4111,8 @@ fn registry_doing_tracks_running_turn_first_line_and_returns_to_idle() {
     let running = start_stoppable_surface_with_runner(
         &repo,
         SurfaceArgs {
-            port: 0,
             no_open: true,
-            days: 14,
-            name: None,
-            resume: None,
+            ..SurfaceArgs::default()
         },
         Box::new(runner),
     );
@@ -4251,11 +4225,9 @@ fn start_recording_surface(
     let running = start_stoppable_surface_with_runner(
         repo,
         SurfaceArgs {
-            port: 0,
             no_open: true,
-            days: 14,
             name: name.map(String::from),
-            resume: None,
+            ..SurfaceArgs::default()
         },
         Box::new(runner),
     );

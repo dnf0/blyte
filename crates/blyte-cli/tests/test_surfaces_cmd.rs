@@ -53,15 +53,22 @@ struct MockHealthServer {
     port: u16,
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
+    recorded_open_code_requests: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockHealthServer {
     fn start(surface_id: &str) -> Self {
+        Self::start_with_open_code(surface_id, Ok("mock-open-code-abc123".to_string()))
+    }
+
+    fn start_with_open_code(surface_id: &str, open_code_reply: Result<String, u16>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_bg = Arc::clone(&stop);
-        let body = format!(r#"{{"surface_id":"{surface_id}"}}"#);
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let recorded_bg = Arc::clone(&recorded);
+        let health_body = format!(r#"{{"surface_id":"{surface_id}"}}"#);
         let handle = thread::spawn(move || {
             for stream in listener.incoming() {
                 if stop_bg.load(Ordering::Relaxed) {
@@ -79,11 +86,35 @@ impl MockHealthServer {
                         Ok(n) => req.extend_from_slice(&buf[..n]),
                     }
                 }
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
+                let req_str = String::from_utf8_lossy(&req).to_string();
+                let first_line = req_str.lines().next().unwrap_or("");
+                let resp = if first_line.starts_with("POST /api/session/open-codes ") {
+                    recorded_bg.lock().unwrap().push(req_str);
+                    match &open_code_reply {
+                        Ok(code) => {
+                            let body = format!(r#"{{"code":"{code}"}}"#);
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                body.len(),
+                                body
+                            )
+                        }
+                        Err(status) => {
+                            let body = r#"{"error":"boom"}"#;
+                            format!(
+                                "HTTP/1.1 {status} Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                body.len(),
+                                body
+                            )
+                        }
+                    }
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        health_body.len(),
+                        health_body
+                    )
+                };
                 let _ = stream.write_all(resp.as_bytes());
                 let _ = stream.flush();
             }
@@ -92,6 +123,7 @@ impl MockHealthServer {
             port,
             stop,
             handle: Some(handle),
+            recorded_open_code_requests: recorded,
         }
     }
 }
@@ -318,12 +350,15 @@ fn run_surfaces_json_outputs_entries_and_empty_array() {
 }
 
 #[test]
-fn run_open_calls_opener_with_token_url_and_never_prints_token() {
+fn run_open_posts_for_open_code_with_token_header_and_opens_open_url() {
     let state = tempfile::tempdir().unwrap();
     let _guard = EnvGuard::set_state_root(state.path());
 
     let dir = tempfile::tempdir().unwrap();
-    let server = MockHealthServer::start("s00000000000000aa");
+    let server = MockHealthServer::start_with_open_code(
+        "s00000000000000aa",
+        Ok("one-time-code-777".to_string()),
+    );
     let entry = make_entry(
         "s00000000000000aa",
         "alpha",
@@ -347,8 +382,17 @@ fn run_open_calls_opener_with_token_url_and_never_prints_token() {
 
     let code = run_open(dir.path(), "alpha", &opener, &mut out, &mut err);
     assert_eq!(code, 0);
-    let expected_url = format!("http://127.0.0.1:{}/#token={token}", server.port);
+    let expected_url = format!("http://127.0.0.1:{}/#open=one-time-code-777", server.port);
     assert_eq!(*opened.borrow(), vec![expected_url]);
+    assert!(!opened.borrow()[0].contains(token));
+
+    let reqs = server.recorded_open_code_requests.lock().unwrap();
+    assert_eq!(reqs.len(), 1);
+    assert!(
+        reqs[0].contains(&format!("X-Blyte-Token: {token}")),
+        "expected token header in request: {}",
+        reqs[0]
+    );
 
     let stdout = String::from_utf8(out).unwrap();
     let stderr = String::from_utf8(err).unwrap();
@@ -356,6 +400,43 @@ fn run_open_calls_opener_with_token_url_and_never_prints_token() {
     assert!(stderr.is_empty());
     assert!(!stdout.contains(token));
     assert!(!stderr.contains(token));
+}
+
+#[test]
+fn run_open_fails_with_surface_name_and_opens_nothing_when_server_returns_500() {
+    let state = tempfile::tempdir().unwrap();
+    let _guard = EnvGuard::set_state_root(state.path());
+
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockHealthServer::start_with_open_code("s00000000000000aa", Err(500));
+    let entry = make_entry(
+        "s00000000000000aa",
+        "payments",
+        "/tmp/repo-a",
+        "main",
+        server.port,
+        100,
+        "idle",
+    );
+    write_entry(dir.path(), &entry).unwrap();
+
+    let token = "secret-token-xyz-9876";
+    let token_path = surface_token_path_for_id(&entry.id).unwrap();
+    std::fs::create_dir_all(token_path.parent().unwrap()).unwrap();
+    std::fs::write(&token_path, format!("{token}\n")).unwrap();
+
+    let opened: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    let opener = |url: &str| opened.borrow_mut().push(url.to_string());
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+
+    let code = run_open(dir.path(), "payments", &opener, &mut out, &mut err);
+    assert_eq!(code, 1);
+    assert!(opened.borrow().is_empty());
+    assert!(out.is_empty());
+    let stderr = String::from_utf8(err).unwrap();
+    assert!(stderr.contains("payments"), "stderr: {stderr}");
+    assert!(!stderr.contains(token), "stderr must not leak token");
 }
 
 #[test]

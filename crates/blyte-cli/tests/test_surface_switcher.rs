@@ -162,6 +162,7 @@ fn make_surface(id: &str, name: &str, root: PathBuf) -> Surface {
         days: 14,
         token: generate_token().unwrap(),
         message_credential: generate_token().unwrap(),
+        open_codes: blyte_cli::serve::OpenCodes::new(),
         requests: Arc::new(blyte_cli::requests::RequestsState::new()),
         publisher: Arc::new(blyte_cli::requests::RealPublisher),
         reconcile_lock: Mutex::new(()),

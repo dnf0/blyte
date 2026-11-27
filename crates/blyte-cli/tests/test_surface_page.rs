@@ -2273,7 +2273,7 @@ applySessionState({
   queued: 0,
   last_seq: 0,
 }, true);
-assert.strictEqual(elements["repo-name"].textContent, "notes");
+assert.strictEqual(elements["surface-switcher"].textContent, "notes");
 assert.strictEqual(
   elements["no-repo-badge"].innerHTML,
   "not a git repository: runs edit this folder in place; combining and publishing are off"
@@ -4316,4 +4316,257 @@ fn surface_waiting_title_badges_sort_dot_seen_and_validation() {
 "#
     );
     run_surface_script(&harness);
+}
+
+#[test]
+fn page_exchanges_open_code_on_load_and_handles_refusal_without_retrying() {
+    let harness = r##"
+const assert = require("node:assert");
+
+(async () => {
+  function makeStub(id) {
+    const attrs = new Map();
+    const classes = new Set();
+    const listeners = new Map();
+    const metricVal = { textContent: "" };
+    return {
+      id,
+      value: "",
+      textContent: "",
+      innerHTML: "",
+      hidden: true,
+      disabled: false,
+      placeholder: "",
+      style: {},
+      scrollHeight: 60,
+      dataset: {},
+      children: [],
+      classList: {
+        add(c) { classes.add(c); },
+        remove(c) { classes.delete(c); },
+        toggle(c, f) {
+          if (f === undefined) {
+            if (classes.has(c)) classes.delete(c);
+            else classes.add(c);
+          } else if (f) classes.add(c);
+          else classes.delete(c);
+        },
+        contains(c) { return classes.has(c); },
+      },
+      setAttribute(k, v) { attrs.set(k, String(v)); },
+      getAttribute(k) { return attrs.has(k) ? attrs.get(k) : null; },
+      removeAttribute(k) { attrs.delete(k); },
+      addEventListener(ev, fn) {
+        if (!listeners.has(ev)) listeners.set(ev, []);
+        listeners.get(ev).push(fn);
+      },
+      querySelector(sel) { return sel === ".metric-val" ? metricVal : null; },
+      querySelectorAll() { return []; },
+      appendChild(c) { this.children.push(c); return c; },
+      replaceChildren(...nodes) { this.children = nodes; },
+    };
+  }
+
+  function setupEnv(hash) {
+    const elements = {};
+    const storage = new Map();
+    const replacedUrls = [];
+    global.window = {
+      innerHeight: 800,
+      location: {
+        pathname: "/",
+        search: "",
+        hash,
+      },
+      history: {
+        replaceState(_state, _title, url) {
+          replacedUrls.push(url);
+          const idx = url.indexOf("#");
+          global.window.location.hash = idx === -1 ? "" : url.slice(idx);
+        },
+      },
+      sessionStorage: {
+        getItem(k) { return storage.has(k) ? storage.get(k) : null; },
+        setItem(k, v) { storage.set(k, String(v)); },
+        removeItem(k) { storage.delete(k); },
+      },
+      addEventListener() {},
+    };
+    global.document = {
+      title: "",
+      getElementById(id) {
+        if (!elements[id]) elements[id] = makeStub(id);
+        return elements[id];
+      },
+      querySelector() { return null; },
+      querySelectorAll() { return []; },
+      addEventListener() {},
+      createElement(tag) { return makeStub(tag); },
+    };
+    return { elements, storage, replacedUrls };
+  }
+
+  const origStartPolling = startPolling;
+  let startPollingCalls = 0;
+  startPolling = () => { startPollingCalls += 1; };
+
+  try {
+    {
+      const { elements, storage, replacedUrls } = setupEnv("#open=abc");
+      const calls = [];
+      global.fetch = async (url, opts) => {
+        calls.push({ url, opts });
+        if (url === "/api/open") {
+          return {
+            ok: true,
+            status: 200,
+            async json() { return { token: "tok-from-open-code" }; },
+          };
+        }
+        if (url === "/api/session") {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                session_id: "s1",
+                surface_name: "demo",
+                repo: "demo",
+                repository: true,
+                started_at: 1700000000,
+                model: "m1",
+                effort: null,
+                effort_supported: false,
+                busy: false,
+                queued: 0,
+                last_seq: 0,
+              };
+            },
+          };
+        }
+        if (url === "/api/models") {
+          return {
+            ok: true,
+            status: 200,
+            async json() { return { models: [] }; },
+          };
+        }
+        throw new Error("unexpected fetch: " + url);
+      };
+
+      surfaceToken = null;
+      openCodeRefused = false;
+      pollingStopped = false;
+      startPollingCalls = 0;
+
+      await init();
+
+      assert.strictEqual(calls[0].url, "/api/open");
+      assert.strictEqual(calls[0].opts.method, "POST");
+      assert.deepStrictEqual(JSON.parse(calls[0].opts.body), { code: "abc" });
+      assert.strictEqual(surfaceToken, "tok-from-open-code");
+      assert.strictEqual(storage.get(TOKEN_STORAGE_KEY), "tok-from-open-code");
+      assert.deepStrictEqual(replacedUrls, ["/"]);
+      assert.strictEqual(global.window.location.hash, "");
+      assert.strictEqual(elements["missing-token"].hidden, true);
+      assert.strictEqual(elements["conversation-input"].disabled, false);
+
+      const sessionCall = calls.find(c => c.url === "/api/session");
+      assert.ok(sessionCall, "expected /api/session call after open-code exchange");
+      assert.strictEqual(sessionCall.opts.headers["X-Blyte-Token"], "tok-from-open-code");
+      assert.strictEqual(startPollingCalls, 1);
+    }
+
+    {
+      const { elements, storage, replacedUrls } = setupEnv("#open=badcode");
+      const calls = [];
+      global.fetch = async (url, opts) => {
+        calls.push({ url, opts });
+        return {
+          ok: false,
+          status: 403,
+          async json() { return {}; },
+          async text() { return ""; },
+        };
+      };
+
+      surfaceToken = null;
+      openCodeRefused = false;
+      pollingStopped = false;
+      startPollingCalls = 0;
+
+      await init();
+
+      assert.strictEqual(calls.length, 1, "refused open code must make exactly one request");
+      assert.strictEqual(calls[0].url, "/api/open");
+      assert.strictEqual(calls[0].opts.method, "POST");
+      assert.deepStrictEqual(JSON.parse(calls[0].opts.body), { code: "badcode" });
+      assert.strictEqual(surfaceToken, null);
+      assert.strictEqual(storage.has(TOKEN_STORAGE_KEY), false);
+      assert.deepStrictEqual(replacedUrls, ["/"]);
+      assert.strictEqual(elements["missing-token"].hidden, false);
+      assert.strictEqual(
+        elements["missing-token"].textContent,
+        "This link has been used or has expired. Run blyte open <name> to open this surface."
+      );
+      assert.strictEqual(elements["conversation-input"].disabled, true);
+      assert.strictEqual(startPollingCalls, 0);
+    }
+
+    {
+      const { elements, storage, replacedUrls } = setupEnv("#token=direct-tok");
+      const calls = [];
+      global.fetch = async (url, opts) => {
+        calls.push({ url, opts });
+        if (url === "/api/session") {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                session_id: "s1",
+                surface_name: "demo",
+                repo: "demo",
+                repository: true,
+                started_at: 1700000000,
+                model: "m1",
+                effort: null,
+                effort_supported: false,
+                busy: false,
+                queued: 0,
+                last_seq: 0,
+              };
+            },
+          };
+        }
+        if (url === "/api/models") {
+          return { ok: true, status: 200, async json() { return { models: [] }; } };
+        }
+        throw new Error("unexpected fetch: " + url);
+      };
+
+      surfaceToken = null;
+      openCodeRefused = false;
+      pollingStopped = false;
+      startPollingCalls = 0;
+
+      await init();
+
+      assert.strictEqual(surfaceToken, "direct-tok");
+      assert.strictEqual(storage.get(TOKEN_STORAGE_KEY), "direct-tok");
+      assert.deepStrictEqual(replacedUrls, ["/"]);
+      assert.strictEqual(calls[0].url, "/api/session");
+      assert.strictEqual(calls[0].opts.headers["X-Blyte-Token"], "direct-tok");
+      assert.strictEqual(elements["missing-token"].hidden, true);
+      assert.strictEqual(startPollingCalls, 1);
+    }
+  } finally {
+    startPolling = origStartPolling;
+  }
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"##;
+    run_surface_script(harness);
 }

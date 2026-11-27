@@ -125,11 +125,8 @@ fn default_repl_config(repo_root: PathBuf) -> ReplConfig {
 
 fn default_surface_args() -> SurfaceArgs {
     SurfaceArgs {
-        port: 0,
         no_open: true,
-        days: 14,
-        name: None,
-        resume: None,
+        ..SurfaceArgs::default()
     }
 }
 

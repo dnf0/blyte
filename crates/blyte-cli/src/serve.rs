@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 #[cfg(unix)]
@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::cli::SurfaceArgs;
 use crate::http::{Request, Response};
+use crate::open_window::OpenIn;
 use crate::queue_actions::{Action, Hold};
 use crate::repl::ReplConfig;
 use crate::requests::{Publisher, RealPublisher, RequestActionError, RequestsState};
@@ -24,6 +25,8 @@ use crate::surface_dir::SurfaceRecord;
 pub const TOKEN_HEADER: &str = "X-Blyte-Token";
 pub const MESSAGE_HEADER: &str = "X-Blyte-Message-Credential";
 pub const RECONCILE_SAFETY_NET_INTERVAL: Duration = Duration::from_secs(30);
+pub const OPEN_CODE_TTL_SECS: u64 = 60;
+pub const MAX_OPEN_CODES: usize = 16;
 
 const INDEX_HTML: &str = include_str!("../assets/surface/index.html");
 const MAX_WAIT_MS: u64 = 25_000;
@@ -33,6 +36,57 @@ const MAX_PEER_TEXT_BYTES: usize = 16_384;
 const MAX_PEER_REPO_CHARS: usize = 200;
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+struct OpenCodeEntry {
+    code: String,
+    created_at: u64,
+}
+
+#[derive(Default)]
+pub struct OpenCodes {
+    entries: Mutex<VecDeque<OpenCodeEntry>>,
+}
+
+impl OpenCodes {
+    pub fn new() -> Self {
+        Self {
+            entries: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    pub fn issue(&self, now: u64) -> Result<String, String> {
+        let code = generate_token()?;
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        while entries.len() >= MAX_OPEN_CODES {
+            entries.pop_front();
+        }
+        entries.push_back(OpenCodeEntry {
+            code: code.clone(),
+            created_at: now,
+        });
+        Ok(code)
+    }
+
+    pub fn redeem(&self, provided: &str, now: u64) -> bool {
+        if provided.is_empty() {
+            return false;
+        }
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let mut matched_idx = None;
+        for (idx, entry) in entries.iter().enumerate() {
+            if constant_time_eq(provided.as_bytes(), entry.code.as_bytes()) {
+                matched_idx = Some(idx);
+            }
+        }
+        let Some(idx) = matched_idx else {
+            entries.retain(|e| now.saturating_sub(e.created_at) <= OPEN_CODE_TTL_SECS);
+            return false;
+        };
+        let entry = entries.remove(idx).unwrap();
+        entries.retain(|e| now.saturating_sub(e.created_at) <= OPEN_CODE_TTL_SECS);
+        now.saturating_sub(entry.created_at) <= OPEN_CODE_TTL_SECS
+    }
+}
 
 pub struct Surface {
     pub surface_id: String,
@@ -45,6 +99,7 @@ pub struct Surface {
     pub days: u64,
     pub token: String,
     pub message_credential: String,
+    pub open_codes: OpenCodes,
     pub requests: Arc<RequestsState>,
     pub publisher: Arc<dyn Publisher>,
     pub reconcile_lock: Mutex<()>,
@@ -1073,6 +1128,31 @@ fn match_api_get_route<'a>(pattern: &str, path: &'a str) -> Option<Option<&'a st
     }
 }
 
+fn handle_post_open_code(surface: &Surface, now: u64) -> Response {
+    match surface.open_codes.issue(now) {
+        Ok(code) => Response::json(200, &serde_json::json!({ "code": code })),
+        Err(e) => json_error(500, e),
+    }
+}
+
+fn handle_post_open(surface: &Surface, req: &Request, now: u64) -> Response {
+    let forbidden = Response {
+        status: 403,
+        content_type: "application/json",
+        body: b"{}".to_vec(),
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&req.body) else {
+        return forbidden;
+    };
+    let Some(code) = value.get("code").and_then(|v| v.as_str()) else {
+        return forbidden;
+    };
+    if !surface.open_codes.redeem(code, now) {
+        return forbidden;
+    }
+    Response::json(200, &serde_json::json!({ "token": surface.token }))
+}
+
 pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
     if req.path == "/api/peer/messages" && req.method == "POST" {
         if !has_valid_message_credential(surface, req) {
@@ -1082,8 +1162,10 @@ pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
     }
 
     let is_health_get = req.path == "/api/health" && req.method == "GET";
+    let is_open_post = req.path == "/api/open" && req.method == "POST";
     if (req.path.starts_with("/api/") || req.method == "POST")
         && !is_health_get
+        && !is_open_post
         && !has_valid_token(surface, req)
     {
         return json_error(
@@ -1135,11 +1217,23 @@ pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
     }
 
     match req.path.as_str() {
+        "/api/open" => {
+            if req.method != "POST" {
+                return method_not_allowed(req);
+            }
+            handle_post_open(surface, req, now)
+        }
         "/api/surfaces" => {
             if req.method != "GET" {
                 return method_not_allowed(req);
             }
             handle_surfaces(surface)
+        }
+        "/api/session/open-codes" => {
+            if req.method != "POST" {
+                return method_not_allowed(req);
+            }
+            handle_post_open_code(surface, now)
         }
         "/api/session/messages" => {
             if req.method != "POST" {
@@ -1460,14 +1554,12 @@ fn new_session_id(nanos: u128) -> String {
     format!("surface-{}-{nanos}-{seq}", std::process::id())
 }
 
+pub fn open_browser_in(open_in: OpenIn, url: &str) {
+    crate::open_window::open_url(open_in, url);
+}
+
 pub fn open_browser(url: &str) {
-    #[cfg(target_os = "macos")]
-    let cmd = "open";
-    #[cfg(not(target_os = "macos"))]
-    let cmd = "xdg-open";
-    if let Err(e) = Command::new(cmd).arg(url).spawn() {
-        eprintln!("blyte: could not open a browser with {cmd}: {e}; open {url} yourself");
-    }
+    open_browser_in(OpenIn::App, url);
 }
 
 fn resolve_initial_model(config: &ReplConfig) -> String {
@@ -1610,12 +1702,14 @@ pub fn run(args: &SurfaceArgs, config: ReplConfig) -> i32 {
             );
         }
     }
+    let open_in = args.open_in;
+    let mut opener = |url: &str| open_browser_in(open_in, url);
     run_inner(
         args,
         config,
         &mut std::io::stdout(),
         &mut std::io::stderr(),
-        &mut open_browser,
+        &mut opener,
         || {
             #[cfg(unix)]
             {
@@ -1636,7 +1730,9 @@ pub fn run_with_io(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
-    run_inner(args, config, out, err, &mut open_browser, || false, None)
+    let open_in = args.open_in;
+    let mut opener = |url: &str| open_browser_in(open_in, url);
+    run_inner(args, config, out, err, &mut opener, || false, None)
 }
 
 pub fn run_with_hooks(
@@ -2268,11 +2364,22 @@ where
         let _ = err.flush();
     }
 
+    let open_codes = OpenCodes::new();
     let url = format!("http://127.0.0.1:{actual_port}/#token={token}");
     let _ = writeln!(out, "blyte: surface {surface_name} at {url}");
     let _ = out.flush();
     if !args.no_open {
-        opener(&url);
+        let now_secs = now_duration().map(|d| d.as_secs()).unwrap_or(started_at);
+        match open_codes.issue(now_secs) {
+            Ok(code) => {
+                let open_url = format!("http://127.0.0.1:{actual_port}/#open={code}");
+                opener(&open_url);
+            }
+            Err(e) => {
+                let _ = writeln!(err, "blyte: failed to create open code: {e}");
+                let _ = err.flush();
+            }
+        }
     }
 
     let stop_surface_name = surface_name.clone();
@@ -2288,6 +2395,7 @@ where
         days: args.days,
         token,
         message_credential,
+        open_codes,
         requests: Arc::new(RequestsState::new()),
         publisher: Arc::new(RealPublisher),
         reconcile_lock: Mutex::new(()),

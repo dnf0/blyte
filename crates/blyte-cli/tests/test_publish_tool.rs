@@ -326,6 +326,7 @@ fn make_surface(
         days: 7,
         token: "surface-secret-token".to_string(),
         message_credential: "peer-msg-credential".to_string(),
+        open_codes: blyte_cli::serve::OpenCodes::new(),
         requests: Arc::new(RequestsState::new()),
         publisher,
         reconcile_lock: Mutex::new(()),
