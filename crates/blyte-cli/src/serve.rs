@@ -153,11 +153,16 @@ fn parse_json_object(body: &[u8]) -> Result<serde_json::Map<String, serde_json::
 }
 
 fn handle_surfaces(surface: &Surface) -> Response {
-    let registry_dir = match crate::surface_registry::registry_dir() {
+    let state_dir = match crate::surface_registry::state_dir() {
         Ok(dir) => dir,
         Err(e) => return json_error(500, e),
     };
-    match crate::surfaces_cmd::surfaces_payload(&registry_dir, &surface.surface_id) {
+    let registry_dir = state_dir.join("surfaces");
+    let stopped = match crate::surfaces_cmd::stopped_surfaces(&surface.root, &state_dir) {
+        Ok(stopped) => stopped,
+        Err(e) => return json_error(500, e),
+    };
+    match crate::surfaces_cmd::surfaces_payload(&registry_dir, &surface.surface_id, &stopped) {
         Ok(payload) => Response::json(200, &payload),
         Err(e) => json_error(500, e),
     }
@@ -1359,19 +1364,34 @@ fn resolve_main_checkout(worktree_root: &Path) -> Result<PathBuf, String> {
     };
     let git_dir_path = PathBuf::from(git_dir.trim());
     let common_dir_path = PathBuf::from(common_dir.trim());
-    let same_git_dir = match (git_dir_path.canonicalize(), common_dir_path.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => git_dir_path == common_dir_path,
-    };
-    if same_git_dir {
-        return Ok(worktree_root.to_path_buf());
+    let git_dir_canon = git_dir_path
+        .canonicalize()
+        .map_err(|e| format!("cannot canonicalize {}: {e}", git_dir_path.display()))?;
+    let common_dir_canon = common_dir_path
+        .canonicalize()
+        .map_err(|e| format!("cannot canonicalize {}: {e}", common_dir_path.display()))?;
+    if git_dir_canon == common_dir_canon {
+        return worktree_root
+            .canonicalize()
+            .map_err(|e| format!("cannot canonicalize {}: {e}", worktree_root.display()));
     }
-    crate::config::main_checkout(worktree_root).ok_or_else(|| {
+    let main = crate::config::main_checkout(worktree_root).ok_or_else(|| {
         format!(
             "cannot find the main checkout of {}",
             worktree_root.display()
         )
-    })
+    })?;
+    main.canonicalize()
+        .map_err(|e| format!("cannot canonicalize {}: {e}", main.display()))
+}
+
+pub(crate) fn resolve_folder(folder: &Path) -> Result<PathBuf, String> {
+    match find_git_toplevel(folder)? {
+        GitToplevel::Repository(worktree_root) => resolve_main_checkout(&worktree_root),
+        GitToplevel::NotARepository => folder
+            .canonicalize()
+            .map_err(|e| format!("cannot canonicalize {}: {e}", folder.display())),
+    }
 }
 
 fn current_branch(main_checkout: &Path) -> Result<Option<String>, String> {
@@ -1955,6 +1975,46 @@ where
     }
     config.repo_root = main_checkout.clone();
 
+    let is_resume = args.resume.is_some();
+    let model = resolve_initial_model(&config);
+    let conversation_path = match crate::conversation_store::conversation_path_for_id(&surface_id) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            let _ = err.flush();
+            return 1;
+        }
+    };
+    let (mut conversation_store, mut loaded_conversation) = if is_resume {
+        match crate::conversation_store::ConversationStore::load(conversation_path) {
+            Ok(pair) => pair,
+            Err(e) => {
+                let _ = writeln!(err, "blyte: {e}");
+                let _ = err.flush();
+                return 1;
+            }
+        }
+    } else {
+        match crate::conversation_store::ConversationStore::new_for_fresh(conversation_path) {
+            Ok(store) => (store, None),
+            Err(e) => {
+                let _ = writeln!(err, "blyte: {e}");
+                let _ = err.flush();
+                return 1;
+            }
+        }
+    };
+    let (resume_memory, needs_digest_rewrite) = match loaded_conversation.as_mut() {
+        Some(loaded) if !loaded.messages.is_empty() => {
+            if crate::conversation_store::digest_for_provider_in_memory(loaded, &model) {
+                (crate::session::ResumeMemoryState::Summarized, true)
+            } else {
+                (crate::session::ResumeMemoryState::Loaded, false)
+            }
+        }
+        _ => (crate::session::ResumeMemoryState::NotLoaded, false),
+    };
+
     let started_dur = match now_duration() {
         Ok(d) => d,
         Err(e) => {
@@ -2032,7 +2092,6 @@ where
         path: message_file_path,
     };
 
-    let is_resume = args.resume.is_some();
     let mut starting_dir_guard = if is_resume {
         StartingDirGuard { dir: None }
     } else {
@@ -2067,32 +2126,61 @@ where
     })));
     let entries_log_path = surface_record_dir.join("entries.jsonl");
     blyte_agent::tools::set_blyte_surface(Some(surface_id.clone()));
-    let model = resolve_initial_model(&config);
     let mut _private_tmp_guard: Option<PrivateTmpDirGuard> = None;
-    let session =
-        match Session::try_start_with_log_io(model, Some(entries_log_path), err, |approver| {
-            match custom_runner {
-                Some(factory) => {
-                    let (runner, tmpdir) = factory(&config, approver)?;
-                    _private_tmp_guard = tmpdir.map(|path| PrivateTmpDirGuard { path });
-                    Ok(runner)
+    let session = match Session::try_start_with_log_and_resume_io(
+        model,
+        Some(entries_log_path),
+        resume_memory,
+        err,
+        |approver| match custom_runner {
+            Some(factory) => {
+                let (runner, tmpdir) = factory(&config, approver)?;
+                _private_tmp_guard = tmpdir.map(|path| PrivateTmpDirGuard { path });
+                if needs_digest_rewrite {
+                    if let Some(ref loaded) = loaded_conversation {
+                        conversation_store.rewrite(
+                            loaded.model.as_deref(),
+                            loaded.goal.as_deref(),
+                            &loaded.messages,
+                        )?;
+                    }
                 }
-                None => {
-                    let runner = AgentRunner::try_new(&config, approver)?;
-                    _private_tmp_guard = runner.private_tmpdir().map(|path| PrivateTmpDirGuard {
-                        path: path.to_path_buf(),
-                    });
-                    Ok(Box::new(runner) as Box<dyn crate::session::PromptRunner>)
+                Ok(runner)
+            }
+            None => {
+                let rewrite_payload = if needs_digest_rewrite {
+                    loaded_conversation.clone()
+                } else {
+                    None
+                };
+                let mut runner = AgentRunner::try_new_with_conversation(
+                    &config,
+                    approver,
+                    None,
+                    loaded_conversation,
+                )?;
+                _private_tmp_guard = runner.private_tmpdir().map(|path| PrivateTmpDirGuard {
+                    path: path.to_path_buf(),
+                });
+                if let Some(ref loaded) = rewrite_payload {
+                    conversation_store.rewrite(
+                        loaded.model.as_deref(),
+                        loaded.goal.as_deref(),
+                        &loaded.messages,
+                    )?;
                 }
+                runner.set_conversation_store(conversation_store);
+                Ok(Box::new(runner) as Box<dyn crate::session::PromptRunner>)
             }
-        }) {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = writeln!(err, "blyte: {e}");
-                let _ = err.flush();
-                return 1;
-            }
-        };
+        },
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            let _ = err.flush();
+            return 1;
+        }
+    };
     let record = SurfaceRecord {
         id: surface_id.clone(),
         name: surface_name.clone(),
@@ -2173,6 +2261,8 @@ where
         opener(&url);
     }
 
+    let stop_surface_name = surface_name.clone();
+
     let surface = Arc::new(Surface {
         surface_id,
         surface_name,
@@ -2203,7 +2293,14 @@ where
     drop(timer_guard);
 
     match serve_result {
-        Ok(()) => 0,
+        Ok(()) => {
+            let _ = writeln!(
+                out,
+                "blyte: stopped surface {stop_surface_name}; resume with: blyte --resume {stop_surface_name}"
+            );
+            let _ = out.flush();
+            0
+        }
         Err(e) => {
             let _ = writeln!(err, "blyte: server error: {e}");
             1

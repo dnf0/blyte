@@ -62,6 +62,9 @@ pub enum Command {
     Surfaces {
         #[arg(long)]
         json: bool,
+        /// List the stopped surfaces of the current folder
+        #[arg(long)]
+        stopped: bool,
     },
     /// Open a running surface's page by name
     Open { name: String },

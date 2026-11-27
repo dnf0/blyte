@@ -9,6 +9,19 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const RESTART_NOTICE_TEXT: &str =
     "blyte restarted: the entries above are from before; the model does not remember them";
+pub const RESUME_REMEMBERS_NOTICE_TEXT: &str =
+    "blyte restarted: the model remembers the conversation above";
+pub const RESUME_INTERRUPTED_NOTICE_TEXT: &str =
+    "blyte restarted: the model remembers the conversation above, except the last request, which was interrupted";
+pub const RESUME_SUMMARIZED_NOTICE_TEXT: &str =
+    "blyte restarted on a different kind of model: the model has a summary of the conversation above";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeMemoryState {
+    NotLoaded,
+    Loaded,
+    Summarized,
+}
 
 pub const MAX_PEER_TURNS: usize = 5;
 
@@ -609,6 +622,7 @@ pub trait PromptRunner: Send + 'static {
 pub struct AgentRunner {
     repl: crate::repl::ReplSession,
     approver: Arc<dyn blyte_agent::approval::Approver>,
+    conversation_store: Option<crate::conversation_store::ConversationStore>,
 }
 
 impl AgentRunner {
@@ -616,10 +630,35 @@ impl AgentRunner {
         config: &crate::repl::ReplConfig,
         approver: Arc<dyn blyte_agent::approval::Approver>,
     ) -> Result<Self, String> {
+        Self::try_new_with_conversation(config, approver, None, None)
+    }
+
+    pub fn try_new_with_conversation(
+        config: &crate::repl::ReplConfig,
+        approver: Arc<dyn blyte_agent::approval::Approver>,
+        conversation_store: Option<crate::conversation_store::ConversationStore>,
+        initial_conversation: Option<crate::conversation_store::LoadedConversation>,
+    ) -> Result<Self, String> {
         let mut cfg = config.clone();
         cfg.converse = true;
-        let repl = crate::repl::ReplSession::try_new_with_approver(&cfg, Some(approver.clone()))?;
-        Ok(Self { repl, approver })
+        let mut repl =
+            crate::repl::ReplSession::try_new_with_approver(&cfg, Some(approver.clone()))?;
+        if let Some(loaded) = initial_conversation {
+            repl.state.runtime.conversation = Some(loaded.messages);
+            repl.state.runtime.conversation_goal = loaded.goal;
+        }
+        Ok(Self {
+            repl,
+            approver,
+            conversation_store,
+        })
+    }
+
+    pub fn set_conversation_store(
+        &mut self,
+        conversation_store: crate::conversation_store::ConversationStore,
+    ) {
+        self.conversation_store = Some(conversation_store);
     }
 
     pub fn new(
@@ -712,20 +751,39 @@ impl PromptRunner for AgentRunner {
             }
             _ => {}
         };
-        let (outcome, _) = crate::task_runner::run_task_with_approver(
+        let run_result = crate::task_runner::run_task_with_approver(
             &task_config,
             &mut self.repl.state,
             Some(self.approver.clone()),
             &on_event,
-        )?;
-        match outcome {
-            blyte_agent::run::Outcome::Verified | blyte_agent::run::Outcome::Finished => Ok(()),
-            blyte_agent::run::Outcome::BudgetExhausted => Err("budget exhausted".to_string()),
-            blyte_agent::run::Outcome::GateFailed => Err("gate failed".to_string()),
-            blyte_agent::run::Outcome::Blocked(msg) | blyte_agent::run::Outcome::Error(msg) => {
-                Err(msg)
+        );
+        let prompt_result = match run_result {
+            Ok((outcome, _)) => match outcome {
+                blyte_agent::run::Outcome::Verified | blyte_agent::run::Outcome::Finished => Ok(()),
+                blyte_agent::run::Outcome::BudgetExhausted => Err("budget exhausted".to_string()),
+                blyte_agent::run::Outcome::GateFailed => Err("gate failed".to_string()),
+                blyte_agent::run::Outcome::Blocked(msg) | blyte_agent::run::Outcome::Error(msg) => {
+                    Err(msg)
+                }
+            },
+            Err(e) => Err(e),
+        };
+        if let Some(ref mut store) = self.conversation_store {
+            let messages = self
+                .repl
+                .state
+                .runtime
+                .conversation
+                .as_deref()
+                .unwrap_or(&[]);
+            let goal = self.repl.state.runtime.conversation_goal.as_deref();
+            if let Err(reason) = store.save(model, goal, messages) {
+                emit(EntryBody::Error {
+                    message: format!("blyte: could not save the conversation for resume: {reason}"),
+                });
             }
         }
+        prompt_result
     }
 }
 
@@ -1050,6 +1108,20 @@ struct Shared {
     approval_cv: Condvar,
 }
 
+fn is_restart_notice(body: &EntryBody) -> bool {
+    matches!(
+        body,
+        EntryBody::Error { message }
+            if matches!(
+                message.as_str(),
+                RESTART_NOTICE_TEXT
+                    | RESUME_REMEMBERS_NOTICE_TEXT
+                    | RESUME_INTERRUPTED_NOTICE_TEXT
+                    | RESUME_SUMMARIZED_NOTICE_TEXT
+            )
+    )
+}
+
 impl Shared {
     fn new(model: String, effort: Option<String>) -> Self {
         Self {
@@ -1081,6 +1153,7 @@ impl Shared {
         model: String,
         effort: Option<String>,
         log_path: Option<PathBuf>,
+        resume_memory: ResumeMemoryState,
         err: &mut dyn Write,
     ) -> Result<Self, String> {
         let attachments_root = log_path
@@ -1098,6 +1171,14 @@ impl Shared {
         let last_seq = entries.iter().map(|e| e.seq).max().unwrap_or(0);
         let next_approval_id = max_approval_id(&entries);
         let had_entries = !entries.is_empty();
+        let trailing_entries = match entries
+            .iter()
+            .rposition(|e| matches!(e.body, EntryBody::Idle { .. }))
+        {
+            Some(idx) => &entries[idx + 1..],
+            None => &entries[..],
+        };
+        let interrupted = trailing_entries.iter().any(|e| !is_restart_notice(&e.body));
         let mut state = SessionState {
             entries,
             last_seq,
@@ -1116,8 +1197,14 @@ impl Shared {
             peer_turns_since_user: 0,
         };
         if had_entries {
+            let notice = match resume_memory {
+                ResumeMemoryState::NotLoaded => RESTART_NOTICE_TEXT,
+                ResumeMemoryState::Summarized => RESUME_SUMMARIZED_NOTICE_TEXT,
+                ResumeMemoryState::Loaded if interrupted => RESUME_INTERRUPTED_NOTICE_TEXT,
+                ResumeMemoryState::Loaded => RESUME_REMEMBERS_NOTICE_TEXT,
+            };
             state.push_entry(EntryBody::Error {
-                message: RESTART_NOTICE_TEXT.to_string(),
+                message: notice.to_string(),
             });
         }
         Ok(Self {
@@ -1244,8 +1331,33 @@ impl Session {
     where
         F: FnOnce(Arc<SurfaceApprover>) -> Result<Box<dyn PromptRunner>, String>,
     {
+        Self::try_start_with_log_and_resume_io(
+            model,
+            log_path,
+            ResumeMemoryState::NotLoaded,
+            err,
+            build_runner,
+        )
+    }
+
+    pub fn try_start_with_log_and_resume_io<F>(
+        model: String,
+        log_path: Option<PathBuf>,
+        resume_memory: ResumeMemoryState,
+        err: &mut dyn Write,
+        build_runner: F,
+    ) -> Result<Session, String>
+    where
+        F: FnOnce(Arc<SurfaceApprover>) -> Result<Box<dyn PromptRunner>, String>,
+    {
         let (base_model, effort) = parse_model_and_effort(&model);
-        let shared = Arc::new(Shared::new_with_log(base_model, effort, log_path, err)?);
+        let shared = Arc::new(Shared::new_with_log(
+            base_model,
+            effort,
+            log_path,
+            resume_memory,
+            err,
+        )?);
         let approver = Arc::new(SurfaceApprover {
             shared: Arc::clone(&shared),
         });

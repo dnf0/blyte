@@ -6,6 +6,7 @@ pub mod combine;
 pub mod comment_lint;
 pub mod comments_cmd;
 pub mod config;
+pub mod conversation_store;
 pub mod conversation_text;
 pub mod cost;
 pub mod dashboard;
