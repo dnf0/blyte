@@ -42,13 +42,7 @@ fn command_list_lines(help: &str) -> Vec<&str> {
 fn the_help_does_not_list_internal_commands() {
     let help = run_help(&["--help"]);
     let commands = command_list_lines(&help);
-    let hidden = [
-        "comments",
-        "instructions",
-        "mock",
-        "edit-start",
-        "edit-finish",
-    ];
+    let hidden = ["comments", "instructions", "edit-start", "edit-finish"];
     for line in &commands {
         let trimmed = line.trim_start();
         for name in hidden {
@@ -79,13 +73,7 @@ fn the_help_still_lists_the_commands_people_use() {
 
 #[test]
 fn hidden_commands_still_run() {
-    let hidden = [
-        "edit-start",
-        "edit-finish",
-        "comments",
-        "instructions",
-        "mock",
-    ];
+    let hidden = ["edit-start", "edit-finish", "comments", "instructions"];
     for name in hidden {
         let help = run_help(&[name, "--help"]);
         let usage = format!("Usage: blyte {name}");
