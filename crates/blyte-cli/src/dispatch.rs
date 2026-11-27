@@ -1012,7 +1012,70 @@ fn copy_report_file(
     Ok(())
 }
 
-fn copy_research_reports(
+pub(crate) fn research_gate() -> (String, &'static str) {
+    ("test -s report.md".to_string(), "research")
+}
+
+pub(crate) fn research_budgets(args: &DispatchArgs) -> (u64, u32) {
+    (
+        args.max_seconds.unwrap_or(1800),
+        args.max_turns.unwrap_or(300),
+    )
+}
+
+pub(crate) fn research_outcome(report_outcome: &str) -> &'static str {
+    match report_outcome {
+        "verified" => "verified",
+        "gate_failed" => "gate_failed",
+        "budget_exhausted" => "budget_exhausted",
+        "blocked" => "blocked",
+        _ => "error",
+    }
+}
+
+pub(crate) fn create_research_scratch_dir(worktree_dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(worktree_dir).map_err(|e| {
+        format!(
+            "error creating scratch directory {}: {e}",
+            worktree_dir.display()
+        )
+    })?;
+    let init_out = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(worktree_dir)
+        .output()
+        .map_err(|e| format!("error: failed to execute git init: {e}"))?;
+    if !init_out.status.success() {
+        return Err(format!(
+            "error: git init failed: {}",
+            String::from_utf8_lossy(&init_out.stderr)
+        ));
+    }
+    let commit_out = Command::new("git")
+        .args([
+            "-c",
+            "user.name=blyte",
+            "-c",
+            "user.email=blyte@local",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "research",
+        ])
+        .current_dir(worktree_dir)
+        .output()
+        .map_err(|e| format!("error: failed to execute git commit: {e}"))?;
+    if !commit_out.status.success() {
+        return Err(format!(
+            "error: git commit failed: {}",
+            String::from_utf8_lossy(&commit_out.stderr)
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn copy_research_reports(
     scratch_report: &Path,
     research_report_path: &Path,
     report_to: Option<&Path>,
@@ -1198,7 +1261,7 @@ pub fn branch_exists_message(root: &Path, branch: &str, id: &str) -> String {
 }
 
 /// Source-state block for the research root and each read root, skipping duplicates.
-fn research_source_block(
+pub(crate) fn research_source_block(
     root: &Path,
     config_allow_read: &[PathBuf],
     allow_read: &[PathBuf],
@@ -1366,7 +1429,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
 
     let mut left_out: Vec<(String, String)> = Vec::new();
     let (gate, gate_source) = if args.research {
-        ("test -s report.md".to_string(), "research")
+        research_gate()
     } else if let Some(ref g) = args.gate {
         (g.clone(), "flag")
     } else if let Some(ref g) = dispatch_cfg.gate {
@@ -1409,10 +1472,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
 
     let model = args.model.as_ref().or(dispatch_cfg.model.as_ref());
     let (max_seconds, max_turns) = if args.research {
-        (
-            args.max_seconds.unwrap_or(1800),
-            args.max_turns.unwrap_or(300),
-        )
+        research_budgets(args)
     } else {
         (
             args.max_seconds
@@ -1956,58 +2016,9 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     }
 
     if args.research {
-        if let Err(e) = std::fs::create_dir_all(&worktree_dir) {
-            eprintln!(
-                "error creating scratch directory {}: {e}",
-                worktree_dir.display()
-            );
+        if let Err(e) = create_research_scratch_dir(&worktree_dir) {
+            eprintln!("{e}");
             return 2;
-        }
-        let init_out = Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&worktree_dir)
-            .output();
-        match init_out {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                eprintln!(
-                    "error: git init failed: {}",
-                    String::from_utf8_lossy(&o.stderr)
-                );
-                return 2;
-            }
-            Err(e) => {
-                eprintln!("error: failed to execute git init: {e}");
-                return 2;
-            }
-        }
-        let commit_out = Command::new("git")
-            .args([
-                "-c",
-                "user.name=blyte",
-                "-c",
-                "user.email=blyte@local",
-                "commit",
-                "-q",
-                "--allow-empty",
-                "-m",
-                "research",
-            ])
-            .current_dir(&worktree_dir)
-            .output();
-        match commit_out {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                eprintln!(
-                    "error: git commit failed: {}",
-                    String::from_utf8_lossy(&o.stderr)
-                );
-                return 2;
-            }
-            Err(e) => {
-                eprintln!("error: failed to execute git commit: {e}");
-                return 2;
-            }
         }
     } else if need_worktree_add {
         let base_ref = base_commit.as_deref().unwrap();
@@ -2353,13 +2364,7 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
     };
 
     let outcome = if args.research {
-        match pass1.report_outcome.as_str() {
-            "verified" => "verified",
-            "gate_failed" => "gate_failed",
-            "budget_exhausted" => "budget_exhausted",
-            "blocked" => "blocked",
-            _ => "error",
-        }
+        research_outcome(&pass1.report_outcome)
     } else {
         dispatch_outcome(&pass1.report_outcome, commits.len())
     };

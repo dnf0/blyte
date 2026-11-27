@@ -763,6 +763,7 @@ fn resolve_host_prefix(fs: &dyn Fs, path: &Path) -> Result<PathBuf, String> {
 
 fn check_protected_write(
     fs: &dyn Fs,
+    root: &Path,
     tool: &str,
     raw_path: &str,
     path: &Path,
@@ -774,6 +775,7 @@ fn check_protected_write(
         .filter(|h| !h.is_empty())
         .ok_or_else(|| format!("{tool}: cannot check protected paths without HOME"))?;
     let real_target = resolve_real_target(fs, path)?;
+    let real_root = resolve_host_prefix(fs, root)?;
     let home = resolve_host_prefix(fs, Path::new(&home_raw))?;
     let mut state_dirs: Vec<PathBuf> = Vec::new();
     let mut push_state_dir = |raw: PathBuf| -> Result<(), String> {
@@ -800,8 +802,15 @@ fn check_protected_write(
         }
     } else {
         for dir in &state_dirs {
+            let check_dir = if crate::sandbox::is_run_scratch_workspace(&real_root, dir)
+                && real_target.starts_with(&real_root)
+            {
+                None
+            } else {
+                Some(dir.as_path())
+            };
             if let Some(reason) =
-                crate::write_guard::protected_write(&real_target, &home, Some(dir))
+                crate::write_guard::protected_write(&real_target, &home, check_dir)
             {
                 return Err(format!(
                     "{tool}: {raw_path} is protected ({reason}); blyte does not write there"
@@ -1281,7 +1290,7 @@ fn execute_unbounded(
                 Ok(p) => p,
                 Err(e) => return ToolOutcome::err(e),
             };
-            if let Err(e) = check_protected_write(fs, "write", &raw_path, &path) {
+            if let Err(e) = check_protected_write(fs, root, "write", &raw_path, &path) {
                 return ToolOutcome::err(e);
             }
             if let Err(e) = check_write_scope(fs, "write", &path) {
@@ -1298,7 +1307,7 @@ fn execute_unbounded(
                 Ok(p) => p,
                 Err(e) => return ToolOutcome::err(e),
             };
-            if let Err(e) = check_protected_write(fs, "edit", &raw_path, &path) {
+            if let Err(e) = check_protected_write(fs, root, "edit", &raw_path, &path) {
                 return ToolOutcome::err(e);
             }
             if let Err(e) = check_write_scope(fs, "edit", &path) {

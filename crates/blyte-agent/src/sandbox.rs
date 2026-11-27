@@ -548,6 +548,37 @@ pub fn is_protected_read(path: &Path) -> Result<bool, String> {
     is_protected_read_with(path, &protected)
 }
 
+pub(crate) fn is_run_scratch_workspace(workspace_root: &Path, state_dir: &Path) -> bool {
+    let Ok(rel) = workspace_root.strip_prefix(state_dir) else {
+        return false;
+    };
+    let mut comps = rel.components();
+    let (Some(c0), Some(c1), Some(c2), Some(c3), None) = (
+        comps.next(),
+        comps.next(),
+        comps.next(),
+        comps.next(),
+        comps.next(),
+    ) else {
+        return false;
+    };
+    let (
+        std::path::Component::Normal(p0),
+        std::path::Component::Normal(p1),
+        std::path::Component::Normal(p2),
+        std::path::Component::Normal(p3),
+    ) = (c0, c1, c2, c3)
+    else {
+        return false;
+    };
+    p0 == "folders"
+        && p2 == "runs"
+        && !p3.is_empty()
+        && p1.to_str().is_some_and(|s| {
+            s.len() == 16 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+}
+
 pub(crate) fn is_in_blyte_own_dir(real_target: &Path) -> Result<bool, String> {
     let mut raw = Vec::new();
     if let Some(dir) = state_blyte_dir() {
@@ -1267,12 +1298,21 @@ fn default_profile_base(root: &Path, allow_read: &[PathBuf]) -> String {
         Some(home) if !home.is_empty() => read_denied(Path::new(&home)),
         _ => Vec::new(),
     };
-    deny_state_blyte_write(profile_with(
+    let mut profile = deny_state_blyte_write(profile_with(
         root,
         &default_allowed(root),
         &deny_read,
         allow_read,
-    ))
+    ));
+    if let Some(state_dir) = state_blyte_dir() {
+        let real_root = canonicalize_existing_prefix(root);
+        let real_state = canonicalize_existing_prefix(&state_dir);
+        if is_run_scratch_workspace(&real_root, &real_state) {
+            let escaped = escape_subpath(&real_root);
+            profile.push_str(&format!(r#"(allow file-write* (subpath "{escaped}"))"#));
+        }
+    }
+    profile
 }
 
 /// Returns the default sandbox profile for the current platform.

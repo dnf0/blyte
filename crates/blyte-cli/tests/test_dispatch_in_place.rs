@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use blyte_agent::sandbox;
 use blyte_cli::dispatch::exit_code;
 use blyte_cli::dispatch_in_place::{
-    in_place_outcome, records_dir_for, unix_timestamp_secs, wrap_in_place_task, IN_PLACE_RULES,
+    in_place_outcome, records_dir_for, unix_timestamp_secs, wrap_in_place_research,
+    wrap_in_place_task, IN_PLACE_RULES, NON_GIT_RESEARCH_NOTE,
 };
 
 fn sandbox_can_apply() -> Result<(), &'static str> {
@@ -403,26 +404,21 @@ fn reusing_finished_id_is_refused() {
 }
 
 #[test]
-fn research_and_base_flags_are_refused() {
+fn base_and_research_base_flags_are_refused() {
     let env = TestEnv::new();
 
-    let research = env.blyte(
+    let research_base = env.blyte(
         &[
             "dispatch",
             "R1",
             env.task_file.to_str().unwrap(),
             "--research",
+            "--base",
+            "main",
         ],
         None,
     );
-    assert_eq!(research.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&research.stderr);
-    assert!(
-        stderr.contains(
-            "research runs in a folder that is not a git repository are not supported yet"
-        ),
-        "unexpected stderr: {stderr}"
-    );
+    assert_eq!(research_base.status.code(), Some(2));
 
     let base = env.blyte(
         &[
@@ -876,4 +872,560 @@ fn budget_exhausted_leaves_in_place_edits_recorded_without_rollback() {
         diff.contains("+partial edit"),
         "diff missing partial edit: {diff}"
     );
+}
+
+fn read_tool_turn(call_id: &str, path: &str) -> serde_json::Value {
+    let args = serde_json::json!({ "path": path }).to_string();
+    serde_json::json!({
+        "id": "r-read",
+        "object": "chat.completion",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "read",
+                        "arguments": args,
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 25,
+            "total_tokens": 125,
+        }
+    })
+}
+
+fn bash_tool_turn(call_id: &str, command: &str) -> serde_json::Value {
+    let args = serde_json::json!({ "command": command }).to_string();
+    serde_json::json!({
+        "id": "r-bash",
+        "object": "chat.completion",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "bash",
+                        "arguments": args,
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 25,
+            "total_tokens": 125,
+        }
+    })
+}
+
+fn start_recording_server(
+    turns: Vec<serde_json::Value>,
+) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let idx = AtomicUsize::new(0);
+    let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = std::sync::Arc::clone(&bodies);
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let req_body = read_http_body(&mut stream);
+            captured.lock().unwrap().push(req_body.clone());
+            let body = if req_body.contains("### Claim ") {
+                stop_turn(r#"[{"id": 1, "verdict": "supported", "reason": "matches quoted line"}]"#)
+                    .to_string()
+            } else {
+                let i = idx.fetch_add(1, Ordering::SeqCst);
+                turns
+                    .get(i)
+                    .unwrap_or_else(|| turns.last().unwrap())
+                    .to_string()
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (port, bodies)
+}
+
+impl TestEnv {
+    fn blyte_with_home(&self, args: &[&str], port: Option<u16>, home: &Path) -> Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_blyte"));
+        cmd.args(args)
+            .current_dir(&self.folder)
+            .env("HOME", home)
+            .env("XDG_CONFIG_HOME", &self.home)
+            .env("BLYTE_STATE_DIR", &self.state_dir)
+            .env("BLYTE_NO_UPDATE_CHECK", "1")
+            .env("BLYTE_NO_KEEP_AWAKE", "1")
+            .env("BLYTE_USAGE_LOG", "off")
+            .env("BLYTE_GATE_SLOT_DIR", self.home.join("slots"))
+            .env("BLYTE_GATE_SLOTS", "16")
+            .env("BLYTE_ENV_FILE", "")
+            .env_remove("GEMINI_API_KEY")
+            .env_remove("GOOGLE_API_KEY")
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("OPENROUTER_API_KEY")
+            .env_remove("OLLAMA_HOST")
+            .env_remove("OLLAMA_API_KEY")
+            .env_remove("OPENAI_BASE_URL")
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("BLYTE_MODEL")
+            .env_remove("BLYTE_MODEL_SHELL");
+        if let Some(p) = port {
+            cmd.env("OPENAI_BASE_URL", format!("http://127.0.0.1:{p}/v1"))
+                .env("OPENAI_API_KEY", "test")
+                .env("BLYTE_MODEL", "openai/gemini-3.8-flash");
+        }
+        cmd.output().unwrap()
+    }
+}
+
+#[test]
+fn research_run_reads_notes_and_writes_verified_report() {
+    let env = TestEnv::new();
+    std::fs::write(
+        env.folder.join("notes.txt"),
+        "line one\nimportant fact from notes\nline three\n",
+    )
+    .unwrap();
+    let notes_full = env.canonical_folder().join("notes.txt");
+    let notes_str = notes_full.display().to_string();
+    let report_md = format!(
+        "# Findings\n\nThe notes record the key fact at `{notes_str}:2`:\n\n```text\nimportant fact from notes\n```\n"
+    );
+
+    let (port, requests) = start_recording_server(vec![
+        read_tool_turn("call_read", &notes_str),
+        write_tool_turn("report.md", &report_md),
+        stop_turn("wrote report.md"),
+    ]);
+
+    let out = env.blyte(
+        &[
+            "dispatch",
+            "R1",
+            env.task_file.to_str().unwrap(),
+            "--research",
+            "--sandbox",
+            "off",
+        ],
+        Some(port),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON summary");
+    let store = env.run_store();
+    let scratch_dir = store.join("R1");
+    let expected_report = store.join("R1.report.md");
+
+    assert_eq!(summary["outcome"], "verified");
+    assert_eq!(summary["branch"], "");
+    assert_eq!(summary["commits"], serde_json::json!([]));
+    assert_eq!(summary["changed_files"], serde_json::json!([]));
+    assert_eq!(summary["gate_source"], "research");
+    assert_eq!(summary["worktree"], scratch_dir.display().to_string());
+    assert_eq!(
+        summary["research_report"],
+        expected_report.display().to_string()
+    );
+
+    let saved_report = std::fs::read_to_string(&expected_report).unwrap();
+    assert!(
+        saved_report.contains("important fact from notes"),
+        "report missing quoted line: {saved_report}"
+    );
+    assert!(
+        !saved_report.contains("NOT VERIFIED"),
+        "verified report should not have unverified banner: {saved_report}"
+    );
+
+    assert_eq!(
+        dir_entries(&env.folder),
+        BTreeSet::from(["notes.txt".to_string()])
+    );
+
+    let start: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(store.join("R1.start.json")).unwrap())
+            .unwrap();
+    assert_eq!(start["in_place"], false);
+    assert_eq!(start["research"], true);
+    assert_eq!(start["branch"], "");
+    assert_eq!(start["worktree"], scratch_dir.display().to_string());
+
+    let recorded = requests.lock().unwrap();
+    assert!(
+        recorded
+            .first()
+            .is_some_and(|b| b.contains(NON_GIT_RESEARCH_NOTE)),
+        "research prompt should contain non-git full-path citation note"
+    );
+
+    let wrapped = wrap_in_place_research("What is in notes.txt?", &env.canonical_folder(), "SRC");
+    assert!(wrapped.contains(NON_GIT_RESEARCH_NOTE));
+    assert!(wrapped.contains("SRC"));
+    assert!(wrapped.contains("What is in notes.txt?"));
+}
+
+#[test]
+fn research_run_refuses_write_to_folder() {
+    let env = TestEnv::new();
+    let target = env.canonical_folder().join("x.txt");
+    let target_str = target.display().to_string();
+
+    let (port, requests) = start_recording_server(vec![
+        write_tool_turn(&target_str, "should be refused\n"),
+        write_tool_turn("report.md", "# Findings\n\nWrite was refused.\n"),
+        stop_turn("done"),
+    ]);
+
+    let out = env.blyte(
+        &[
+            "dispatch",
+            "R_WRITE",
+            env.task_file.to_str().unwrap(),
+            "--research",
+            "--sandbox",
+            "off",
+        ],
+        Some(port),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !env.folder.join("x.txt").exists(),
+        "x.txt must not exist in folder after refused write"
+    );
+    assert!(dir_entries(&env.folder).is_empty());
+
+    let recorded = requests.lock().unwrap();
+    let second_req = recorded.get(1).expect("second turn request");
+    assert!(
+        second_req.contains("error") || second_req.contains("outside"),
+        "write tool should have returned refusal to model: {second_req}"
+    );
+}
+
+#[test]
+fn research_run_succeeds_while_folder_lock_is_held() {
+    let env = TestEnv::new();
+    let lock_path = env.lock_path();
+    let holder = blyte_agent::folder_lock::Holder {
+        pid: std::process::id(),
+        kind: "run".to_string(),
+        id: "HOLDER1".to_string(),
+    };
+    let _lock = blyte_agent::folder_lock::acquire(&lock_path, &holder).unwrap();
+
+    let (port, _requests) = start_recording_server(vec![
+        write_tool_turn("report.md", "# Findings\n\nRan alongside holder.\n"),
+        stop_turn("done"),
+    ]);
+
+    let out = env.blyte(
+        &[
+            "dispatch",
+            "R_LOCK",
+            env.task_file.to_str().unwrap(),
+            "--research",
+            "--sandbox",
+            "off",
+        ],
+        Some(port),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON summary");
+    assert_eq!(summary["outcome"], "verified");
+    assert!(env.run_store().join("R_LOCK.report.md").exists());
+}
+
+#[test]
+fn research_run_read_tool_refuses_aws_credentials() {
+    let env = TestEnv::new();
+    let secret = "AKIA_TEST_SECRET_READ_TOOL_12345";
+    std::fs::create_dir_all(env.folder.join(".aws")).unwrap();
+    std::fs::write(
+        env.folder.join(".aws").join("credentials"),
+        format!("[default]\naws_access_key_id = {secret}\n"),
+    )
+    .unwrap();
+    let root = env.canonical_folder();
+    let creds = root.join(".aws").join("credentials");
+    let creds_str = creds.display().to_string();
+
+    let (port, requests) = start_recording_server(vec![
+        read_tool_turn("call_read_creds", &creds_str),
+        write_tool_turn("report.md", "# Findings\n\nCould not read credentials.\n"),
+        stop_turn("done"),
+    ]);
+
+    let out = env.blyte_with_home(
+        &[
+            "dispatch",
+            "R_CREDS_READ",
+            env.task_file.to_str().unwrap(),
+            "--research",
+            "--sandbox",
+            "off",
+        ],
+        Some(port),
+        &root,
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let recorded = requests.lock().unwrap();
+    for (idx, body) in recorded.iter().enumerate() {
+        assert!(
+            !body.contains(secret),
+            "request {idx} leaked credential secret: {body}"
+        );
+    }
+    let after_read = recorded.get(1).expect("turn after read tool");
+    assert!(
+        after_read.contains("credential path")
+            || after_read.contains("read was not made")
+            || after_read.contains("denied")
+            || after_read.contains("protected")
+            || after_read.contains("refused"),
+        "expected read tool refusal in turn 2 request: {after_read}"
+    );
+}
+
+#[test]
+fn research_run_refuses_reading_aws_credentials() {
+    if let Err(reason) = sandbox_can_apply() {
+        eprintln!("skipping research_run_refuses_reading_aws_credentials: {reason}");
+        return;
+    }
+
+    let env = TestEnv::new();
+    let secret = "AKIA_TEST_SECRET_VALUE_987654";
+    std::fs::create_dir_all(env.folder.join(".aws")).unwrap();
+    std::fs::write(
+        env.folder.join(".aws").join("credentials"),
+        format!("[default]\naws_access_key_id = {secret}\n"),
+    )
+    .unwrap();
+    let root = env.canonical_folder();
+    let creds = root.join(".aws").join("credentials");
+    let creds_str = creds.display().to_string();
+
+    let (port, requests) = start_recording_server(vec![
+        read_tool_turn("call_read_creds", &creds_str),
+        bash_tool_turn("call_bash_creds", &format!("cat '{creds_str}'")),
+        write_tool_turn("report.md", "# Findings\n\nCould not read credentials.\n"),
+        stop_turn("done"),
+    ]);
+
+    let out = env.blyte_with_home(
+        &[
+            "dispatch",
+            "R_CREDS",
+            env.task_file.to_str().unwrap(),
+            "--research",
+        ],
+        Some(port),
+        &root,
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let recorded = requests.lock().unwrap();
+    for (idx, body) in recorded.iter().enumerate() {
+        assert!(
+            !body.contains(secret),
+            "request {idx} leaked credential secret: {body}"
+        );
+    }
+    let after_read = recorded.get(1).expect("turn after read tool");
+    assert!(
+        after_read.contains("credential path")
+            || after_read.contains("read was not made")
+            || after_read.contains("denied")
+            || after_read.contains("protected")
+            || after_read.contains("refused"),
+        "expected read tool refusal in turn 2 request: {after_read}"
+    );
+    let after_bash = recorded.get(2).expect("turn after bash tool");
+    assert!(
+        after_bash.contains("Operation not permitted")
+            || after_bash.contains("Permission denied")
+            || after_bash.contains("exit"),
+        "expected sandboxed shell refusal in turn 3 request: {after_bash}"
+    );
+}
+
+#[test]
+fn research_run_report_to_receives_report() {
+    let env = TestEnv::new();
+    let dest = env._tmp.path().join("out").join("copied-report.md");
+
+    let (port, _requests) = start_recording_server(vec![
+        write_tool_turn("report.md", "# Findings\n\nCopied report body.\n"),
+        stop_turn("done"),
+    ]);
+
+    let out = env.blyte(
+        &[
+            "dispatch",
+            "R_COPY",
+            env.task_file.to_str().unwrap(),
+            "--research",
+            "--sandbox",
+            "off",
+            "--report-to",
+            dest.to_str().unwrap(),
+        ],
+        Some(port),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON summary");
+    assert_eq!(summary["outcome"], "verified");
+
+    let copied = std::fs::read_to_string(&dest).unwrap();
+    assert!(
+        copied.contains("Copied report body."),
+        "report-to missing body: {copied}"
+    );
+    let store_report = std::fs::read_to_string(env.run_store().join("R_COPY.report.md")).unwrap();
+    assert_eq!(copied, store_report);
+}
+
+#[test]
+fn research_run_unverified_report_gets_banner_and_restart_reuses_scratch() {
+    let env = TestEnv::new();
+    let dest = env._tmp.path().join("unverified.md");
+    let (port1, _req1) = start_recording_server(vec![write_tool_turn(
+        "report.md",
+        "# Partial\n\nRan out of turns.\n",
+    )]);
+
+    let out1 = env.blyte(
+        &[
+            "dispatch",
+            "R_UNV",
+            env.task_file.to_str().unwrap(),
+            "--research",
+            "--sandbox",
+            "off",
+            "--max-turns",
+            "1",
+            "--report-to",
+            dest.to_str().unwrap(),
+        ],
+        Some(port1),
+    );
+    assert_eq!(
+        out1.status.code(),
+        Some(exit_code("budget_exhausted")),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out1.stdout),
+        String::from_utf8_lossy(&out1.stderr)
+    );
+    let store = env.run_store();
+    let store_report = std::fs::read_to_string(store.join("R_UNV.report.md")).unwrap();
+    assert!(
+        store_report.contains("did not pass") || store_report.contains("NOT VERIFIED"),
+        "expected unverified banner in store report: {store_report}"
+    );
+    let dest_report = std::fs::read_to_string(&dest).unwrap();
+    assert!(
+        dest_report.contains("did not pass") || dest_report.contains("NOT VERIFIED"),
+        "expected unverified banner in --report-to file: {dest_report}"
+    );
+
+    let scratch = store.join("R_RESTART");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&scratch)
+        .status()
+        .unwrap();
+    assert!(init.success());
+    std::fs::write(scratch.join("prior.txt"), "kept\n").unwrap();
+    std::fs::write(store.join("R_RESTART.log"), "prior line\n").unwrap();
+    std::fs::write(
+        store.join("R_RESTART.start.json"),
+        "{\"id\":\"R_RESTART\"}\n",
+    )
+    .unwrap();
+
+    let (port2, _req2) = start_recording_server(vec![
+        write_tool_turn("report.md", "# Restarted\n\nFinished after restart.\n"),
+        stop_turn("done"),
+    ]);
+    let out2 = env.blyte(
+        &[
+            "dispatch",
+            "R_RESTART",
+            env.task_file.to_str().unwrap(),
+            "--research",
+            "--sandbox",
+            "off",
+        ],
+        Some(port2),
+    );
+    assert_eq!(
+        out2.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out2.stdout),
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch.join("prior.txt")).unwrap(),
+        "kept\n"
+    );
+    let log = std::fs::read_to_string(store.join("R_RESTART.log")).unwrap();
+    assert!(log.starts_with("prior line\n"));
 }

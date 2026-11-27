@@ -3,10 +3,23 @@ use std::process::Command;
 
 use crate::cli::DispatchArgs;
 use crate::dispatch::{
-    exit_code, load_task_text, parse_pass_report, pass_report_from_error, quick_steps,
-    resolve_max_cost, run_implementer_pass, write_start_record, write_summary_to_dir,
-    DispatchSummary, ImplementerConfig,
+    copy_research_reports, create_research_scratch_dir, exit_code, load_task_text,
+    parse_pass_report, pass_report_from_error, quick_steps, research_budgets, research_gate,
+    research_outcome, research_source_block, resolve_max_cost, run_implementer_pass,
+    unreadable_paths, wrap_research, write_start_record, write_summary_to_dir, DispatchSummary,
+    ImplementerConfig,
 };
+
+pub const NON_GIT_RESEARCH_NOTE: &str =
+    "This folder is not a git repository: cite every file by its full path.";
+
+pub fn wrap_in_place_research(question: &str, root: &Path, source_block: &str) -> String {
+    format!(
+        "{}\n\n{}",
+        wrap_research(&format!("{source_block}\n\n{question}"), root),
+        NON_GIT_RESEARCH_NOTE
+    )
+}
 
 pub const IN_PLACE_RULES: &str = r#"Rules:
 - You are working directly in the user's folder, not a copy.
@@ -171,12 +184,6 @@ pub fn run(args: &DispatchArgs) -> i32 {
         }
     };
 
-    if args.research {
-        eprintln!(
-            "error: research runs in a folder that is not a git repository are not supported yet"
-        );
-        return 2;
-    }
     if args.base != "HEAD" {
         eprintln!("error: --base needs a git repository");
         return 2;
@@ -196,13 +203,6 @@ pub fn run(args: &DispatchArgs) -> i32 {
             return 2;
         }
     };
-    let lock_path = match crate::surface_dir::in_place_lock_path(&state_dir, &root) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return 2;
-        }
-    };
 
     let task_md_path = store.join(format!("{}.task.md", args.id));
     let start_path = store.join(format!("{}.start.json", args.id));
@@ -213,6 +213,8 @@ pub fn run(args: &DispatchArgs) -> i32 {
     let diff_path = store.join(format!("{}.diff", args.id));
     let before_dir = store.join(format!("{}.before", args.id));
     let after_dir = store.join(format!("{}.after", args.id));
+    let scratch_dir = store.join(&args.id);
+    let research_report_path = store.join(format!("{}.report.md", args.id));
 
     if summary_path.exists() {
         eprintln!(
@@ -223,16 +225,27 @@ pub fn run(args: &DispatchArgs) -> i32 {
     }
     let is_restart = start_path.exists();
 
-    let holder = blyte_agent::folder_lock::Holder {
-        pid: std::process::id(),
-        kind: "run".to_string(),
-        id: args.id.clone(),
-    };
-    let _lock = match blyte_agent::folder_lock::acquire(&lock_path, &holder) {
-        Ok(lock) => lock,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return 2;
+    let _lock = if args.research {
+        None
+    } else {
+        let lock_path = match crate::surface_dir::in_place_lock_path(&state_dir, &root) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
+            }
+        };
+        let holder = blyte_agent::folder_lock::Holder {
+            pid: std::process::id(),
+            kind: "run".to_string(),
+            id: args.id.clone(),
+        };
+        match blyte_agent::folder_lock::acquire(&lock_path, &holder) {
+            Ok(lock) => Some(lock),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
+            }
         }
     };
 
@@ -245,11 +258,15 @@ pub fn run(args: &DispatchArgs) -> i32 {
     };
     let dispatch_cfg = repo_cfg.map(|c| c.dispatch).unwrap_or_default();
 
-    let (gate, gate_source) = match (&args.gate, &dispatch_cfg.gate) {
-        (Some(g), _) if !g.trim().is_empty() => (g.clone(), "flag"),
-        (Some(_), _) => (String::new(), "none"),
-        (None, Some(g)) if !g.trim().is_empty() => (g.clone(), "blyte.toml"),
-        _ => (String::new(), "none"),
+    let (gate, gate_source) = if args.research {
+        research_gate()
+    } else {
+        match (&args.gate, &dispatch_cfg.gate) {
+            (Some(g), _) if !g.trim().is_empty() => (g.clone(), "flag"),
+            (Some(_), _) => (String::new(), "none"),
+            (None, Some(g)) if !g.trim().is_empty() => (g.clone(), "blyte.toml"),
+            _ => (String::new(), "none"),
+        }
     };
     let has_gate = !gate.trim().is_empty();
 
@@ -261,6 +278,12 @@ pub fn run(args: &DispatchArgs) -> i32 {
         Ok(Some(pair)) => pair,
         Ok(None) => {
             eprintln!("error: give a task file, or --plan with --plan-task");
+            if args.research {
+                eprintln!(
+                    "A research question needs these sections:\n\n{}",
+                    crate::research_brief::TEMPLATE
+                );
+            }
             return 2;
         }
         Err(msg) => {
@@ -273,6 +296,31 @@ pub fn run(args: &DispatchArgs) -> i32 {
         }
     };
 
+    let brief_missing = args
+        .research
+        .then(|| crate::research_brief::missing_sections(&task_content));
+    if let Some(ref missing) = brief_missing {
+        if !args.no_brief_check {
+            if !missing.is_empty() {
+                eprintln!(
+                    "blyte: warning: the research question has no section for: {}. Questions with all four run faster and fail less (the template: blyte dispatch {} --research); --no-brief-check hides this.",
+                    missing.join(", "),
+                    args.id
+                );
+            }
+            let unverified = crate::research_brief::unverified_inputs(&task_content, &root);
+            if !unverified.is_empty() {
+                let paths: Vec<String> =
+                    unverified.iter().map(|p| p.display().to_string()).collect();
+                eprintln!(
+                    "blyte: the question names a report that did not pass blyte's checks: {}. Use a verified report, or --no-brief-check to start anyway.",
+                    paths.join(", ")
+                );
+                return 2;
+            }
+        }
+    }
+
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let config_allow_read =
         match crate::config::expand_allow_read(&dispatch_cfg.allow_read, home.as_deref(), &root) {
@@ -283,6 +331,25 @@ pub fn run(args: &DispatchArgs) -> i32 {
             }
         };
 
+    if args.research && !args.no_path_check {
+        let mut readable = vec![root.clone()];
+        readable.extend(config_allow_read.iter().cloned());
+        readable.extend(args.allow_read.iter().cloned());
+        let bad = unreadable_paths(&task_content, &readable);
+        if !bad.is_empty() {
+            let shown: Vec<String> = bad
+                .iter()
+                .take(5)
+                .map(|p| p.display().to_string())
+                .collect();
+            eprintln!(
+                "blyte: the task names paths this run cannot read: {}. Add --allow-read <dir> for each (or --no-path-check to start anyway).",
+                shown.join(", ")
+            );
+            return 2;
+        }
+    }
+
     let current_exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -292,11 +359,16 @@ pub fn run(args: &DispatchArgs) -> i32 {
     };
 
     let model = args.model.as_deref().or(dispatch_cfg.model.as_deref());
-    let max_seconds = args
-        .max_seconds
-        .or(dispatch_cfg.max_seconds)
-        .unwrap_or(3600);
-    let max_turns = args.max_turns.or(dispatch_cfg.max_turns).unwrap_or(300);
+    let (max_seconds, max_turns) = if args.research {
+        research_budgets(args)
+    } else {
+        (
+            args.max_seconds
+                .or(dispatch_cfg.max_seconds)
+                .unwrap_or(3600),
+            args.max_turns.or(dispatch_cfg.max_turns).unwrap_or(300),
+        )
+    };
     let max_cost = resolve_max_cost(args.max_cost_usd, dispatch_cfg.max_cost);
     let fold_budget = args.fold_budget.or(dispatch_cfg.fold_budget);
     let network = args
@@ -310,13 +382,29 @@ pub fn run(args: &DispatchArgs) -> i32 {
         return 2;
     }
 
-    let mut prompt = wrap_in_place_task(&task_content);
-    if has_gate {
-        if let Some(qs) = quick_steps(&gate) {
-            prompt.push_str("\n\n");
-            prompt.push_str(&qs);
+    let worktree_dir: &Path = if args.research { &scratch_dir } else { &root };
+    if args.research && !scratch_dir.join(".git").is_dir() {
+        if let Err(e) = create_research_scratch_dir(&scratch_dir) {
+            eprintln!("{e}");
+            return 2;
         }
     }
+
+    let research_sources = args
+        .research
+        .then(|| research_source_block(&root, &config_allow_read, &args.allow_read));
+    let prompt = if let Some(ref block) = research_sources {
+        wrap_in_place_research(&task_content, &root, block)
+    } else {
+        let mut prompt = wrap_in_place_task(&task_content);
+        if has_gate {
+            if let Some(qs) = quick_steps(&gate) {
+                prompt.push_str("\n\n");
+                prompt.push_str(&qs);
+            }
+        }
+        prompt
+    };
 
     let started_at = match unix_timestamp_secs(std::time::SystemTime::now()) {
         Ok(secs) => secs,
@@ -330,13 +418,17 @@ pub fn run(args: &DispatchArgs) -> i32 {
         std::env::var("BLYTE_SESSION").ok(),
         std::env::var("CLAUDE_CODE_SESSION_ID").ok(),
     );
+    let mut tags = args.tags.clone();
+    if args.research {
+        tags.push("research".to_string());
+    }
     let mut start_record = serde_json::json!({
         "id": args.id,
         "pid": std::process::id(),
         "started_at": started_at,
         "task_file": recorded_task_file,
         "gate": gate,
-        "tags": args.tags,
+        "tags": tags,
         "env": env_names,
         "max_turns": max_turns,
         "max_seconds": max_seconds,
@@ -348,8 +440,8 @@ pub fn run(args: &DispatchArgs) -> i32 {
         "base_sha": serde_json::Value::Null,
         "base_check": "off",
         "comments": "off",
-        "in_place": true,
-        "worktree": root.display().to_string(),
+        "in_place": !args.research,
+        "worktree": worktree_dir.display().to_string(),
         "branch": "",
     });
     if let Some(ref started_by) = args.started_by {
@@ -357,6 +449,10 @@ pub fn run(args: &DispatchArgs) -> i32 {
     }
     if let Some(ref s) = session {
         start_record["session"] = serde_json::json!(s);
+    }
+    if let Some(ref missing) = brief_missing {
+        start_record["research"] = serde_json::json!(true);
+        start_record["brief_missing"] = serde_json::json!(missing);
     }
 
     if let Err(e) = write_start_record(&start_path, &start_record) {
@@ -373,7 +469,7 @@ pub fn run(args: &DispatchArgs) -> i32 {
 
     let impl_cfg = ImplementerConfig {
         current_exe: &current_exe,
-        worktree_dir: &root,
+        worktree_dir,
         root: &root,
         id: &args.id,
         gate: &gate,
@@ -388,11 +484,19 @@ pub fn run(args: &DispatchArgs) -> i32 {
         config_allow_read: &config_allow_read,
         cli_allow_read: &args.allow_read,
         pass_env: &args.pass_env,
-        research: false,
+        research: args.research,
         no_claim_check: args.no_claim_check,
         left_out: &[],
-        snapshot_dir: Some(&before_dir),
-        snapshot_manifest: Some(&manifest_path),
+        snapshot_dir: if args.research {
+            None
+        } else {
+            Some(&before_dir)
+        },
+        snapshot_manifest: if args.research {
+            None
+        } else {
+            Some(&manifest_path)
+        },
     };
 
     let append_log_header = is_restart.then_some("== restart");
@@ -428,33 +532,108 @@ pub fn run(args: &DispatchArgs) -> i32 {
         Err(err_msg) => pass_report_from_error(err_msg, &args.sandbox),
     };
 
-    let snapshot_result =
-        blyte_agent::snapshot_fs::changed_files(&root, &before_dir, &manifest_path).and_then(
-            |files| {
-                let diff =
-                    blyte_agent::snapshot_fs::unified_diff(&root, &before_dir, &manifest_path)?;
-                std::fs::write(&diff_path, &diff)
-                    .map_err(|e| format!("cannot write {}: {e}", diff_path.display()))?;
-                Ok(files)
-            },
-        );
-
-    let (changed_files, outcome, error) = match snapshot_result {
-        Ok(files) => match copy_after_files(&root, &after_dir, &files) {
-            Ok(()) => {
-                let (outcome, unexpected_err) =
-                    in_place_outcome(&pass.report_outcome, has_gate, !files.is_empty());
-                let error = unexpected_err.or(pass.error);
-                (files, outcome, error)
+    let (changed_files, outcome, error, research_report) = if args.research {
+        let scratch_report = scratch_dir.join("report.md");
+        let is_non_empty = std::fs::metadata(&scratch_report)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
+        let mut copy_error = None;
+        if is_non_empty {
+            if let Err(err_msg) = copy_research_reports(
+                &scratch_report,
+                &research_report_path,
+                args.report_to.as_deref(),
+                research_sources.as_deref(),
+            ) {
+                if research_report_path.exists() {
+                    if let Err(err) =
+                        crate::provenance::mark_if_unverified(&research_report_path, "error", None)
+                    {
+                        eprintln!(
+                            "error: could not mark {} as not verified: {err}",
+                            research_report_path.display()
+                        );
+                    }
+                }
+                copy_error = Some(err_msg);
             }
-            Err(err_msg) => (files, "error", Some(err_msg)),
-        },
-        Err(err_msg) => (Vec::new(), "error", Some(err_msg)),
+        }
+        let (outcome, error) = if let Some(err_msg) = copy_error {
+            ("error", Some(err_msg))
+        } else {
+            let outcome = research_outcome(&pass.report_outcome);
+            if outcome == "verified" && !is_non_empty {
+                (
+                    "error",
+                    Some(format!(
+                        "research report {} is missing or empty",
+                        scratch_report.display()
+                    )),
+                )
+            } else {
+                (outcome, pass.error)
+            }
+        };
+        if research_report_path.exists() {
+            if let Err(err) = crate::provenance::mark_if_unverified(
+                &research_report_path,
+                outcome,
+                pass.report_turns,
+            ) {
+                eprintln!(
+                    "error: could not mark {} as not verified: {err}",
+                    research_report_path.display()
+                );
+            }
+        }
+        if let Some(ref report_to) = args.report_to {
+            if report_to.exists() {
+                if let Err(err) =
+                    crate::provenance::mark_if_unverified(report_to, outcome, pass.report_turns)
+                {
+                    eprintln!(
+                        "error: could not mark {} as not verified: {err}",
+                        report_to.display()
+                    );
+                }
+            }
+        }
+        let research_report = if research_report_path.exists() {
+            Some(research_report_path.display().to_string())
+        } else {
+            None
+        };
+        (Vec::new(), outcome, error, research_report)
+    } else {
+        let snapshot_result =
+            blyte_agent::snapshot_fs::changed_files(&root, &before_dir, &manifest_path).and_then(
+                |files| {
+                    let diff =
+                        blyte_agent::snapshot_fs::unified_diff(&root, &before_dir, &manifest_path)?;
+                    std::fs::write(&diff_path, &diff)
+                        .map_err(|e| format!("cannot write {}: {e}", diff_path.display()))?;
+                    Ok(files)
+                },
+            );
+
+        let (changed_files, outcome, error) = match snapshot_result {
+            Ok(files) => match copy_after_files(&root, &after_dir, &files) {
+                Ok(()) => {
+                    let (outcome, unexpected_err) =
+                        in_place_outcome(&pass.report_outcome, has_gate, !files.is_empty());
+                    let error = unexpected_err.or(pass.error);
+                    (files, outcome, error)
+                }
+                Err(err_msg) => (files, "error", Some(err_msg)),
+            },
+            Err(err_msg) => (Vec::new(), "error", Some(err_msg)),
+        };
+        (changed_files, outcome, error, None)
     };
 
     let summary = DispatchSummary {
         id: args.id.clone(),
-        worktree: root.display().to_string(),
+        worktree: worktree_dir.display().to_string(),
         branch: String::new(),
         outcome,
         exit: exit_code(outcome),
@@ -472,7 +651,7 @@ pub fn run(args: &DispatchArgs) -> i32 {
         log: log_path.display().to_string(),
         report: report_path.display().to_string(),
         gate_source,
-        research_report: None,
+        research_report,
         base_check_seconds: None,
         warnings: Vec::new(),
         fix_round: None,

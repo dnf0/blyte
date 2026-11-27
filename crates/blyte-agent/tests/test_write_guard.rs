@@ -336,3 +336,112 @@ fn write_tool_refuses_blyte_state_dir_in_a_background_run() {
     );
     assert!(!custom_state.join("x").exists());
 }
+
+#[test]
+fn run_scratch_workspace_allows_report_write_but_keeps_state_dir_and_dotenv_protected() {
+    let home = tempfile::tempdir().unwrap();
+    let custom_state = home.path().join("custom_state");
+    let scratch = custom_state
+        .join("folders")
+        .join("0123456789abcdef")
+        .join("runs")
+        .join("R1");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let _guard = EnvGuard::set(Some(home.path()), None, Some(&custom_state));
+
+    let shell = LocalShell::new();
+    let fs = LocalFs;
+
+    let ok_write = execute(
+        &scratch,
+        &shell,
+        &fs,
+        "write",
+        &json!({ "path": "report.md", "content": "# Findings\n" }),
+    );
+    assert!(!ok_write.is_error, "{}", ok_write.content);
+    assert_eq!(
+        std::fs::read_to_string(scratch.join("report.md")).unwrap(),
+        "# Findings\n"
+    );
+
+    let dotenv = execute(
+        &scratch,
+        &shell,
+        &fs,
+        "write",
+        &json!({ "path": ".env", "content": "SECRET=1\n" }),
+    );
+    assert!(dotenv.is_error, "{}", dotenv.content);
+    assert!(!scratch.join(".env").exists());
+
+    let sibling = execute(
+        &scratch,
+        &shell,
+        &fs,
+        "write",
+        &json!({ "path": "../R1.json", "content": "{}" }),
+    );
+    assert!(sibling.is_error, "{}", sibling.content);
+    assert!(!scratch.parent().unwrap().join("R1.json").exists());
+
+    let runs_dir = scratch.parent().unwrap();
+    let non_scratch = execute(
+        runs_dir,
+        &shell,
+        &fs,
+        "write",
+        &json!({ "path": "R1.json", "content": "{}" }),
+    );
+    assert!(non_scratch.is_error, "{}", non_scratch.content);
+    assert!(!runs_dir.join("R1.json").exists());
+
+    #[cfg(target_os = "macos")]
+    {
+        let scratch_canon = scratch.canonicalize().unwrap();
+        let state_canon = custom_state.canonicalize().unwrap();
+        let blyte_agent::sandbox::Profile::Seatbelt(profile) =
+            blyte_agent::sandbox::default_profile(&scratch, &[])
+        else {
+            panic!("expected Seatbelt profile on macOS");
+        };
+        let deny_rule = format!(
+            r#"(deny file-write* (subpath "{}"))"#,
+            state_canon.display()
+        );
+        let allow_rule = format!(
+            r#"(allow file-write* (subpath "{}"))"#,
+            scratch_canon.display()
+        );
+        let deny_idx = profile
+            .find(&deny_rule)
+            .expect("state dir deny rule present");
+        let allow_idx = profile
+            .rfind(&allow_rule)
+            .expect("scratch dir allow rule present");
+        assert!(
+            allow_idx > deny_idx,
+            "scratch allow rule must follow state dir deny rule in profile: {profile}"
+        );
+
+        let blyte_agent::sandbox::Profile::Seatbelt(runs_profile) =
+            blyte_agent::sandbox::default_profile(runs_dir, &[])
+        else {
+            panic!("expected Seatbelt profile on macOS");
+        };
+        let runs_canon = runs_dir.canonicalize().unwrap();
+        let runs_deny_idx = runs_profile
+            .find(&deny_rule)
+            .expect("state dir deny rule present");
+        let runs_allow_rule = format!(
+            r#"(allow file-write* (subpath "{}"))"#,
+            runs_canon.display()
+        );
+        assert!(
+            runs_profile[runs_deny_idx..]
+                .find(&runs_allow_rule)
+                .is_none(),
+            "non-scratch runs dir must not be re-allowed after state dir deny"
+        );
+    }
+}
