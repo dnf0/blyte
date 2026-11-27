@@ -4506,12 +4506,70 @@ const assert = require("assert");
   assert.strictEqual(failErr.textContent, xssMsg);
   assert.strictEqual(failErr._htmlSet, false);
 
+  let resolveReopenFail;
+  global.fetch = (url) => {
+    if (url === "/api/surfaces/start") {
+      return new Promise(resolve => { resolveReopenFail = resolve; });
+    }
+    if (url === "/api/surfaces") {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            surfaces: [runningSurface],
+            stopped: [],
+            folders: ["/tmp/alpha", "/tmp/beta"],
+          };
+        },
+      });
+    }
+    throw new Error("unexpected fetch: " + url);
+  };
+
+  renderSurfaceList(container, [runningSurface], [], ["/tmp/alpha", "/tmp/beta"]);
+  const beforeReopenNodes = collectNodes(container);
+  const beforeInput = beforeReopenNodes.find(n => n.id === "surface-start-folder");
+  const beforeBtn = beforeReopenNodes.find(n => n.className.includes("surface-switcher-start-btn"));
+  beforeInput.value = "/tmp/reopen-fail";
+  beforeBtn.listeners.get("click")[0]({ stopPropagation() {} });
+  assert.strictEqual(surfaceStarting, true);
+  assert.strictEqual(beforeBtn.disabled, true);
+  assert.strictEqual(beforeBtn.textContent, "Starting\u2026");
+
+  closeSurfaceSwitcher();
+  await openSurfaceSwitcher();
+  const afterReopenNodes = collectNodes(container);
+  const afterInput = afterReopenNodes.find(n => n.id === "surface-start-folder");
+  const afterBtn = afterReopenNodes.find(n => n.className.includes("surface-switcher-start-btn"));
+  const afterErr = afterReopenNodes.find(n => n.className.includes("surface-switcher-start-error"));
+  assert.notStrictEqual(afterBtn, beforeBtn);
+  assert.strictEqual(afterInput.value, "/tmp/reopen-fail");
+  assert.strictEqual(afterInput.disabled, true);
+  assert.strictEqual(afterBtn.disabled, true);
+  assert.strictEqual(afterBtn.textContent, "Starting\u2026");
+
+  resolveReopenFail({
+    ok: false,
+    status: 500,
+    async text() { return JSON.stringify({ error: "child exited early" }); },
+    async json() { return { error: "child exited early" }; },
+  });
+  await new Promise(r => setImmediate(r));
+  assert.strictEqual(surfaceStarting, false);
+  assert.strictEqual(afterInput.disabled, false);
+  assert.strictEqual(afterBtn.disabled, false);
+  assert.strictEqual(afterBtn.textContent, "Start");
+  assert.strictEqual(afterErr.hidden, false);
+  assert.strictEqual(afterErr.textContent, "child exited early");
+  assert.strictEqual(afterErr._htmlSet, false);
+
   const stopCalls = [];
   global.fetch = async (url, opts) => {
     stopCalls.push({ url, opts });
     return { ok: true, status: 202, async json() { return { stopping: true }; } };
   };
-  const stopBtn = failNodes.find(n => n.className.includes("surface-switcher-stop-btn"));
+  const stopBtn = afterReopenNodes.find(n => n.className.includes("surface-switcher-stop-btn"));
   assert.ok(stopBtn, "expected stop button on current surface row");
   assert.strictEqual(stopBtn.textContent, "Stop");
   const clickStop = stopBtn.listeners.get("click")[0];

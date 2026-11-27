@@ -413,6 +413,21 @@ fn start_surface_in_another_folder_outlives_first_and_stops_cleanly() {
         "first surface stderr leaked new surface token"
     );
 
+    let start_logs_dir = state_dir.join("surface-starts");
+    assert!(
+        start_logs_dir.is_dir(),
+        "expected start logs dir at {}",
+        start_logs_dir.display()
+    );
+    let remaining_logs: Vec<_> = std::fs::read_dir(&start_logs_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert!(
+        remaining_logs.is_empty(),
+        "start log files were not removed after successful start: {remaining_logs:?}"
+    );
+
     let first_health = get_json(first.port, "/api/health", None).1;
     let first_surface_id = first_health["surface_id"].as_str().unwrap().to_string();
     let first_registry_path = state_dir
@@ -559,6 +574,21 @@ fn start_surface_validation_errors_and_early_child_exit() {
     assert!(
         msg_exit.contains("exited") && msg_exit.contains("blyte:"),
         "expected child output in 500 error: {msg_exit:?}"
+    );
+
+    let start_logs_dir = state_dir.join("surface-starts");
+    assert!(
+        start_logs_dir.is_dir(),
+        "expected start logs dir at {}",
+        start_logs_dir.display()
+    );
+    let remaining_logs: Vec<_> = std::fs::read_dir(&start_logs_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert!(
+        remaining_logs.is_empty(),
+        "start log files were not removed after early child exit: {remaining_logs:?}"
     );
 
     let (stop_status, _) = post_json(first.port, "/api/session/stop", Some(&first.token), "{}");

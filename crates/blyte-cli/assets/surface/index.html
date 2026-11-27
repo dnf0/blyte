@@ -3203,6 +3203,7 @@
     let surfaceStarting = false;
     let surfaceStartFolderValue = "";
     let surfaceStartError = "";
+    let surfaceStartControls = null;
     let surfaceStopConfirming = false;
 
     const seenSeqs = new Set();
@@ -4053,30 +4054,33 @@
       showSurfaceStopped(name);
     }
 
-    async function startSurfaceInFolder(inputEl, startBtn, errEl) {
+    function syncSurfaceStartControls() {
+      if (!surfaceStartControls) return;
+      const { inputEl, startBtn, errEl } = surfaceStartControls;
+      if (startBtn) {
+        startBtn.disabled = surfaceStarting;
+        startBtn.textContent = surfaceStarting ? "Starting\u2026" : "Start";
+      }
+      if (inputEl) {
+        inputEl.disabled = surfaceStarting;
+      }
+      if (errEl) {
+        errEl.textContent = surfaceStartError;
+        errEl.hidden = !surfaceStartError;
+      }
+    }
+
+    async function startSurfaceInFolder(inputEl) {
       const folder = String(inputEl ? inputEl.value : "").trim();
       surfaceStartFolderValue = folder;
       if (!folder) {
         surfaceStartError = "Enter a folder path.";
-        if (errEl) {
-          errEl.textContent = surfaceStartError;
-          errEl.hidden = false;
-        }
+        syncSurfaceStartControls();
         return;
       }
       surfaceStarting = true;
       surfaceStartError = "";
-      if (startBtn) {
-        startBtn.disabled = true;
-        startBtn.textContent = "Starting\u2026";
-      }
-      if (inputEl) {
-        inputEl.disabled = true;
-      }
-      if (errEl) {
-        errEl.textContent = "";
-        errEl.hidden = true;
-      }
+      syncSurfaceStartControls();
       const headers = { "Content-Type": "application/json" };
       if (surfaceToken) {
         headers[TOKEN_HEADER] = surfaceToken;
@@ -4092,17 +4096,7 @@
         const errMsg = err && err.message ? err.message : String(err);
         surfaceStarting = false;
         surfaceStartError = errMsg;
-        if (startBtn) {
-          startBtn.disabled = false;
-          startBtn.textContent = "Start";
-        }
-        if (inputEl) {
-          inputEl.disabled = false;
-        }
-        if (errEl) {
-          errEl.textContent = errMsg;
-          errEl.hidden = false;
-        }
+        syncSurfaceStartControls();
         return;
       }
       if (res.status === 403) {
@@ -4113,17 +4107,7 @@
         const errMsg = await parseErrorPayload(res, "/api/surfaces/start");
         surfaceStarting = false;
         surfaceStartError = errMsg;
-        if (startBtn) {
-          startBtn.disabled = false;
-          startBtn.textContent = "Start";
-        }
-        if (inputEl) {
-          inputEl.disabled = false;
-        }
-        if (errEl) {
-          errEl.textContent = errMsg;
-          errEl.hidden = false;
-        }
+        syncSurfaceStartControls();
         return;
       }
       let data;
@@ -4133,39 +4117,20 @@
         const errMsg = "/api/surfaces/start returned invalid JSON: " + (err && err.message ? err.message : String(err));
         surfaceStarting = false;
         surfaceStartError = errMsg;
-        if (startBtn) {
-          startBtn.disabled = false;
-          startBtn.textContent = "Start";
-        }
-        if (inputEl) {
-          inputEl.disabled = false;
-        }
-        if (errEl) {
-          errEl.textContent = errMsg;
-          errEl.hidden = false;
-        }
+        syncSurfaceStartControls();
         return;
       }
       if (!isPlainObject(data) || typeof data.url !== "string" || !data.url) {
         const errMsg = "/api/surfaces/start returned no surface address";
         surfaceStarting = false;
         surfaceStartError = errMsg;
-        if (startBtn) {
-          startBtn.disabled = false;
-          startBtn.textContent = "Start";
-        }
-        if (inputEl) {
-          inputEl.disabled = false;
-        }
-        if (errEl) {
-          errEl.textContent = errMsg;
-          errEl.hidden = false;
-        }
+        syncSurfaceStartControls();
         return;
       }
       surfaceStarting = false;
       surfaceStartError = "";
       surfaceStartFolderValue = "";
+      syncSurfaceStartControls();
       navigateToSurface(data.url);
     }
 
@@ -4394,7 +4359,7 @@
           if (typeof e.preventDefault === "function") {
             e.preventDefault();
           }
-          startSurfaceInFolder(folderInput, startBtn, startErrEl);
+          startSurfaceInFolder(folderInput);
         }
       });
       startBtn.addEventListener("click", (e) => {
@@ -4402,8 +4367,10 @@
           e.stopPropagation();
         }
         if (startBtn.disabled) return;
-        startSurfaceInFolder(folderInput, startBtn, startErrEl);
+        startSurfaceInFolder(folderInput);
       });
+
+      surfaceStartControls = { inputEl: folderInput, startBtn, errEl: startErrEl };
 
       startControls.appendChild(folderInput);
       startControls.appendChild(dataList);
@@ -4515,6 +4482,7 @@
       surfaceSwitcherOpen = true;
       const reqId = ++surfaceSwitcherReqId;
       btn.setAttribute("aria-expanded", "true");
+      surfaceStartControls = null;
       list.innerHTML = '<div class="surface-switcher-loading">Loading surfaces...</div>';
       list.hidden = false;
       const headers = {};

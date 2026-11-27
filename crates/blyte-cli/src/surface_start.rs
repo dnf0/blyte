@@ -292,9 +292,18 @@ pub fn start_surface_with_exe(
 
         match child.try_wait() {
             Ok(Some(status)) => {
-                let text = fs::read(&log_path)
-                    .map(|b| String::from_utf8_lossy(&b).into_owned())
-                    .unwrap_or_default();
+                let bytes = match fs::read(&log_path) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        let _ = fs::remove_file(&log_path);
+                        return Err(StartError::Internal(format!(
+                            "surface in {} exited before starting ({status}); failed to read start log {}: {e}",
+                            folder.display(),
+                            log_path.display()
+                        )));
+                    }
+                };
+                let text = String::from_utf8_lossy(&bytes);
                 let _ = fs::remove_file(&log_path);
                 let tail = last_lines_redacted(&text, TAIL_LINES);
                 let msg = if tail.trim().is_empty() {
@@ -429,5 +438,59 @@ mod tests {
         let file_mode = fs::metadata(&log_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700);
         assert_eq!(file_mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn early_exit_reports_unreadable_start_log() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let folder = temp.path().join("work");
+        fs::create_dir_all(&folder).unwrap();
+        let log_dir = state.join("surface-starts");
+        let log_dir_str = log_dir.to_string_lossy().into_owned();
+
+        let err = start_surface_with_exe(
+            &folder,
+            &state,
+            Path::new("/bin/sh"),
+            &["-c", "rm -f \"$1\"/*.log; exit 1", "sh", &log_dir_str],
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        let StartError::Internal(msg) = err else {
+            panic!("expected internal error, got {err:?}");
+        };
+        assert!(msg.contains("failed to read start log"), "{msg}");
+        assert!(msg.contains(&log_dir_str), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn early_exit_removes_start_log_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let folder = temp.path().join("work");
+        fs::create_dir_all(&folder).unwrap();
+
+        let err = start_surface_with_exe(
+            &folder,
+            &state,
+            Path::new("/bin/sh"),
+            &["-c", "echo boom >&2; exit 1"],
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        let StartError::Internal(msg) = err else {
+            panic!("expected internal error, got {err:?}");
+        };
+        assert!(msg.contains("boom"), "{msg}");
+        let log_dir = state.join("surface-starts");
+        assert!(log_dir.is_dir());
+        let remaining: Vec<_> = fs::read_dir(&log_dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert!(remaining.is_empty(), "leftover log files: {remaining:?}");
     }
 }
