@@ -944,7 +944,6 @@
       "no_changes": { label: "No changes", dot: "dot-stopped", text: "label-muted" },
       "error": { label: "Error", dot: "dot-failed", text: "label-failed" },
       "stopped": { label: "Stopped", dot: "dot-stopped", text: "label-stopped" },
-      "finished": { label: "Finished", dot: "dot-stopped", text: "label-muted" },
       "blocked": { label: "Blocked: fails before this change", dot: "dot-failed", text: "label-failed" }
     };
 
@@ -1043,7 +1042,7 @@
     }
 
     function isDone(job) {
-      return job.status === "verified" || job.status === "no_changes" || job.status === "finished";
+      return job.status === "verified" || job.status === "no_changes";
     }
 
     function getJobStatusInfo(job) {

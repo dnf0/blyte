@@ -1,4 +1,4 @@
-//! Fixes from the dashboard's first live run: reused PIDs and agy summaries (2026-09-30).
+//! Fixes from the dashboard's first live run: reused PIDs (2026-09-30).
 
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -65,32 +65,4 @@ fn a_live_pid_that_started_after_the_job_is_not_the_job() {
     let v = collect(&sources(tmp.path()), now());
     assert_eq!(job(&v, "repo-c/OLDPID")["status"], "stopped");
     assert_eq!(v["summary"]["running"], 0);
-}
-
-#[test]
-fn agy_summaries_give_finished_and_error_jobs_their_details() {
-    let tmp = tempfile::tempdir().unwrap();
-    let runs = tmp.path().join("runs/repo-d");
-    write(&runs.join("A1.log"), "agy output\n");
-    write(&runs.join("A1.prompt"), "Task A1: a thing\n\nbody\n");
-    write(
-        &runs.join("A1.json"),
-        r#"{"status":"SUCCESS","duration_seconds":553.4,"num_turns":4,"response":"Done: the thing\nmore"}"#,
-    );
-    write(&runs.join("A2.log"), "agy output\n");
-    write(
-        &runs.join("A2.json"),
-        r#"{"status":"ERROR","error":"Internal error encountered.","duration_seconds":12.0,"num_turns":1,"response":""}"#,
-    );
-
-    let v = collect(&sources(tmp.path()), now());
-    let a1 = job(&v, "repo-d/A1");
-    assert_eq!(a1["status"], "finished");
-    assert_eq!(a1["elapsed_s"], 553);
-    assert_eq!(a1["turns"], 4);
-    assert_eq!(a1["now"], "Done: the thing");
-    assert!(a1["finished_at"].as_u64().is_some());
-    let a2 = job(&v, "repo-d/A2");
-    assert_eq!(a2["status"], "error");
-    assert_eq!(a2["now"], "Internal error encountered.");
 }

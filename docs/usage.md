@@ -155,8 +155,7 @@ clear the selection, so a path can be copied.
 | Running | The job's process is alive (for a run directory, only if that process started with the job, so a reused PID does not count) |
 | Verified | The run's report says its gate passed |
 | Gate failed · Out of budget · No changes | The report's outcome |
-| Error | The run stopped with an error (a blyte report, or an agy summary with `"status": "ERROR"`) |
-| Finished | An agy run that ended without error; agy runs no gate of its own |
+| Error | The run stopped with an error |
 | Stopped | No report, and the process is gone |
 
 ### Needs attention
@@ -214,8 +213,8 @@ The dashboard reads files; it does not watch processes. It shows:
 - **`blyte dispatch` jobs**: `<root>/.wt/<id>.start.json` and `<root>/<repo>/.wt/<id>.start.json`
   (one level below each root), with the log, report and JSON summary beside it.
 - **Run directories**: `<runs-dir>/<repo>/<id>.log`, with an optional `<id>.pid`, `<id>.prompt`,
-  `<id>.report.json` (blyte's `--report`), `<id>.json` (an agy summary) and `<id>.worktree`.
-  Scripts that start blyte or agy in the background can write these.
+  `<id>.report.json` (blyte's `--report`) and `<id>.worktree`.
+  Scripts that start blyte in the background can write these.
 
 A plain `blyte "..."` run in a terminal writes none of these, so it does not appear; start it with
 `blyte dispatch`, or write its log and `--report` into a run directory.

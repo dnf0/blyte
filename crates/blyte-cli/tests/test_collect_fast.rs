@@ -160,15 +160,15 @@ fn old_runs_dir_jobs_are_skipped_by_mtime_while_live_pid_is_kept() {
     let repo_runs = tmp.path().join("runs/repo-r");
     std::fs::create_dir_all(&repo_runs).unwrap();
 
-    let agy_log = repo_runs.join("OLD_AGY.log");
-    let agy_json = repo_runs.join("OLD_AGY.json");
-    write_file(&agy_log, "old agy log\n");
+    let done_log = repo_runs.join("OLD_DONE.log");
+    let done_report = repo_runs.join("OLD_DONE.report.json");
+    write_file(&done_log, "old log\n");
     write_file(
-        &agy_json,
-        r#"{"status":"SUCCESS","duration_seconds":10.0,"num_turns":2,"response":"done"}"#,
+        &done_report,
+        r#"{"outcome":"verified","duration_seconds":10.0,"turns":2,"gate_attempts":1,"final_message":"done"}"#,
     );
-    set_mtime(&agy_log, old_time);
-    set_mtime(&agy_json, old_time);
+    set_mtime(&done_log, old_time);
+    set_mtime(&done_report, old_time);
 
     let dead_log = repo_runs.join("OLD_DEAD.log");
     let dead_pid = repo_runs.join("OLD_DEAD.pid");
