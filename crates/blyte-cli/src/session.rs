@@ -1787,7 +1787,7 @@ impl Drop for RequestGuard {
     }
 }
 
-fn sync_activity_hook(shared: &Shared) {
+fn try_sync_activity_hook(shared: &Shared) -> Result<(), String> {
     let hook = {
         let slot = shared
             .activity_hook
@@ -1799,7 +1799,7 @@ fn sync_activity_hook(shared: &Shared) {
         let _serial = shared
             .hook_run_lock
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .map_err(|_| "activity hook run lock is poisoned".to_string())?;
         let (doing, surface_state) = {
             let state = shared.lock_state();
             (state.current_doing.clone(), state.surface_state)
@@ -1810,6 +1810,13 @@ fn sync_activity_hook(shared: &Shared) {
             let msg = panic_message(payload).replace(['\r', '\n'], " ");
             eprintln!("blyte: activity hook panicked: {msg}");
         }
+    }
+    Ok(())
+}
+
+fn sync_activity_hook(shared: &Shared) {
+    if let Err(err) = try_sync_activity_hook(shared) {
+        panic!("{err}");
     }
 }
 
@@ -2179,5 +2186,37 @@ mod tests {
             err.contains("turn totals") && err.contains("poisoned"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn sync_activity_hook_fails_when_hook_run_lock_is_poisoned() {
+        let shared = Arc::new(Shared::new("test-model".to_string(), None));
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_called = Arc::clone(&called);
+        *shared.activity_hook.lock().unwrap() = Some(Arc::new(move |_, _| {
+            hook_called.store(true, Ordering::SeqCst);
+        }));
+
+        let poisoned = Arc::clone(&shared);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.hook_run_lock.lock().unwrap();
+            panic!("intentional poison");
+        })
+        .join();
+
+        let err = try_sync_activity_hook(&shared).unwrap_err();
+        assert!(
+            err.contains("activity hook") && err.contains("poisoned"),
+            "unexpected error: {err}"
+        );
+        assert!(!called.load(Ordering::SeqCst));
+
+        let panic_err = catch_unwind(AssertUnwindSafe(|| sync_activity_hook(&shared))).unwrap_err();
+        let panic_msg = panic_message(panic_err);
+        assert!(
+            panic_msg.contains("activity hook") && panic_msg.contains("poisoned"),
+            "unexpected panic: {panic_msg}"
+        );
+        assert!(!called.load(Ordering::SeqCst));
     }
 }
