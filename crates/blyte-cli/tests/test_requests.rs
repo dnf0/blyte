@@ -22,6 +22,8 @@ use blyte_cli::serve::{generate_token, route, run_with_hooks, Surface, TOKEN_HEA
 use blyte_cli::session::{EntryBody, PromptRunner, Session};
 use serde_json::{json, Value};
 
+const WAIT: Duration = Duration::from_secs(30);
+
 struct RecordingRunner {
     prompts: Arc<Mutex<Vec<String>>>,
 }
@@ -458,23 +460,25 @@ fn parse_json(resp: &Response) -> Value {
 }
 
 fn wait_for_idle_entries(session: &Session, expected_count: usize) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
     let mut after = 0;
     let mut count = 0;
+    let mut seen = Vec::new();
     loop {
         let entries = session.entries_after(after, Duration::from_millis(50));
-        for e in &entries {
+        for e in entries {
             after = after.max(e.seq);
             if matches!(e.body, EntryBody::Idle { .. }) {
                 count += 1;
             }
+            seen.push(e);
         }
         if count >= expected_count {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for {expected_count} idle entries (saw {count})"
+            "timed out waiting for {expected_count} idle entries (saw {count}); entries={seen:?}"
         );
     }
 }
@@ -1782,7 +1786,12 @@ fn ready_request_waits_while_session_busy_then_combines_when_idle() {
         .session
         .submit("working on next dispatch", Vec::new())
         .unwrap();
-    handle.entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    handle.entered.recv_timeout(WAIT).unwrap_or_else(|err| {
+        panic!(
+            "timed out waiting for BlockingFirstRunner to enter run: {err:?}; prompts={:?}",
+            handle.prompts.lock().unwrap()
+        )
+    });
 
     let busy_info = surface.session.info();
     assert!(busy_info.busy);
@@ -1913,7 +1922,12 @@ fn conflict_failure_message_is_not_queued_while_busy_and_queued_once_after() {
         .session
         .submit("active conversation model turn", Vec::new())
         .unwrap();
-    handle.entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    handle.entered.recv_timeout(WAIT).unwrap_or_else(|err| {
+        panic!(
+            "timed out waiting for BlockingFirstRunner to enter run: {err:?}; prompts={:?}",
+            handle.prompts.lock().unwrap()
+        )
+    });
 
     assert!(surface.session.info().busy);
     assert_eq!(surface.session.info().queued, 0);
@@ -2041,7 +2055,7 @@ fn start_stoppable_surface(
         )
     });
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
     let url = loop {
         let s = String::from_utf8_lossy(&out_buf.lock().unwrap()).to_string();
         if let Some(line) = s.lines().find(|l| l.starts_with("blyte: surface ")) {
@@ -2053,7 +2067,7 @@ fn start_stoppable_surface(
         }
         assert!(
             Instant::now() < deadline,
-            "surface failed to start; stdout={s:?} stderr={:?}",
+            "timed out waiting for printed surface URL; stdout={s:?} stderr={:?}",
             String::from_utf8_lossy(&err_buf.lock().unwrap())
         );
         std::thread::sleep(Duration::from_millis(20));

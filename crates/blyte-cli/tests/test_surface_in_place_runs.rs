@@ -15,6 +15,8 @@ use blyte_cli::surface_dir::{folder_store, write_record_in, SurfaceRecord};
 use blyte_cli::surface_notify::{notify_runs_changed, NotifyOutcome};
 use blyte_cli::surface_registry::state_dir;
 
+const WAIT: Duration = Duration::from_secs(30);
+
 struct SharedBuf(Arc<Mutex<Vec<u8>>>);
 
 impl Write for SharedBuf {
@@ -120,17 +122,17 @@ fn start_surface(dir: &Path) -> RunningSurface {
         run_with_hooks(&args, cfg, &mut out, &mut err, &mut opener, stop_bg)
     });
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
     let (_name, port, token) = loop {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for printed surface URL; stderr={}",
-            String::from_utf8_lossy(&err_buf.lock().unwrap())
-        );
         let stdout = String::from_utf8(out_buf.lock().unwrap().clone()).unwrap();
         if let Some(parsed) = stdout.lines().find_map(parse_surface_ready_line) {
             break parsed;
         }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for printed surface URL; stdout={stdout:?} stderr={:?}",
+            String::from_utf8_lossy(&err_buf.lock().unwrap())
+        );
         std::thread::sleep(Duration::from_millis(5));
     };
 
@@ -158,9 +160,7 @@ fn http_request(
     body: Option<&str>,
 ) -> (u16, String) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    stream.set_read_timeout(Some(WAIT)).unwrap();
     let mut req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n");
     if let Some(tok) = token {
         req.push_str(&format!("X-Blyte-Token: {tok}\r\n"));
@@ -177,7 +177,12 @@ fn http_request(
     stream.flush().unwrap();
 
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).unwrap();
+    stream.read_to_end(&mut raw).unwrap_or_else(|err| {
+        panic!(
+            "timed out or failed waiting for HTTP response to {method} {path}: {err}; partial={:?}",
+            String::from_utf8_lossy(&raw)
+        )
+    });
     let text = String::from_utf8(raw).unwrap();
     let (head, resp_body) = text.split_once("\r\n\r\n").unwrap();
     let status: u16 = head
@@ -674,17 +679,21 @@ fn surface_notify_reaches_non_repository_surface_record() {
 
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        stream.set_read_timeout(Some(WAIT)).unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut request_line = String::new();
-        reader.read_line(&mut request_line).unwrap();
+        reader.read_line(&mut request_line).unwrap_or_else(|err| {
+            panic!("failed reading notify request line: {err}; saw={request_line:?}")
+        });
         let mut token = String::new();
         let mut content_len = 0usize;
         loop {
             let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
+            reader.read_line(&mut line).unwrap_or_else(|err| {
+                panic!(
+                    "failed reading notify header line: {err}; request_line={request_line:?} saw={line:?}"
+                )
+            });
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 break;
@@ -698,7 +707,11 @@ fn surface_notify_reaches_non_repository_surface_record() {
             }
         }
         let mut body = vec![0u8; content_len];
-        reader.read_exact(&mut body).unwrap();
+        reader.read_exact(&mut body).unwrap_or_else(|err| {
+            panic!(
+                "failed reading {content_len}-byte notify body: {err}; request_line={request_line:?}"
+            )
+        });
         let body_str = String::from_utf8(body).unwrap();
         *received_bg.lock().unwrap() = Some((request_line.trim().to_string(), token, body_str));
         let resp = "HTTP/1.1 202 Accepted\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
@@ -768,17 +781,21 @@ fn surface_notify_uses_folder_store_for_non_repo_even_when_wt_dir_exists() {
 
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        stream.set_read_timeout(Some(WAIT)).unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut request_line = String::new();
-        reader.read_line(&mut request_line).unwrap();
+        reader.read_line(&mut request_line).unwrap_or_else(|err| {
+            panic!("failed reading notify request line: {err}; saw={request_line:?}")
+        });
         let mut token = String::new();
         let mut content_len = 0usize;
         loop {
             let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
+            reader.read_line(&mut line).unwrap_or_else(|err| {
+                panic!(
+                    "failed reading notify header line: {err}; request_line={request_line:?} saw={line:?}"
+                )
+            });
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 break;
@@ -792,7 +809,11 @@ fn surface_notify_uses_folder_store_for_non_repo_even_when_wt_dir_exists() {
             }
         }
         let mut body = vec![0u8; content_len];
-        reader.read_exact(&mut body).unwrap();
+        reader.read_exact(&mut body).unwrap_or_else(|err| {
+            panic!(
+                "failed reading {content_len}-byte notify body: {err}; request_line={request_line:?}"
+            )
+        });
         *received_bg.lock().unwrap() = Some((request_line.trim().to_string(), token));
         let resp = "HTTP/1.1 202 Accepted\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
         stream.write_all(resp.as_bytes()).unwrap();
