@@ -407,3 +407,214 @@ fn ensure_checks_refuses_unfinished_run() {
     assert!(err.contains("U1"), "error should name the run: {err}");
     assert!(!repo.path().join(".wt/U1.checks.json").exists());
 }
+
+fn blyte(dir: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_blyte"))
+        .args(args)
+        .current_dir(dir)
+        .env("BLYTE_NO_UPDATE_CHECK", "1")
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("GOOGLE_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("OLLAMA_API_KEY")
+        .env_remove("BLYTE_ENV_FILE")
+        .env("HOME", dir)
+        .env("XDG_CONFIG_HOME", dir)
+        .output()
+        .unwrap()
+}
+
+fn review_section(stdout: &str, name: &str) -> String {
+    let header = format!("== {name}");
+    let mut lines = stdout.lines();
+    assert!(
+        lines.any(|l| l == header),
+        "missing section {header} in:\n{stdout}"
+    );
+    lines
+        .take_while(|l| !l.starts_with("== "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn init_research_scratch(root: &Path, id: &str) -> std::path::PathBuf {
+    let wt = root.join(".wt").join(id);
+    std::fs::create_dir_all(&wt).unwrap();
+    git(&wt, &["init", "-q"]);
+    git(
+        &wt,
+        &[
+            "-c",
+            "user.name=blyte",
+            "-c",
+            "user.email=blyte@local",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "research",
+            "--no-gpg-sign",
+        ],
+    );
+    wt
+}
+
+#[test]
+fn review_of_a_research_run_with_its_scratch_folder_present_succeeds() {
+    let repo = init_repo();
+    let wt = init_research_scratch(repo.path(), "R1");
+    std::fs::write(wt.join("report.md"), "# Draft\n").unwrap();
+    std::fs::write(
+        repo.path().join(".wt/R1.start.json"),
+        serde_json::json!({
+            "id": "R1",
+            "research": true,
+            "base_sha": serde_json::Value::Null,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    write_research_run(repo.path(), "R1", "budget_exhausted");
+
+    let out = blyte(repo.path(), &["review", "R1"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        review_section(&stdout, "commits").trim().is_empty(),
+        "{stdout}"
+    );
+    assert!(
+        review_section(&stdout, "tree").contains("report.md"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn review_of_a_research_run_shows_commits_made_in_its_scratch_folder() {
+    let repo = init_repo();
+    let wt = init_research_scratch(repo.path(), "R1");
+    std::fs::write(wt.join("report.md"), "# Draft\n").unwrap();
+    std::fs::write(wt.join("notes.md"), "findings\n").unwrap();
+    git(&wt, &["add", "notes.md"]);
+    git(
+        &wt,
+        &[
+            "-c",
+            "user.name=blyte",
+            "-c",
+            "user.email=blyte@local",
+            "commit",
+            "-q",
+            "-m",
+            "add research notes",
+            "--no-gpg-sign",
+        ],
+    );
+    std::fs::write(
+        repo.path().join(".wt/R1.start.json"),
+        serde_json::json!({
+            "id": "R1",
+            "research": true,
+            "base_sha": serde_json::Value::Null,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    write_research_run(repo.path(), "R1", "budget_exhausted");
+
+    let out = blyte(repo.path(), &["review", "R1"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        review_section(&stdout, "commits").contains("add research notes"),
+        "{stdout}"
+    );
+    assert!(
+        review_section(&stdout, "files").contains("notes.md"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn review_of_a_research_run_whose_scratch_repository_has_no_commit_errors_naming_it() {
+    let repo = init_repo();
+    let wt = repo.path().join(".wt/R1");
+    std::fs::create_dir_all(&wt).unwrap();
+    git(&wt, &["init", "-q"]);
+    std::fs::write(
+        repo.path().join(".wt/R1.start.json"),
+        serde_json::json!({
+            "id": "R1",
+            "research": true,
+            "base_sha": serde_json::Value::Null,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    write_research_run(repo.path(), "R1", "budget_exhausted");
+
+    let out = blyte(repo.path(), &["review", "R1"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let canonical_wt = wt.canonicalize().unwrap();
+    assert!(stderr.contains("research run R1"), "stderr: {stderr}");
+    assert!(
+        stderr.contains(&canonical_wt.display().to_string()),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn review_of_a_non_research_run_with_unrelated_worktree_and_no_base_sha_errors() {
+    let repo = init_repo();
+    let wt = repo.path().join(".wt/T9");
+    std::fs::create_dir_all(&wt).unwrap();
+    git(&wt, &["init", "-q"]);
+    git(
+        &wt,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@e.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "unrelated",
+            "--no-gpg-sign",
+        ],
+    );
+    std::fs::write(
+        repo.path().join(".wt/T9.start.json"),
+        serde_json::json!({
+            "id": "T9",
+            "research": false,
+            "base_sha": serde_json::Value::Null,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    write_code_run(repo.path(), "T9", "error");
+
+    let out = blyte(repo.path(), &["review", "T9"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot find where run T9 started"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("shares no history"), "stderr: {stderr}");
+}

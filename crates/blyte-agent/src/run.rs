@@ -185,6 +185,10 @@ pub struct RunReport {
 /// is reported as it occurs, not summarised at the end.
 #[derive(Debug, Clone)]
 pub enum Event<'e> {
+    /// Emitted when a streaming model call produced its first output delta (text, thinking, or tool call).
+    FirstOutput {
+        at: std::time::Instant,
+    },
     Turn {
         n: u32,
         text: &'e str,
@@ -1201,7 +1205,7 @@ impl<'a> Runner<'a> {
             let model_start = now();
             let mut attempt = 0;
             let mut failed_attempts: Vec<FailedAttempt> = Vec::new();
-            let resp = loop {
+            let (resp, call_start) = loop {
                 if let Some(d) = deadline {
                     let time_left = d.saturating_duration_since(now());
                     if time_left.is_zero() {
@@ -1211,7 +1215,7 @@ impl<'a> Runner<'a> {
                 }
                 let call_start = std::time::Instant::now();
                 match self.provider.complete(&req) {
-                    Ok(r) => break r,
+                    Ok(r) => break (r, call_start),
                     Err(e) => {
                         let (u_in, u_cached, u_out, u_think) = match &e {
                             ProviderError::NoAnswer { usage, .. } => {
@@ -1321,6 +1325,18 @@ impl<'a> Runner<'a> {
                 max_gap_ms: timing.max_gap_ms,
                 failed_attempts,
             });
+
+            let has_output = !resp.text.is_empty()
+                || !resp.tool_calls.is_empty()
+                || resp.usage.output > 0
+                || resp.usage.thinking > 0;
+            if has_output {
+                if let Some(first_data_ms) = timing.first_data_ms {
+                    let at = (call_start + Duration::from_millis(first_data_ms))
+                        .min(std::time::Instant::now());
+                    self.emit(Event::FirstOutput { at });
+                }
+            }
 
             let trimmed = resp.text.trim();
             self.emit(Event::Turn {

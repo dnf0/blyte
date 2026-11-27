@@ -110,7 +110,8 @@ fn record(event: Event<'_>) -> RecordedEvent {
             wait_ms,
             reason,
         },
-        Event::GateStart { .. }
+        Event::FirstOutput { .. }
+        | Event::GateStart { .. }
         | Event::GateSlotWait { .. }
         | Event::Gate { .. }
         | Event::RolledBack { .. } => RecordedEvent::Other,
@@ -306,4 +307,95 @@ fn no_retry_event_without_a_retry() {
         "unexpected Retry event in {events:?}"
     );
     assert!(events.iter().any(|e| matches!(e, RecordedEvent::Turn(1))));
+}
+
+struct DelayedStreamProvider {
+    total_delay: Duration,
+    first_data_ms: u64,
+}
+
+impl Provider for DelayedStreamProvider {
+    fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+        std::thread::sleep(self.total_delay);
+        Ok(Response {
+            text: "streamed reply".into(),
+            tool_calls: vec![],
+            usage: Usage {
+                input: 10,
+                output: 20,
+                thinking: 5,
+                cached: 0,
+            },
+            finish_reason: Some("STOP".into()),
+        })
+    }
+
+    fn model_id(&self) -> String {
+        "delayed-stream".into()
+    }
+
+    fn last_stream_timing(&self) -> Option<blyte_provider::StreamTiming> {
+        Some(blyte_provider::StreamTiming {
+            first_data_ms: Some(self.first_data_ms),
+            max_gap_ms: 10,
+            data_events: 2,
+        })
+    }
+}
+
+#[test]
+fn emits_first_output_before_turn_using_stream_timing() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = DelayedStreamProvider {
+        total_delay: Duration::from_millis(250),
+        first_data_ms: 40,
+    };
+    let observed = Mutex::new((
+        Vec::<&'static str>::new(),
+        None::<std::time::Instant>,
+        None::<std::time::Instant>,
+    ));
+    let on_event = |e: Event<'_>| {
+        let mut guard = observed.lock().unwrap();
+        match e {
+            Event::FirstOutput { at } => {
+                guard.0.push("first_output");
+                guard.1 = Some(at);
+            }
+            Event::Turn { .. } => {
+                guard.0.push("turn");
+                guard.2 = Some(std::time::Instant::now());
+            }
+            _ => {}
+        }
+    };
+    let runner = Runner {
+        provider: &provider,
+        shell: &StubShell,
+        fs: &LocalFs,
+        context: &Conversational,
+        root: dir.path().to_path_buf(),
+        budget: Budget {
+            max_turns: 5,
+            max_gate_attempts: 1,
+            max_duration: None,
+        },
+        rollback: false,
+        on_event: Some(&on_event),
+        research: false,
+        claim_check: false,
+        base_check: blyte_agent::run::BaseCheck::None,
+    };
+    let mut state = State::new("stream test", "");
+    let (outcome, _) = runner.run(&mut state);
+    assert_eq!(outcome, Outcome::Verified);
+
+    let (order, first_output_at, turn_emitted_at) = observed.into_inner().unwrap();
+    assert_eq!(order, vec!["first_output", "turn"]);
+    let first_at = first_output_at.expect("expected FirstOutput instant");
+    let turn_at = turn_emitted_at.expect("expected Turn instant");
+    assert!(
+        turn_at.saturating_duration_since(first_at) >= Duration::from_millis(150),
+        "expected FirstOutput to be recorded well before Turn completion"
+    );
 }

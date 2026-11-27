@@ -816,6 +816,21 @@ fn usage_remainder(
     ))
 }
 
+/// Whether to print the list of withheld environment variables: once for each distinct list in
+/// this process. A surface runs many turns in one process, and the list is the same for each.
+fn withheld_notice_is_due(withheld: &[String]) -> bool {
+    static SHOWN: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+    if withheld.is_empty() {
+        return false;
+    }
+    let mut shown = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
+    if shown.as_deref() == Some(withheld) {
+        return false;
+    }
+    *shown = Some(withheld.to_vec());
+    true
+}
+
 fn run_task_with_event_callback(
     config: &TaskConfig,
     state: &mut blyte_agent::state::State,
@@ -934,7 +949,7 @@ fn run_task_with_event_callback(
                 }
             }
             let withheld = blyte_agent::shell::withheld_env();
-            if !withheld.is_empty() {
+            if withheld_notice_is_due(&withheld) {
                 eprintln!(
                     "blyte: withholding from commands: {} (keep one with --pass-env NAME)",
                     withheld.join(", ")
