@@ -136,7 +136,28 @@ fn main() {
             blyte_cli::cli::Command::Plan(args) => {
                 std::process::exit(blyte_cli::plan_cmd::run(&args.plan, args.json));
             }
-            blyte_cli::cli::Command::Surfaces { json } => {
+            blyte_cli::cli::Command::Surfaces { json, stopped } => {
+                let mut out = std::io::stdout();
+                let mut err = std::io::stderr();
+                if stopped {
+                    let state_dir = match blyte_cli::surface_registry::state_dir() {
+                        Ok(dir) => dir,
+                        Err(e) => {
+                            eprintln!("blyte: {e}");
+                            std::process::exit(1);
+                        }
+                    };
+                    let cwd = match std::env::current_dir() {
+                        Ok(dir) => dir,
+                        Err(e) => {
+                            eprintln!("blyte: cannot read current directory: {e}");
+                            std::process::exit(1);
+                        }
+                    };
+                    std::process::exit(blyte_cli::surfaces_cmd::run_stopped_surfaces(
+                        &cwd, &state_dir, json, &mut out, &mut err,
+                    ));
+                }
                 let dir = match blyte_cli::surface_registry::registry_dir() {
                     Ok(dir) => dir,
                     Err(e) => {
@@ -144,8 +165,6 @@ fn main() {
                         std::process::exit(1);
                     }
                 };
-                let mut out = std::io::stdout();
-                let mut err = std::io::stderr();
                 std::process::exit(blyte_cli::surfaces_cmd::run_surfaces(
                     &dir, json, &mut out, &mut err,
                 ));
