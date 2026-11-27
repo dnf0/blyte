@@ -1299,6 +1299,30 @@ pub fn offline(mut profile: String, docker_sockets: &[PathBuf]) -> String {
 }
 
 #[cfg(target_os = "macos")]
+fn is_in_non_state_protected_home(real_path: &Path) -> bool {
+    let in_blyte_state = state_blyte_dir().is_some_and(|state_dir| {
+        let real_state = canonicalize_existing_prefix(&state_dir);
+        real_path.starts_with(&real_state)
+    }) || std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .is_some_and(|home| {
+            let real_default_state =
+                canonicalize_existing_prefix(&PathBuf::from(home).join(".local/state/blyte"));
+            real_path.starts_with(&real_default_state)
+        });
+    !in_blyte_state
+        && std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .is_some_and(|home| {
+                let home_path = PathBuf::from(home);
+                PROTECTED_HOME_PATHS.iter().any(|sub| {
+                    let protected = canonicalize_existing_prefix(&home_path.join(sub));
+                    real_path.starts_with(&protected)
+                })
+            })
+}
+
+#[cfg(target_os = "macos")]
 fn default_profile_base(root: &Path, allow_read: &[PathBuf]) -> String {
     let deny_read = match std::env::var_os("HOME") {
         Some(home) if !home.is_empty() => read_denied(Path::new(&home)),
@@ -1315,33 +1339,20 @@ fn default_profile_base(root: &Path, allow_read: &[PathBuf]) -> String {
         let real_state = canonicalize_existing_prefix(&state_dir);
         is_run_scratch_workspace(&real_root, &real_state)
     });
-    let in_blyte_state = state_blyte_dir().is_some_and(|state_dir| {
-        let real_state = canonicalize_existing_prefix(&state_dir);
-        real_root.starts_with(&real_state)
-    }) || std::env::var_os("HOME")
-        .filter(|h| !h.is_empty())
-        .is_some_and(|home| {
-            let real_default_state =
-                canonicalize_existing_prefix(&PathBuf::from(home).join(".local/state/blyte"));
-            real_root.starts_with(&real_default_state)
-        });
-    let in_protected_home = !in_blyte_state
-        && std::env::var_os("HOME")
-            .filter(|h| !h.is_empty())
-            .is_some_and(|home| {
-                let home_path = PathBuf::from(home);
-                PROTECTED_HOME_PATHS.iter().any(|sub| {
-                    let protected = canonicalize_existing_prefix(&home_path.join(sub));
-                    real_root.starts_with(&protected)
-                })
-            });
-    if is_scratch || in_protected_home {
+    let reallow_root = is_scratch || is_in_non_state_protected_home(&real_root);
+    if reallow_root {
         let escaped = escape_path(&real_root);
         profile.push_str(&format!(r#"(allow file-write* (subpath "{escaped}"))"#));
     }
     if let Some(common_dir) = git_common_dir(root) {
+        let real_common = canonicalize_existing_prefix(&common_dir);
+        let covered_by_root = reallow_root && real_common.starts_with(&real_root);
+        if !covered_by_root && is_in_non_state_protected_home(&real_common) {
+            let escaped = escape_path(&real_common);
+            profile.push_str(&format!(r#"(allow file-write* (subpath "{escaped}"))"#));
+        }
         for sub in ["hooks", "config"] {
-            let escaped = escape_path(&canonicalize_existing_prefix(&common_dir.join(sub)));
+            let escaped = escape_path(&canonicalize_existing_prefix(&real_common.join(sub)));
             profile.push_str(&format!(r#"(deny file-write* (subpath "{escaped}"))"#));
         }
     }

@@ -307,6 +307,107 @@ mod macos {
     }
 
     #[test]
+    fn live_default_profile_allows_worktree_commit_inside_protected_folder() {
+        if !sandbox::available() {
+            return;
+        }
+
+        let tmp_base = target_tmp_base();
+        let home = tempfile::tempdir_in(tmp_base).unwrap();
+        let proj = home.path().join(".local/lib/proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let _env = EnvGuard::set_home(Some(home.path()));
+
+        init_git_repo(&proj);
+        assert!(Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(&proj)
+            .status()
+            .unwrap()
+            .success());
+
+        let wt = proj.join(".wt/task");
+        assert!(Command::new("git")
+            .args(["worktree", "add", "-q", "-b", "task"])
+            .arg(&wt)
+            .current_dir(&proj)
+            .status()
+            .unwrap()
+            .success());
+
+        let hooks_dir = proj.join(".git/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let hook = hooks_dir.join("pre-commit");
+        let git_config = proj.join(".git/config");
+        let config_before = std::fs::read_to_string(&git_config).unwrap();
+
+        let sh = LocalShell::sandboxed(sandbox::default_profile(&wt, &[]));
+
+        let commit = sh
+            .exec_user(
+                "git commit --allow-empty -m x",
+                &wt,
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        if is_nested_sandbox_error(commit.exit_code, &commit.merged()) {
+            return;
+        }
+        assert_eq!(
+            commit.exit_code,
+            0,
+            "git commit in worktree under protected folder should succeed: {}",
+            commit.merged()
+        );
+
+        let sibling = home.path().join(".local/lib/other");
+        let sibling_out = sh
+            .exec_user(
+                &format!("echo no > '{}'", sibling.display()),
+                &wt,
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        assert_ne!(
+            sibling_out.exit_code,
+            0,
+            "write to sibling in .local/lib should fail: {}",
+            sibling_out.merged()
+        );
+        assert!(!sibling.exists());
+
+        let write_hook = sh
+            .exec_user(
+                &format!("echo '#!/bin/sh' > '{}'", hook.display()),
+                &wt,
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        assert_ne!(
+            write_hook.exit_code,
+            0,
+            "write to shared .git/hooks/pre-commit should fail: {}",
+            write_hook.merged()
+        );
+        assert!(!hook.exists());
+
+        let append_config = sh
+            .exec_user(
+                &format!("echo '# tampered' >> '{}'", git_config.display()),
+                &wt,
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        assert_ne!(
+            append_config.exit_code,
+            0,
+            "append to shared .git/config should fail: {}",
+            append_config.merged()
+        );
+        assert_eq!(std::fs::read_to_string(&git_config).unwrap(), config_before);
+    }
+
+    #[test]
     fn live_cargo_build_offline_succeeds_with_real_home() {
         if !sandbox::available() {
             return;
@@ -425,7 +526,7 @@ mod macos {
                     home_canon.join(protected).display()
                 );
                 let allow_idx = sbpl
-                    .find(&allow_rule)
+                    .rfind(&allow_rule)
                     .unwrap_or_else(|| panic!("{label}: missing allow rule {allow_rule}"));
                 let deny_idx = sbpl
                     .rfind(&deny_rule)
@@ -439,7 +540,7 @@ mod macos {
 
         let git_allow = format!(r#"(allow file-write* (subpath "{}"))"#, git_canon.display());
         let git_allow_idx = default_sbpl
-            .find(&git_allow)
+            .rfind(&git_allow)
             .expect("default_profile must allow git common dir");
         for sub in ["hooks", "config"] {
             let git_deny = format!(
@@ -511,6 +612,58 @@ mod macos {
             eq_allow_idx > eq_deny_idx,
             "workspace equal to protected folder must be re-allowed after deny"
         );
+
+        assert!(Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(&proj)
+            .status()
+            .unwrap()
+            .success());
+        let wt = proj.join(".wt/task");
+        assert!(Command::new("git")
+            .args(["worktree", "add", "-q", "-b", "task"])
+            .arg(&wt)
+            .current_dir(&proj)
+            .status()
+            .unwrap()
+            .success());
+        let wt_canon = wt.canonicalize().unwrap();
+        let common_canon = proj_canon.join(".git");
+
+        let Profile::Seatbelt(wt_sbpl) = sandbox::default_profile(&wt, &[]) else {
+            panic!("expected Seatbelt profile on macOS");
+        };
+        let wt_deny_idx = wt_sbpl.rfind(&lib_deny).expect("lib deny present");
+        let wt_allow = format!(r#"(allow file-write* (subpath "{}"))"#, wt_canon.display());
+        let wt_allow_idx = wt_sbpl.rfind(&wt_allow).expect("worktree allow present");
+        let common_allow = format!(
+            r#"(allow file-write* (subpath "{}"))"#,
+            common_canon.display()
+        );
+        let common_allow_idx = wt_sbpl
+            .rfind(&common_allow)
+            .expect("shared git common dir allow present");
+        assert!(
+            wt_allow_idx > wt_deny_idx,
+            "worktree root inside protected folder must be re-allowed after parent deny"
+        );
+        assert!(
+            common_allow_idx > wt_deny_idx,
+            "shared git common dir inside protected folder must be re-allowed after parent deny"
+        );
+        for sub in ["hooks", "config"] {
+            let git_deny = format!(
+                r#"(deny file-write* (subpath "{}"))"#,
+                common_canon.join(sub).display()
+            );
+            let git_deny_idx = wt_sbpl
+                .rfind(&git_deny)
+                .expect("git deny present for worktree inside protected folder");
+            assert!(
+                git_deny_idx > common_allow_idx,
+                "git {sub} deny must follow shared git common dir re-allow"
+            );
+        }
     }
 
     #[test]
