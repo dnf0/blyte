@@ -11,7 +11,6 @@ Nothing at the moment; see Next.
 
 - **The Claude usage check (about 2026-10-06):** regenerate the usage report from the dispatch
   ledger and compare Claude usage with and without blyte across repositories and sessions.
-- **The decider shadow trial (about 2026-10-20):** read its summary and keep it or remove it.
 - **The open-source decision (about 2026-10-27):** if yes, the items under Parked come next.
 
 ## Done
@@ -123,8 +122,6 @@ Kept for about the last four weeks; older items are in the git history and the e
 
 - blyte is the implementer in every local repository (the A/B against agy ended 2026-09-30).
   Check usage across repositories and sessions around 2026-10-06.
-- The decider shadow trial (a local model classifying failed gates) runs alongside, testing only.
-  Decide whether it earns a place around 2026-10-20 to 10-27.
 
 ## Parked
 

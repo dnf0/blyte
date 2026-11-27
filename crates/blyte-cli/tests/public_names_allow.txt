@@ -1,4 +1,4 @@
-# Until publication: the repository's current home and author
+# Names that may appear in the public repository
 Cargo.toml: Climate X Engineering
 LICENSE: Climate X Engineering
 mkdocs.yml: Climate X Engineering
