@@ -2032,20 +2032,18 @@ where
         path: message_file_path,
     };
 
-    // The record is written as soon as the directory exists: another start lists
-    // every surface directory and fails on one that has no record.
-    let record = SurfaceRecord {
-        id: surface_id.clone(),
-        name: surface_name.clone(),
-        pid: std::process::id(),
-        port: actual_port,
-        session_id: session_id.clone(),
-        started_at,
+    let is_resume = args.resume.is_some();
+    let mut starting_dir_guard = if is_resume {
+        StartingDirGuard { dir: None }
+    } else {
+        if let Err(e) = crate::surface_dir::prepare_starting_dir(&surface_record_dir) {
+            let _ = writeln!(err, "blyte: {e}");
+            return 1;
+        }
+        StartingDirGuard {
+            dir: Some(surface_record_dir.clone()),
+        }
     };
-    if let Err(e) = crate::surface_dir::write_record_in(&surface_record_dir, &record) {
-        let _ = writeln!(err, "blyte: {e}");
-        return 1;
-    }
     let attachments_dir = match prepare_attachments_dir(&surface_record_dir) {
         Ok(p) => p,
         Err(e) => {
@@ -2061,24 +2059,6 @@ where
     if !config.allow_read.iter().any(|p| p == &attachments_dir) {
         config.allow_read.push(attachments_dir);
     }
-    let registry_entry = crate::surface_registry::RegistryEntry {
-        id: surface_id.clone(),
-        name: surface_name.clone(),
-        root: main_checkout.clone(),
-        branch,
-        pid: std::process::id(),
-        port: actual_port,
-        started_at,
-        doing: "idle".to_string(),
-    };
-    if let Err(e) = crate::surface_registry::write_entry(&registry_dir, &registry_entry) {
-        let _ = writeln!(err, "blyte: {e}");
-        return 1;
-    }
-    let _registry_guard = RegistryEntryGuard {
-        dir: registry_dir.clone(),
-        id: surface_id.clone(),
-    };
     blyte_agent::tools::set_peer_tools(Some(Arc::new(crate::tell::SurfacePeerTools {
         registry_dir: registry_dir.clone(),
         surface_id: surface_id.clone(),
@@ -2113,6 +2093,37 @@ where
                 return 1;
             }
         };
+    let record = SurfaceRecord {
+        id: surface_id.clone(),
+        name: surface_name.clone(),
+        pid: std::process::id(),
+        port: actual_port,
+        session_id: session_id.clone(),
+        started_at,
+    };
+    if let Err(e) = crate::surface_dir::write_record_in(&surface_record_dir, &record) {
+        let _ = writeln!(err, "blyte: {e}");
+        return 1;
+    }
+    starting_dir_guard.disarm();
+    let registry_entry = crate::surface_registry::RegistryEntry {
+        id: surface_id.clone(),
+        name: surface_name.clone(),
+        root: main_checkout.clone(),
+        branch,
+        pid: std::process::id(),
+        port: actual_port,
+        started_at,
+        doing: "idle".to_string(),
+    };
+    if let Err(e) = crate::surface_registry::write_entry(&registry_dir, &registry_entry) {
+        let _ = writeln!(err, "blyte: {e}");
+        return 1;
+    }
+    let _registry_guard = RegistryEntryGuard {
+        dir: registry_dir.clone(),
+        id: surface_id.clone(),
+    };
     let hook_dir = registry_dir.clone();
     let hook_entry = registry_entry.clone();
     session.set_activity_hook(Box::new(move |prompt| {
@@ -2214,6 +2225,24 @@ fn prepare_attachments_dir(surface_record_dir: &Path) -> Result<PathBuf, String>
     std::fs::create_dir_all(&attachments_dir)
         .map_err(|e| format!("failed to create {}: {e}", attachments_dir.display()))?;
     canonicalize_attachments_dir(&attachments_dir)
+}
+
+struct StartingDirGuard {
+    dir: Option<PathBuf>,
+}
+
+impl StartingDirGuard {
+    fn disarm(&mut self) {
+        self.dir = None;
+    }
+}
+
+impl Drop for StartingDirGuard {
+    fn drop(&mut self) {
+        if let Some(ref dir) = self.dir {
+            crate::surface_dir::cleanup_starting_dir(dir);
+        }
+    }
 }
 
 #[cfg(test)]

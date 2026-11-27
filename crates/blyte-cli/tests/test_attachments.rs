@@ -23,6 +23,8 @@ use blyte_cli::session::{AgentRunner, Entry, EntryBody, Paste, PromptRunner, Ses
 use blyte_cli::task_runner::{build_local_shell, build_sandbox_profile, TaskConfig};
 use blyte_provider::{Message, Provider, ProviderError, Request, Response, UserPart};
 
+const WAIT: Duration = Duration::from_secs(30);
+
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 struct StateDirGuard {
@@ -242,17 +244,17 @@ fn start_surface(root: &Path, runner: Box<dyn PromptRunner>) -> RunningSurface {
         run_with_runner(&args, cfg, &mut out, &mut err, &mut opener, stop_bg, runner)
     });
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
     let (_name, port, token) = loop {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for printed surface URL; stderr={}",
-            String::from_utf8_lossy(&err_buf.lock().unwrap())
-        );
         let stdout = String::from_utf8(out_buf.lock().unwrap().clone()).unwrap();
         if let Some(parsed) = stdout.lines().find_map(parse_surface_ready_line) {
             break parsed;
         }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for printed surface URL; stdout={stdout:?} stderr={:?}",
+            String::from_utf8_lossy(&err_buf.lock().unwrap())
+        );
         std::thread::sleep(Duration::from_millis(5));
     };
 
@@ -288,13 +290,16 @@ impl HttpResp {
 
 fn send_raw(port: u16, raw: &[u8]) -> HttpResp {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    stream.set_read_timeout(Some(WAIT)).unwrap();
     stream.write_all(raw).unwrap();
     stream.flush().unwrap();
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).unwrap();
+    stream.read_to_end(&mut buf).unwrap_or_else(|err| {
+        panic!(
+            "timed out or failed waiting for HTTP response on port {port}: {err}; partial={:?}",
+            String::from_utf8_lossy(&buf)
+        )
+    });
     let split = buf
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -398,7 +403,7 @@ fn wait_for_requests(
     seen: &Arc<Mutex<Vec<Request>>>,
     count: usize,
 ) -> Vec<Request> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
     loop {
         let snapshot = seen.lock().unwrap().clone();
         if snapshot.len() >= count {
@@ -415,7 +420,7 @@ fn wait_for_requests(
 }
 
 fn wait_for_idle(surface: &RunningSurface) -> Vec<serde_json::Value> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
     loop {
         let entries = get_events(surface);
         if entries.iter().any(|e| e["kind"] == "idle") {
@@ -909,17 +914,17 @@ fn start_surface_with_agent_runner(root: &Path) -> (RunningSurface, TaskConfig) 
         )
     });
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
     let (_name, port, token) = loop {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for printed surface URL; stderr={}",
-            String::from_utf8_lossy(&err_buf.lock().unwrap())
-        );
         let stdout = String::from_utf8(out_buf.lock().unwrap().clone()).unwrap();
         if let Some(parsed) = stdout.lines().find_map(parse_surface_ready_line) {
             break parsed;
         }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for printed surface URL; stdout={stdout:?} stderr={:?}",
+            String::from_utf8_lossy(&err_buf.lock().unwrap())
+        );
         std::thread::sleep(Duration::from_millis(5));
     };
 

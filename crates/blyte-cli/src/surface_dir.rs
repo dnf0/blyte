@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 const PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 const PROBE_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
+const STARTING_MARKER: &str = ".starting";
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -239,6 +240,57 @@ pub fn surface_dir(main_checkout: &Path, id: &str) -> PathBuf {
     surfaces_dir(main_checkout).join(id)
 }
 
+pub fn prepare_starting_dir(dir: &Path) -> Result<(), String> {
+    let parent = dir
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| format!("surface directory has no parent: {}", dir.display()))?;
+    let staging_parent = parent
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| format!("surfaces directory has no parent: {}", parent.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+    let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let staging_dir =
+        staging_parent.join(format!(".surface-starting.{}.{seq}", std::process::id()));
+    std::fs::create_dir(&staging_dir)
+        .map_err(|e| format!("failed to create {}: {e}", staging_dir.display()))?;
+    let marker = staging_dir.join(STARTING_MARKER);
+    if let Err(e) = std::fs::write(&marker, b"") {
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        return Err(format!("failed to write {}: {e}", marker.display()));
+    }
+    if let Err(e) = std::fs::rename(&staging_dir, dir) {
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        return Err(format!(
+            "failed to rename {} to {}: {e}",
+            staging_dir.display(),
+            dir.display()
+        ));
+    }
+    Ok(())
+}
+
+pub fn cleanup_starting_dir(dir: &Path) {
+    if dir.join("surface.json").exists() {
+        return;
+    }
+    if let Some(staging_parent) = dir
+        .parent()
+        .and_then(|p| p.parent())
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let trash = staging_parent.join(format!(".surface-cleanup.{}.{seq}", std::process::id()));
+        if std::fs::rename(dir, &trash).is_ok() {
+            let _ = std::fs::remove_dir_all(&trash);
+            return;
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 pub fn write_record_in(dir: &Path, record: &SurfaceRecord) -> Result<(), String> {
     validate_surface_id(&record.id)?;
     validate_surface_name(&record.name)?;
@@ -261,15 +313,12 @@ pub fn write_record_in(dir: &Path, record: &SurfaceRecord) -> Result<(), String>
             dest.display()
         ));
     }
+    let _ = std::fs::remove_file(dir.join(STARTING_MARKER));
     Ok(())
 }
 
-pub fn read_record_in(dir: &Path, id: &str) -> Result<SurfaceRecord, String> {
-    validate_surface_id(id)?;
-    let path = dir.join("surface.json");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-    let record: SurfaceRecord = serde_json::from_str(&text)
+fn parse_record_text(path: &Path, id: &str, text: &str) -> Result<SurfaceRecord, String> {
+    let record: SurfaceRecord = serde_json::from_str(text)
         .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
     if record.id != id {
         return Err(format!(
@@ -282,6 +331,14 @@ pub fn read_record_in(dir: &Path, id: &str) -> Result<SurfaceRecord, String> {
         return Err(format!("surface record {} has {e}", path.display()));
     }
     Ok(record)
+}
+
+pub fn read_record_in(dir: &Path, id: &str) -> Result<SurfaceRecord, String> {
+    validate_surface_id(id)?;
+    let path = dir.join("surface.json");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    parse_record_text(&path, id, &text)
 }
 
 pub fn read_record(main_checkout: &Path, id: &str) -> Result<SurfaceRecord, String> {
@@ -298,9 +355,11 @@ pub fn list_records_in(root: &Path) -> Result<Vec<LocatedRecord>, String> {
     for entry in entries {
         let entry = entry.map_err(|e| format!("failed to read {}: {e}", root.display()))?;
         let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|e| format!("failed to inspect {}: {e}", path.display()))?;
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("failed to inspect {}: {e}", path.display())),
+        };
         if !file_type.is_dir() {
             continue;
         }
@@ -311,7 +370,23 @@ pub fn list_records_in(root: &Path) -> Result<Vec<LocatedRecord>, String> {
         if let Err(e) = validate_surface_id(id) {
             return Err(format!("invalid surface directory {}: {e}", path.display()));
         }
-        let record = read_record_in(&path, id)?;
+        let record_path = path.join("surface.json");
+        let record = match std::fs::read_to_string(&record_path) {
+            Ok(text) => parse_record_text(&record_path, id, &text)?,
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                if path.join(STARTING_MARKER).is_file() {
+                    continue;
+                }
+                match std::fs::read_to_string(&record_path) {
+                    Ok(text) => parse_record_text(&record_path, id, &text)?,
+                    Err(e2) if e2.kind() == ErrorKind::NotFound && !path.exists() => continue,
+                    Err(e2) => {
+                        return Err(format!("failed to read {}: {e2}", record_path.display()))
+                    }
+                }
+            }
+            Err(e) => return Err(format!("failed to read {}: {e}", record_path.display())),
+        };
         records.push(LocatedRecord { record, dir: path });
     }
     records.sort_by(|a, b| {

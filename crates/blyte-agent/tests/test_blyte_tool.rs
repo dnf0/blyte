@@ -224,14 +224,16 @@ fn background_rules_and_async_dispatch() {
             expected_out.display()
         )
     );
+    // The script waits for the gate file, which is written below: a call that waited for it
+    // would never return, so this bound only has to be far above a loaded machine's start-up.
     assert!(
-        elapsed < Duration::from_secs(4),
+        elapsed < Duration::from_secs(30),
         "background dispatch blocked for {elapsed:?}"
     );
     assert!(!marker.exists(), "marker appeared too early");
 
     std::fs::write(&gate, "").unwrap();
-    let wait_until = Instant::now() + Duration::from_secs(5);
+    let wait_until = Instant::now() + Duration::from_secs(30);
     while !marker.exists() && Instant::now() < wait_until {
         std::thread::sleep(Duration::from_millis(5));
     }

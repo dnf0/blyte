@@ -16,6 +16,8 @@ use blyte_cli::surface_dir::{list_records_in, surfaces_dir};
 use blyte_cli::surface_registry::{entry_path, registry_dir, write_entry, RegistryEntry};
 use blyte_cli::tell::{run_tell, tell, SurfacePeerTools, TellOutcome};
 
+const WAIT: Duration = Duration::from_secs(30);
+
 struct SharedBuf(Arc<Mutex<Vec<u8>>>);
 
 impl Write for SharedBuf {
@@ -159,17 +161,17 @@ fn start_surface(repo: &Path, name: &str) -> RunningSurface {
         )
     });
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
     let ready_name = loop {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for surface; stderr={}",
-            String::from_utf8_lossy(&err_buf.lock().unwrap())
-        );
         let stdout = String::from_utf8(out_buf.lock().unwrap().clone()).unwrap();
         if let Some(parsed) = stdout.lines().find_map(parse_surface_ready_line) {
             break parsed;
         }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for printed surface URL for {name}; stdout={stdout:?} stderr={:?}",
+            String::from_utf8_lossy(&err_buf.lock().unwrap())
+        );
         std::thread::sleep(Duration::from_millis(5));
     };
 
@@ -187,7 +189,7 @@ fn start_surface(repo: &Path, name: &str) -> RunningSurface {
 }
 
 fn wait_for_prompt_count(prompts: &Arc<Mutex<Vec<String>>>, expected: usize) -> Vec<String> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
     loop {
         let current = prompts.lock().unwrap().clone();
         if current.len() >= expected {
@@ -195,7 +197,7 @@ fn wait_for_prompt_count(prompts: &Arc<Mutex<Vec<String>>>, expected: usize) -> 
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for {expected} prompts, got {}",
+            "timed out waiting for {expected} prompts, got {} ({current:?})",
             current.len()
         );
         std::thread::sleep(Duration::from_millis(10));

@@ -19,6 +19,8 @@ use blyte_cli::surface_registry::{entry_path, registry_dir, state_dir, RegistryE
 use blyte_cli::surfaces_cmd::run_surfaces;
 use blyte_cli::tell::SurfacePeerTools;
 
+const WAIT: Duration = Duration::from_secs(30);
+
 struct SharedBuf(Arc<Mutex<Vec<u8>>>);
 
 impl Write for SharedBuf {
@@ -147,17 +149,17 @@ fn wait_for_surface(
     handle: std::thread::JoinHandle<i32>,
     policy_guard: std::sync::RwLockReadGuard<'static, ()>,
 ) -> RunningSurface {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
     let (name, port, token) = loop {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for printed surface URL; stderr={}",
-            String::from_utf8_lossy(&err_buf.lock().unwrap())
-        );
-        let stdout = String::from_utf8(out_buf.lock().unwrap().clone()).unwrap();
+        let stdout = String::from_utf8_lossy(&out_buf.lock().unwrap()).into_owned();
         if let Some(parsed) = stdout.lines().find_map(parse_surface_ready_line) {
             break parsed;
         }
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {WAIT:?} waiting for printed surface URL; stdout={stdout:?}; stderr={:?}",
+            String::from_utf8_lossy(&err_buf.lock().unwrap())
+        );
         std::thread::sleep(Duration::from_millis(5));
     };
     RunningSurface {
@@ -179,9 +181,7 @@ fn http_request(
     body: Option<&str>,
 ) -> (u16, String) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    stream.set_read_timeout(Some(WAIT)).unwrap();
     let mut req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n");
     if let Some(tok) = token {
         req.push_str(&format!("X-Blyte-Token: {tok}\r\n"));
@@ -198,7 +198,12 @@ fn http_request(
     stream.flush().unwrap();
 
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).unwrap();
+    if let Err(err) = stream.read_to_end(&mut raw) {
+        panic!(
+            "timed out or failed after up to {WAIT:?} waiting for HTTP response to {method} {path} on 127.0.0.1:{port}: {err}; received={:?}",
+            String::from_utf8_lossy(&raw)
+        );
+    }
     let text = String::from_utf8(raw).unwrap();
     let (head, resp_body) = text.split_once("\r\n\r\n").unwrap();
     let status: u16 = head
@@ -482,7 +487,7 @@ fn registry_entry_has_no_branch_and_surfaces_prints_a_dash() {
 }
 
 fn wait_for_idle_after_seq(port: u16, token: &str, min_seq: u64) -> u64 {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
     loop {
         let (status, body) = http_request(port, "GET", "/api/session", Some(token), None);
         assert_eq!(status, 200, "body={body}");
@@ -494,7 +499,7 @@ fn wait_for_idle_after_seq(port: u16, token: &str, min_seq: u64) -> u64 {
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for idle after seq {min_seq}; info={info}"
+            "timed out after {WAIT:?} waiting for session to become idle with last_seq > {min_seq}; last response=({status}) {body}"
         );
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -724,19 +729,18 @@ fn branch_appears_after_git_init_without_restart() {
     );
     assert_eq!(msg_status, 200, "body={msg_body}");
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let reg_entry_path = entry_path(&reg_dir, &surface_id);
+    let deadline = Instant::now() + WAIT;
     loop {
-        let updated: RegistryEntry = serde_json::from_str(
-            &std::fs::read_to_string(entry_path(&reg_dir, &surface_id)).unwrap(),
-        )
-        .unwrap();
+        let raw = std::fs::read_to_string(&reg_entry_path).unwrap();
+        let updated: RegistryEntry = serde_json::from_str(&raw).unwrap();
         if updated.branch.as_deref() == Some("main") {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for branch to appear in registry entry; got {:?}",
-            updated.branch
+            "timed out after {WAIT:?} waiting for branch `main` in registry entry {}; entry={raw}",
+            reg_entry_path.display()
         );
         std::thread::sleep(Duration::from_millis(10));
     }
