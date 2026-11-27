@@ -463,7 +463,7 @@ fn trickle_without_newline_hits_the_cap() {
     let url = spawn_trickle_without_newline_server(Duration::from_millis(20));
     let p = Gemini::new_api_key("test-key")
         .with_api_root(url)
-        .with_stream_timeouts(Duration::from_secs(2), Duration::from_millis(2500));
+        .with_stream_timeouts(Duration::from_secs(2), Duration::from_secs(3));
     let (res, elapsed) = run_guarded(Duration::from_secs(35), move || {
         p.complete(&req_without_timeout())
     });
@@ -473,8 +473,8 @@ fn trickle_without_newline_hits_the_cap() {
         "expected timeout ProviderError, got: {err:?} after {elapsed:?}"
     );
     assert!(
-        elapsed >= Duration::from_secs(2) && elapsed <= Duration::from_secs(30),
-        "expected timeout between 2s and 30s, took {elapsed:?}"
+        elapsed >= Duration::from_millis(2800) && elapsed <= Duration::from_secs(30),
+        "expected timeout between 2.8s and 30s, took {elapsed:?}"
     );
 }
 
