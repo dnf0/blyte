@@ -571,12 +571,178 @@ home-directory paths in code or tests.
 
 **Commit message:** `feat(review): review and undo a run made in a folder that is not a git repository`
 
-### Task IC5b: the surface, the `blyte` tool and the prompts (outline)
+### Task IC4c2: a research run's scratch folder cannot collide with another run's records
 
-**Depends on:** IC4c, IC5a. The surface lists and reconciles runs in a non-repository folder and
-serves their diff from the saved diff file; `surface_notify` finds a non-repository surface; the
-`blyte` tool allows `dispatch`, `wait`, `status`, `review`, `undo` and `clean` there and writes its
-output file to the run store; an approved write from the chat is refused while a run holds the
-folder lock; the start-up notice, the sandbox paragraph, `process.md` and `reference.md` describe
-in-place runs and tell the model to hand off anything longer than a quick look-up. Written in
-full once IC4c and IC5a are on the branch.
+**Depends on:** IC4c (this worktree is based on it). **Siblings:** IC5b (the `blyte` tool and
+prompts) and IC5c (the surface) run at the same time and are **not** in this worktree: do not
+change `serve.rs`, `task_runner.rs`, `surface_notify.rs` or any asset.
+
+**Goal.** Close a hole IC4c left. IC4c put a non-repository research run's scratch folder at
+`<store>/<id>/` and let a run write inside its own root when that root is
+`<state>/folders/<key>/runs/<anything>`. Run ids may contain dots, so a research run with the id
+`T1.before` gets the scratch folder `<store>/T1.before/`, which is run `T1`'s saved originals,
+and may then overwrite them. **Why:** the saved originals are the only way to undo an in-place
+run, and the model picks run ids.
+
+**Files.** `crates/blyte-agent/src/sandbox.rs` (`is_run_scratch_workspace`),
+`crates/blyte-cli/src/dispatch_in_place.rs`, `crates/blyte-agent/tests/test_write_guard.rs`,
+`crates/blyte-cli/tests/test_dispatch_in_place.rs`.
+
+**What to build.**
+- The scratch folder of a non-repository research run is `<store>/<id>.scratch/`.
+- `is_run_scratch_workspace` is true only for `<state>/folders/<16 hex>/runs/<name>` where
+  `<name>` ends with `.scratch` and is longer than that suffix. Nothing else changes in the
+  guard: a run whose root is any other folder under the state directory still cannot write there.
+- `dispatch_in_place::run` refuses to start a research run when `<store>/<id>.scratch` exists and
+  no start record for that id exists (`error: <path> exists and does not belong to run <id>`).
+
+**Tests.**
+- `test_write_guard.rs`: the predicate is false for `.../runs/T1`, `.../runs/T1.before`,
+  `.../runs/T1.after`, `.../runs/.scratch`, `.../runs/T1.scratch/sub`, and true for
+  `.../runs/T1.scratch` and `.../runs/T1.before.scratch`; a write tool call from a run rooted at
+  `.../runs/T1.before` is refused.
+- `test_dispatch_in_place.rs`: after an in-place run `T1` that modified `a.txt`, a research run
+  with the id `T1.before` whose scripted model writes `a.txt` in its own working folder leaves
+  `<store>/T1.before/a.txt` holding the original content; the research tests from IC4c pass with
+  the scratch folder at `<store>/<id>.scratch/` (update the paths those IC4c tests assert, and
+  nothing else in them).
+
+**Constraints.** No fallbacks. Existing tests pass unmodified apart from the scratch path in
+IC4c's own tests. No home-directory paths in code or tests.
+
+**Commit message:** `fix(dispatch): a research run's scratch folder cannot be another run's records`
+
+### Task IC5b: the `blyte` tool and the prompts in a folder that is not a git repository
+
+**Depends on:** IC4b, IC5a (on this branch). **Siblings:** IC5c (the surface: `serve.rs`,
+`live_runs.rs`, `surface_notify.rs`, `dispatch_in_place.rs`, `assets/surface/`) and IC4c2 run at
+the same time and are **not** in this worktree: do not change those files.
+
+**Goal.** The conversation model in a surface whose folder is not a git repository can hand work
+off with the `blyte` tool, and its instructions tell it to. **Why:** today the tool refuses
+everything there, so all work happens in the chat.
+
+**Files.** `crates/blyte-agent/src/tools.rs`; `crates/blyte-cli/src/task_runner.rs` (wiring
+only); `crates/blyte-cli/src/conversation_text.rs`;
+`crates/blyte-cli/assets/conversation/process.md` and `reference.md`; tests beside the existing
+tests of each (new file `crates/blyte-agent/tests/test_blyte_tool_no_repo.rs`).
+
+**What to build.**
+
+1. **The tool outside a repository.** When the root is not a git repository the `blyte` tool
+   allows `dispatch`, `wait`, `status` and `review`, and refuses `plan`, `init`, `clean`,
+   `edit-start`, `edit-finish` and `undo` with a message that says which commands work here and
+   that `blyte undo <id>` is for the user to run. `publish` keeps refusing. The refused dispatch
+   options and the injected `--request`, `--surface`, `--started-by` are as in a repository.
+   Inside a repository nothing changes.
+2. **Inline task text.** The tool takes an optional string argument `task`. With `dispatch`, the
+   tool itself writes that text to `<tasks dir>/<id>.md` and passes that path as the task file.
+   `task` together with a task file path, `--plan` or `--plan-task` is an error; `task` with any
+   other subcommand is an error; an existing `<tasks dir>/<id>.md` with different content is an
+   error naming it. The tasks directory is `.wt/tasks` in a repository; outside one it is a path
+   the CLI gives the agent crate through a new setter (as `set_blyte_tool` does), filled in
+   `task_runner.rs` from `crate::surface_dir::tasks_dir`. A dispatch outside a repository
+   without the setter's path is an error, not a guess. The model's own write tool still cannot
+   write there (the write guard is unchanged).
+3. **Background output.** A background dispatch outside a repository writes its output file to
+   `<run store>/<id>.dispatch.out`, the run store also given by a setter filled from
+   `crate::surface_dir::run_store`. Nothing is created in the folder.
+4. **One writer.** Outside a repository, before the conversation's write or edit tool changes a
+   file under the root, read the folder lock (`crate::folder_lock::holder`, lock path given by a
+   setter filled from `crate::surface_dir::in_place_lock_path`). When a live holder exists the
+   write is refused: `run <id> is editing this folder; wait for it to finish`. A lock that
+   cannot be read is an error.
+5. **The prompts.** `process.md`, `reference.md` and the sandbox paragraph in
+   `conversation_text.rs` say, for a folder that is not a git repository: runs work here and
+   edit the folder in place, one at a time; research runs work here; hand off anything longer
+   than a quick look-up (the same threshold the text gives for a repository) with
+   `dispatch` and the `task` argument; a run's changes are reviewed with `blyte review <id>`
+   and the user can reverse them with `blyte undo <id>`; direct edits, combining and publishing
+   still need a repository. Remove the text that says there are no runs there and that tells the
+   model to propose `git init` in order to get runs (keep the `git init` advice only for when
+   the user wants a repository). Keep the wording plain and short; do not restate the same rule
+   in two files.
+
+**Tests.**
+- outside a repository: `status` and `review` reach the `blyte` binary (use the stand-in binary
+  the existing tool tests use); `plan`, `init`, `clean`, `edit-start`, `edit-finish` and `undo`
+  are refused with the new message; `publish` is refused;
+- `dispatch T1` with `task: "do x"` writes `<tasks dir>/T1.md` and passes its path; with a task
+  file path as well: error; `status T1` with `task`: error; a second dispatch of `T1` with
+  different text: error naming the file;
+- a background dispatch outside a repository creates `<run store>/T1.dispatch.out` and no `.wt`
+  in the folder;
+- with the lock held by a live process, the conversation's write tool is refused with the
+  message above and the file is unchanged; with no holder it writes as before (through the
+  approval path that exists today);
+- the assembled conversation text for a non-repository folder contains `blyte undo` and does not
+  contain `there are no runs`;
+- inside a repository every existing tool test passes unmodified.
+
+**Constraints.** No fallbacks: a missing setter path, an unreadable lock or an unwritable task
+file is an error naming it. Existing tests pass unmodified, except a test that asserts the old
+non-repository wording or the old blanket refusal: change only those assertions and list each in
+your final message. No home-directory paths in code or tests.
+
+**Commit message:** `feat(surface): the conversation can hand work off in a folder that is not a git repository`
+
+### Task IC5c: the surface shows and reviews runs in a folder that is not a git repository
+
+**Depends on:** IC4b, IC5a (on this branch). **Siblings:** IC5b (`tools.rs`, `task_runner.rs`,
+the conversation prompts) and IC4c2 run at the same time and are **not** in this worktree: do
+not change those files.
+
+**Goal.** A surface in a folder that is not a git repository lists that folder's runs, shows
+their diffs, takes a verdict, offers undo, and hears when a run finishes. **Why:** without this a
+handed-off run finishes unseen and its changes cannot be reviewed from the surface.
+
+**Files.** `crates/blyte-cli/src/serve.rs`, `live_runs.rs`, `surface_notify.rs`,
+`dispatch_in_place.rs` (only the notify call), `assets/surface/index.html`, and a new
+`crates/blyte-cli/tests/test_surface_in_place_runs.rs`; `queue_actions.rs` and `requests.rs`
+only where a run-records directory has to be passed instead of `<root>/.wt`.
+
+**What to build.**
+1. **Listing.** Outside a repository, `reconcile_runs` and `GET /api/runs` read the folder's run
+   store (`crate::dispatch_in_place::records_dir_for`) instead of returning nothing: running and
+   finished runs appear with the fields the page validates today (`changed_files` from the
+   summary, `commits` empty, flags as an ordinary run gets them where they do not need git), and
+   a finished run is reported back to the conversation as it is in a repository.
+2. **Diff.** `GET /api/runs/<id>/diff` for such a run answers with what
+   `crate::in_place_review` produces for `--diff` (the file list and the saved diff); for a
+   research run, its report. A missing record is the error it is, not an empty diff.
+3. **Decision.** The decision route records a verdict for such a run through
+   `crate::in_place_review` (the same file `blyte review --verdict` writes). Decisions that need
+   git (combine, push, pull request) keep answering 409 with their current message.
+4. **Undo.** `POST /api/runs/<id>/undo` (token required, like every `/api` route) calls
+   `crate::in_place_review::undo` for that run and answers 200 with the lines it printed, or 409
+   with its refusal. Expose what you need from `in_place_review` as functions that return a
+   result instead of printing, without changing what the commands print. The page shows an
+   `Undo` button on a finished in-place run that has changed files and is not undone; it asks
+   for confirmation in the page (not with a browser dialog), then shows the result or the
+   refusal. A research run and a run in a repository have no such button.
+5. **Notify.** `surface_notify` finds a surface whose folder is not a git repository (its record
+   is under the folder store, see `crate::surface_dir`), and `dispatch_in_place::run` calls it
+   after writing the summary, as an ordinary dispatch does.
+6. **Notices.** The start-up line and the page's badge say `not a git repository: runs edit this
+   folder in place; combining and publishing are off` in place of today's text.
+
+**Tests** (`cargo test -p blyte --test test_surface_in_place_runs`; build run records in a
+temporary run store as `tests/test_in_place_review.rs` does; call the handlers the way the
+existing `serve` tests do, without starting a browser):
+- `/api/runs` lists a finished in-place run with its `changed_files` and no commits, and a
+  running one;
+- `/api/runs/T1/diff` contains the old and the new line; for an unknown id it is an error;
+- a verdict posted through the decision route is in `T1.verdict.json`;
+- `POST /api/runs/T1/undo` restores the file and a second call answers 409 `already undone`;
+  without the token it is refused;
+- undo for a run in a git repository answers 409;
+- `surface_notify` reaches a non-repository surface's record (as its existing tests check a
+  repository surface);
+- page tests in `tests/test_surface_page.rs`: the Undo button is rendered only for a finished,
+  not-undone in-place run with changed files; the badge text is the new one.
+
+**Constraints.** No fallbacks. Inside a repository nothing changes and existing tests pass
+unmodified, except assertions on the old notice text: change only those and list each in your
+final message. No home-directory paths in code or tests.
+
+**Commit message:** `feat(surface): list, review and undo in-place runs from the surface`
