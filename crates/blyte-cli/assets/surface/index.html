@@ -423,6 +423,75 @@
       color: var(--color-muted);
     }
 
+    .surface-switcher-section-heading {
+      margin-top: 4px;
+      padding: 6px 9px 3px;
+      border-top: 1px solid var(--color-line);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--color-muted);
+    }
+
+    .surface-switcher-stopped {
+      cursor: default;
+    }
+
+    .surface-switcher-last-used {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+    }
+
+    .surface-switcher-stopped-message {
+      font-size: 12px;
+      color: var(--color-text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .surface-switcher-resume-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 2px;
+    }
+
+    .surface-switcher-resume-cmd {
+      flex: 1 1 auto;
+      min-width: 0;
+      font-size: 11px;
+      color: var(--color-strong);
+      background: var(--color-page);
+      border: 1px solid var(--color-line);
+      border-radius: 4px;
+      padding: 2px 6px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .surface-switcher-copy-btn {
+      flex: 0 0 auto;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 2px 7px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-card);
+      color: var(--color-text);
+      cursor: pointer;
+    }
+
+    .surface-switcher-copy-btn:hover,
+    .surface-switcher-copy-btn:focus-visible {
+      border-color: var(--brand-rust);
+      color: var(--color-strong);
+    }
+
     .surface-switcher-error {
       padding: 8px 9px;
       border-radius: 4px;
@@ -3603,48 +3672,199 @@
           }
         }
       }
+      if (!Array.isArray(data.stopped)) {
+        return "/api/surfaces: missing stopped array";
+      }
+      for (let i = 0; i < data.stopped.length; i++) {
+        const s = data.stopped[i];
+        if (!isPlainObject(s)) {
+          return "/api/surfaces: stopped[" + i + "] must be an object";
+        }
+        for (const f of ["id", "name"]) {
+          if (typeof s[f] !== "string") {
+            return "/api/surfaces: stopped[" + i + "] missing or invalid field " + f;
+          }
+        }
+        if (typeof s.last_used !== "number" || !Number.isFinite(s.last_used)) {
+          return "/api/surfaces: stopped[" + i + "] missing or invalid field last_used";
+        }
+        if (!hasOwn(s, "last_message") || (s.last_message !== null && typeof s.last_message !== "string")) {
+          return "/api/surfaces: stopped[" + i + "] missing or invalid field last_message";
+        }
+      }
       return null;
     }
 
-    function renderSurfaceList(surfaces) {
+    function formatStoppedLastUsed(ts) {
+      return new Date(ts * 1000).toLocaleString();
+    }
+
+    function copyResumeCommand(cmd, btn) {
+      if (typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        navigator.clipboard.writeText(cmd).then(() => {
+          if (btn) {
+            btn.textContent = "Copied";
+            setTimeout(() => {
+              btn.textContent = "Copy";
+            }, 1500);
+          }
+        }).catch(() => {});
+      }
+    }
+
+    function renderSurfaceList(container, surfaces, stopped) {
       const list = Array.isArray(surfaces) ? surfaces : [];
-      const rows = list.map(s => {
+      const stoppedList = Array.isArray(stopped) ? stopped : [];
+      container.textContent = "";
+
+      for (const s of list) {
         const isCurrent = Boolean(s && s.current);
         const hasUrl = Boolean(s && typeof s.url === "string" && s.url.length > 0);
-        const idAttr = escapeHtml(s && s.id != null ? String(s.id) : "");
-        const nameHtml = '<span class="surface-switcher-name">' + escapeHtml(s && s.name != null ? String(s.name) : "") + '</span>';
-        const branchHtml = s && s.branch !== null && s.branch !== undefined
-          ? '<span class="surface-switcher-branch">' + escapeHtml(String(s.branch)) + '</span>'
-          : '';
-        const badgeHtml = isCurrent ? '<span class="surface-switcher-badge">current</span>' : '';
-        const rootHtml = '<div class="surface-switcher-root mono" title="' + escapeHtml(s && s.root != null ? String(s.root) : "") + '">&lrm;' + escapeHtml(s && s.root != null ? String(s.root) : "") + '</div>';
-        const doingHtml = '<div class="surface-switcher-doing">' + escapeHtml(s && s.doing != null ? String(s.doing) : "") + '</div>';
-        const errorHtml = !hasUrl
-          ? '<div class="surface-switcher-row-error">' + escapeHtml(s && s.error != null ? String(s.error) : "surface unavailable") + '</div>'
-          : '';
-        const inner =
-          '<div class="surface-switcher-head">' + nameHtml + branchHtml + badgeHtml + '</div>' +
-          rootHtml +
-          doingHtml +
-          errorHtml;
+        const idStr = s && s.id != null ? String(s.id) : "";
+        const nameStr = s && s.name != null ? String(s.name) : "";
+        const rootStr = s && s.root != null ? String(s.root) : "";
+        const doingStr = s && s.doing != null ? String(s.doing) : "";
+
+        let row;
         if (isCurrent) {
-          return '<div class="surface-switcher-row surface-switcher-current" role="option" aria-selected="true" aria-current="true" data-surface-id="' + idAttr + '">' +
-            inner +
-            '</div>';
+          row = document.createElement("div");
+          row.className = "surface-switcher-row surface-switcher-current";
+          row.setAttribute("role", "option");
+          row.setAttribute("aria-selected", "true");
+          row.setAttribute("aria-current", "true");
+          row.setAttribute("data-surface-id", idStr);
+        } else if (!hasUrl) {
+          row = document.createElement("button");
+          row.type = "button";
+          row.className = "surface-switcher-row surface-switcher-disabled";
+          row.setAttribute("role", "option");
+          row.setAttribute("aria-selected", "false");
+          row.setAttribute("aria-disabled", "true");
+          row.disabled = true;
+          row.setAttribute("data-surface-id", idStr);
+        } else {
+          row = document.createElement("button");
+          row.type = "button";
+          row.className = "surface-switcher-row surface-switcher-item";
+          row.setAttribute("role", "option");
+          row.setAttribute("aria-selected", "false");
+          row.setAttribute("data-surface-id", idStr);
+          row.setAttribute("data-surface-url", s.url);
+          if (row.dataset) {
+            row.dataset.surfaceUrl = s.url;
+          }
         }
+
+        const head = document.createElement("div");
+        head.className = "surface-switcher-head";
+
+        const nameEl = document.createElement("span");
+        nameEl.className = "surface-switcher-name";
+        nameEl.textContent = nameStr;
+        head.appendChild(nameEl);
+
+        if (s && s.branch !== null && s.branch !== undefined) {
+          const branchEl = document.createElement("span");
+          branchEl.className = "surface-switcher-branch";
+          branchEl.textContent = String(s.branch);
+          head.appendChild(branchEl);
+        }
+
+        if (isCurrent) {
+          const badgeEl = document.createElement("span");
+          badgeEl.className = "surface-switcher-badge";
+          badgeEl.textContent = "current";
+          head.appendChild(badgeEl);
+        }
+
+        row.appendChild(head);
+
+        const rootEl = document.createElement("div");
+        rootEl.className = "surface-switcher-root mono";
+        rootEl.setAttribute("title", rootStr);
+        rootEl.textContent = "\u200e" + rootStr;
+        row.appendChild(rootEl);
+
+        const doingEl = document.createElement("div");
+        doingEl.className = "surface-switcher-doing";
+        doingEl.textContent = doingStr;
+        row.appendChild(doingEl);
+
         if (!hasUrl) {
-          return '<button type="button" class="surface-switcher-row surface-switcher-disabled" role="option" aria-selected="false" aria-disabled="true" disabled data-surface-id="' + idAttr + '">' +
-            inner +
-            '</button>';
+          const errorEl = document.createElement("div");
+          errorEl.className = "surface-switcher-row-error";
+          errorEl.textContent = s && s.error != null ? String(s.error) : "surface unavailable";
+          row.appendChild(errorEl);
         }
-        return '<button type="button" class="surface-switcher-row surface-switcher-item" role="option" aria-selected="false" data-surface-id="' + idAttr + '" data-surface-url="' + escapeHtml(s.url) + '">' +
-          inner +
-          '</button>';
-      });
-      if (!list.some(s => !s || !s.current)) {
-        rows.push('<div class="surface-switcher-empty">No other surfaces are running. Start one by running blyte in another folder.</div>');
+
+        container.appendChild(row);
       }
-      return rows.join("");
+
+      if (!list.some(s => !s || !s.current)) {
+        const emptyEl = document.createElement("div");
+        emptyEl.className = "surface-switcher-empty";
+        emptyEl.textContent = "No other surfaces are running. Start one by running blyte in another folder.";
+        container.appendChild(emptyEl);
+      }
+
+      if (stoppedList.length > 0) {
+        const heading = document.createElement("div");
+        heading.className = "surface-switcher-section-heading";
+        heading.textContent = "Stopped in this folder";
+        container.appendChild(heading);
+
+        for (const s of stoppedList) {
+          const idStr = s && s.id != null ? String(s.id) : "";
+          const nameStr = s && s.name != null ? String(s.name) : "";
+          const cmd = "blyte --resume " + nameStr;
+
+          const row = document.createElement("div");
+          row.className = "surface-switcher-row surface-switcher-stopped";
+          row.setAttribute("data-stopped-surface-id", idStr);
+
+          const head = document.createElement("div");
+          head.className = "surface-switcher-head";
+
+          const nameEl = document.createElement("span");
+          nameEl.className = "surface-switcher-name";
+          nameEl.textContent = nameStr;
+          head.appendChild(nameEl);
+
+          const lastUsedEl = document.createElement("span");
+          lastUsedEl.className = "surface-switcher-last-used";
+          lastUsedEl.textContent = formatStoppedLastUsed(s.last_used);
+          head.appendChild(lastUsedEl);
+
+          row.appendChild(head);
+
+          if (typeof s.last_message === "string" && s.last_message.length > 0) {
+            const msgEl = document.createElement("div");
+            msgEl.className = "surface-switcher-stopped-message";
+            msgEl.textContent = s.last_message;
+            row.appendChild(msgEl);
+          }
+
+          const cmdRow = document.createElement("div");
+          cmdRow.className = "surface-switcher-resume-row";
+
+          const codeEl = document.createElement("code");
+          codeEl.className = "surface-switcher-resume-cmd mono";
+          codeEl.textContent = cmd;
+          cmdRow.appendChild(codeEl);
+
+          const copyBtn = document.createElement("button");
+          copyBtn.type = "button";
+          copyBtn.className = "surface-switcher-copy-btn";
+          copyBtn.textContent = "Copy";
+          copyBtn.addEventListener("click", () => {
+            copyResumeCommand(cmd, copyBtn);
+          });
+          cmdRow.appendChild(copyBtn);
+
+          row.appendChild(cmdRow);
+          container.appendChild(row);
+        }
+      }
     }
 
     function renderSurfaceListError(message) {
@@ -3729,7 +3949,7 @@
         list.innerHTML = renderSurfaceListError(err);
         return;
       }
-      list.innerHTML = renderSurfaceList(data.surfaces);
+      renderSurfaceList(list, data.surfaces, data.stopped);
     }
 
     function renderModelsSelect() {

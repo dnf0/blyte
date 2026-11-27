@@ -222,7 +222,7 @@ fn surfaces_payload_lists_two_live_entries_sorted_by_name_with_urls_and_current(
         format!("http://127.0.0.1:{}/#token=tok-alpha-111", srv_a.port)
     );
 
-    let payload = surfaces_payload(reg.path(), &entry_z.id).unwrap();
+    let payload = surfaces_payload(reg.path(), &entry_z.id, &[]).unwrap();
     let list = payload["surfaces"].as_array().unwrap();
     assert_eq!(list.len(), 2);
 
@@ -284,7 +284,7 @@ fn surfaces_payload_breaks_name_ties_by_started_at() {
     write_token(&older.id, "tok-old");
     write_token(&newer.id, "tok-new");
 
-    let payload = surfaces_payload(reg.path(), &older.id).unwrap();
+    let payload = surfaces_payload(reg.path(), &older.id, &[]).unwrap();
     let list = payload["surfaces"].as_array().unwrap();
     assert_eq!(list.len(), 2);
     assert_eq!(list[0]["id"], "s0000000000000011");
@@ -323,7 +323,7 @@ fn surfaces_payload_lists_missing_token_entry_with_null_url_and_error() {
     write_entry(reg.path(), &missing_token_entry).unwrap();
     write_token(&ok_entry.id, "tok-ok");
 
-    let payload = surfaces_payload(reg.path(), &ok_entry.id).unwrap();
+    let payload = surfaces_payload(reg.path(), &ok_entry.id, &[]).unwrap();
     let list = payload["surfaces"].as_array().unwrap();
     assert_eq!(list.len(), 2);
 
@@ -374,7 +374,7 @@ fn surfaces_payload_omits_dead_process_entries() {
     write_token(&live_entry.id, "tok-live");
     write_token(&dead_entry.id, "tok-dead");
 
-    let payload = surfaces_payload(reg.path(), &live_entry.id).unwrap();
+    let payload = surfaces_payload(reg.path(), &live_entry.id, &[]).unwrap();
     let list = payload["surfaces"].as_array().unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0]["id"], "s00000000000000aa");
@@ -401,7 +401,7 @@ fn surfaces_payload_errors_when_current_id_is_absent() {
     write_token(&entry.id, "tok-alpha");
 
     let missing_id = "s00000000000000ff";
-    let err = surfaces_payload(reg.path(), missing_id).unwrap_err();
+    let err = surfaces_payload(reg.path(), missing_id, &[]).unwrap_err();
     assert!(err.contains(missing_id), "{err}");
 }
 
@@ -411,6 +411,7 @@ fn api_surfaces_route_checks_token_returns_payload_and_errors_on_missing_current
     let _guard = EnvGuard::set_state_root(state.path());
     let roots = tempfile::tempdir().unwrap();
     let root_a = roots.path().join("alpha");
+    std::fs::create_dir_all(&root_a).unwrap();
     let root_b = roots.path().join("beta");
 
     let surface = make_surface("s00000000000000aa", "alpha", root_a.clone());

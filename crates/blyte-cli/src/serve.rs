@@ -153,11 +153,16 @@ fn parse_json_object(body: &[u8]) -> Result<serde_json::Map<String, serde_json::
 }
 
 fn handle_surfaces(surface: &Surface) -> Response {
-    let registry_dir = match crate::surface_registry::registry_dir() {
+    let state_dir = match crate::surface_registry::state_dir() {
         Ok(dir) => dir,
         Err(e) => return json_error(500, e),
     };
-    match crate::surfaces_cmd::surfaces_payload(&registry_dir, &surface.surface_id) {
+    let registry_dir = state_dir.join("surfaces");
+    let stopped = match crate::surfaces_cmd::stopped_surfaces(&surface.root, &state_dir) {
+        Ok(stopped) => stopped,
+        Err(e) => return json_error(500, e),
+    };
+    match crate::surfaces_cmd::surfaces_payload(&registry_dir, &surface.surface_id, &stopped) {
         Ok(payload) => Response::json(200, &payload),
         Err(e) => json_error(500, e),
     }
@@ -2256,6 +2261,8 @@ where
         opener(&url);
     }
 
+    let stop_surface_name = surface_name.clone();
+
     let surface = Arc::new(Surface {
         surface_id,
         surface_name,
@@ -2286,7 +2293,14 @@ where
     drop(timer_guard);
 
     match serve_result {
-        Ok(()) => 0,
+        Ok(()) => {
+            let _ = writeln!(
+                out,
+                "blyte: stopped surface {stop_surface_name}; resume with: blyte --resume {stop_surface_name}"
+            );
+            let _ = out.flush();
+            0
+        }
         Err(e) => {
             let _ = writeln!(err, "blyte: server error: {e}");
             1

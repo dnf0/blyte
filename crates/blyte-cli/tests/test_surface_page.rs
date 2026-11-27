@@ -3275,10 +3275,50 @@ fn surface_switcher_renders_list_escapes_values_and_formats_title() {
     let harness = r#"
 const assert = require("node:assert");
 
+function makeDomEl(tag) {
+  const attrs = new Map();
+  const listeners = new Map();
+  return {
+    tagName: tag.toUpperCase(),
+    className: "",
+    type: "",
+    disabled: false,
+    dataset: {},
+    children: [],
+    _text: "",
+    get textContent() { return this._text; },
+    set textContent(v) {
+      this._text = String(v);
+      if (this._text === "") this.children = [];
+    },
+    setAttribute(k, v) { attrs.set(k, String(v)); },
+    getAttribute(k) { return attrs.has(k) ? attrs.get(k) : null; },
+    appendChild(child) { this.children.push(child); return child; },
+    addEventListener(ev, fn) {
+      if (!listeners.has(ev)) listeners.set(ev, []);
+      listeners.get(ev).push(fn);
+    },
+    listeners,
+  };
+}
+
+function collectNodes(root, out = []) {
+  for (const child of root.children) {
+    out.push(child);
+    collectNodes(child, out);
+  }
+  return out;
+}
+
+global.document = {
+  createElement(tag) { return makeDomEl(tag); },
+};
+
 assert.strictEqual(formatSurfaceTitle("x", true), "x: working - blyte");
 assert.strictEqual(formatSurfaceTitle("x", false), "x - blyte");
 
-const multiHtml = renderSurfaceList([
+const multiContainer = makeDomEl("div");
+renderSurfaceList(multiContainer, [
   {
     id: "s1",
     name: "alpha",
@@ -3309,20 +3349,30 @@ const multiHtml = renderSurfaceList([
     url: null,
     error: "surface gamma has no usable token at /tmp/tok",
   },
-]);
+], []);
 
-assert.ok(multiHtml.includes("surface-switcher-current"), multiHtml);
-assert.ok(multiHtml.includes('aria-current="true"'), multiHtml);
-assert.ok(!multiHtml.includes('data-surface-url="http://127.0.0.1:4100/#token=t1"'), multiHtml);
-assert.ok(multiHtml.includes('data-surface-url="http://127.0.0.1:4101/#token=t2"'), multiHtml);
-assert.ok(!multiHtml.includes("<script>"), multiHtml);
-assert.ok(multiHtml.includes("beta&lt;script&gt;alert(1)&lt;/script&gt;"), multiHtml);
-assert.ok(multiHtml.includes("surface-switcher-disabled"), multiHtml);
-assert.ok(multiHtml.includes(" disabled "), multiHtml);
-assert.ok(multiHtml.includes("surface gamma has no usable token at /tmp/tok"), multiHtml);
-assert.ok(!multiHtml.includes("No other surfaces are running."), multiHtml);
+assert.strictEqual(multiContainer.children.length, 3);
+const [row1, row2, row3] = multiContainer.children;
+assert.ok(row1.className.includes("surface-switcher-current"));
+assert.strictEqual(row1.getAttribute("aria-current"), "true");
+assert.strictEqual(row1.getAttribute("data-surface-url"), null);
 
-const singleHtml = renderSurfaceList([
+assert.strictEqual(row2.getAttribute("data-surface-url"), "http://127.0.0.1:4101/#token=t2");
+const multiNodes = collectNodes(multiContainer);
+assert.ok(!multiNodes.some(n => n.tagName === "SCRIPT"));
+assert.ok(
+  multiNodes.some(n => n.className.includes("surface-switcher-name") && n.textContent === "beta<script>alert(1)</script>")
+);
+
+assert.ok(row3.className.includes("surface-switcher-disabled"));
+assert.strictEqual(row3.disabled, true);
+assert.ok(
+  multiNodes.some(n => n.className.includes("surface-switcher-row-error") && n.textContent === "surface gamma has no usable token at /tmp/tok")
+);
+assert.ok(!multiNodes.some(n => n.textContent.includes("No other surfaces are running.")));
+
+const singleContainer = makeDomEl("div");
+renderSurfaceList(singleContainer, [
   {
     id: "s1",
     name: "solo",
@@ -3333,12 +3383,12 @@ const singleHtml = renderSurfaceList([
     url: "http://127.0.0.1:4100/#token=t1",
     error: null,
   },
-]);
+], []);
+const singleNodes = collectNodes(singleContainer);
 assert.ok(
-  singleHtml.includes("No other surfaces are running. Start one by running blyte in another folder."),
-  singleHtml
+  singleNodes.some(n => n.textContent === "No other surfaces are running. Start one by running blyte in another folder.")
 );
-assert.ok(singleHtml.includes("surface-switcher-current"), singleHtml);
+assert.ok(singleContainer.children[0].className.includes("surface-switcher-current"));
 "#;
     run_surface_script(harness);
 }
@@ -3743,6 +3793,202 @@ const assert = require("node:assert");
   console.error(err);
   process.exit(1);
 });
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn surface_switcher_validates_and_renders_stopped_surfaces() {
+    let harness = r#"
+const assert = require("node:assert");
+
+const runningSurface = {
+  id: "s1",
+  name: "active-one",
+  root: "/tmp/repo",
+  branch: "main",
+  doing: "idle",
+  current: true,
+  url: "http://127.0.0.1:4100/#token=t1",
+  error: null,
+};
+
+assert.strictEqual(
+  validateSurfaces({
+    surfaces: [runningSurface],
+    stopped: [
+      {
+        id: "s0",
+        name: "amber-fox",
+        last_used: 1700000000,
+        last_message: "fix login bug",
+      },
+      {
+        id: "s2",
+        name: "quiet-owl",
+        last_used: 1699999000,
+        last_message: null,
+      },
+    ],
+  }),
+  null
+);
+
+assert.strictEqual(
+  validateSurfaces({
+    surfaces: [runningSurface],
+    stopped: [],
+  }),
+  null
+);
+
+const missingNameErr = validateSurfaces({
+  surfaces: [runningSurface],
+  stopped: [
+    {
+      id: "s0",
+      last_used: 1700000000,
+      last_message: "fix login bug",
+    },
+  ],
+});
+assert.strictEqual(typeof missingNameErr, "string");
+assert.ok(missingNameErr.includes("name"), missingNameErr);
+
+const missingStoppedErr = validateSurfaces({
+  surfaces: [runningSurface],
+});
+assert.strictEqual(typeof missingStoppedErr, "string");
+assert.ok(missingStoppedErr.includes("stopped"), missingStoppedErr);
+
+const badLastUsedErr = validateSurfaces({
+  surfaces: [runningSurface],
+  stopped: [
+    {
+      id: "s0",
+      name: "amber-fox",
+      last_used: "1700000000",
+      last_message: null,
+    },
+  ],
+});
+assert.strictEqual(typeof badLastUsedErr, "string");
+assert.ok(badLastUsedErr.includes("last_used"), badLastUsedErr);
+
+const badLastMessageErr = validateSurfaces({
+  surfaces: [runningSurface],
+  stopped: [
+    {
+      id: "s0",
+      name: "amber-fox",
+      last_used: 1700000000,
+      last_message: 42,
+    },
+  ],
+});
+assert.strictEqual(typeof badLastMessageErr, "string");
+assert.ok(badLastMessageErr.includes("last_message"), badLastMessageErr);
+
+function makeDomEl(tag) {
+  const attrs = new Map();
+  const listeners = new Map();
+  return {
+    tagName: tag.toUpperCase(),
+    className: "",
+    type: "",
+    disabled: false,
+    dataset: {},
+    children: [],
+    _text: "",
+    get textContent() { return this._text; },
+    set textContent(v) {
+      this._text = String(v);
+      if (this._text === "") this.children = [];
+    },
+    setAttribute(k, v) { attrs.set(k, String(v)); },
+    getAttribute(k) { return attrs.has(k) ? attrs.get(k) : null; },
+    appendChild(child) { this.children.push(child); return child; },
+    addEventListener(ev, fn) {
+      if (!listeners.has(ev)) listeners.set(ev, []);
+      listeners.get(ev).push(fn);
+    },
+    listeners,
+  };
+}
+
+function collectNodes(root, out = []) {
+  for (const child of root.children) {
+    out.push(child);
+    collectNodes(child, out);
+  }
+  return out;
+}
+
+global.document = {
+  createElement(tag) { return makeDomEl(tag); },
+};
+
+const copied = [];
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: {
+    clipboard: {
+      writeText(text) {
+        copied.push(text);
+        return Promise.resolve();
+      },
+    },
+  },
+});
+
+const withStopped = makeDomEl("div");
+renderSurfaceList(
+  withStopped,
+  [runningSurface],
+  [
+    {
+      id: "s0",
+      name: "amber-fox",
+      last_used: 1700000000,
+      last_message: "fix login bug",
+    },
+  ]
+);
+
+const withStoppedNodes = collectNodes(withStopped);
+assert.ok(
+  withStoppedNodes.some(n => n.textContent === "Stopped in this folder"),
+  "expected Stopped in this folder heading"
+);
+const stoppedRow = withStopped.children.find(n => n.className.includes("surface-switcher-stopped"));
+assert.ok(stoppedRow, "expected stopped surface row");
+assert.strictEqual(stoppedRow.tagName, "DIV");
+assert.strictEqual(stoppedRow.getAttribute("data-surface-url"), null);
+
+const stoppedRowNodes = collectNodes(stoppedRow);
+assert.ok(!stoppedRowNodes.some(n => n.tagName === "A"));
+assert.ok(stoppedRowNodes.some(n => n.textContent === "amber-fox"));
+assert.ok(stoppedRowNodes.some(n => n.textContent === new Date(1700000000 * 1000).toLocaleString()));
+assert.ok(stoppedRowNodes.some(n => n.textContent === "fix login bug"));
+
+const codeEl = stoppedRowNodes.find(n => n.tagName === "CODE");
+assert.ok(codeEl, "expected code element for resume command");
+assert.strictEqual(codeEl.textContent, "blyte --resume amber-fox");
+
+const copyBtn = stoppedRowNodes.find(n => n.tagName === "BUTTON" && n.textContent === "Copy");
+assert.ok(copyBtn, "expected Copy button");
+const clickHandlers = copyBtn.listeners.get("click") || [];
+assert.strictEqual(clickHandlers.length, 1);
+clickHandlers[0]();
+assert.deepStrictEqual(copied, ["blyte --resume amber-fox"]);
+
+const withoutStopped = makeDomEl("div");
+renderSurfaceList(withoutStopped, [runningSurface], []);
+const withoutStoppedNodes = collectNodes(withoutStopped);
+assert.ok(
+  !withoutStoppedNodes.some(n => n.textContent === "Stopped in this folder"),
+  "heading must not render when there are no stopped surfaces"
+);
 "#;
     run_surface_script(harness);
 }

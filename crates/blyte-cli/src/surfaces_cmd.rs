@@ -326,6 +326,7 @@ pub fn surface_url(entry: &RegistryEntry) -> Result<String, String> {
 pub fn surfaces_payload(
     registry_dir: &Path,
     current_id: &str,
+    stopped: &[StoppedSurface],
 ) -> Result<serde_json::Value, String> {
     let mut entries = live_entries(registry_dir)?;
     entries.sort_by(|a, b| {
@@ -357,7 +358,7 @@ pub fn surfaces_payload(
             })
         })
         .collect();
-    Ok(serde_json::json!({ "surfaces": surfaces }))
+    Ok(serde_json::json!({ "surfaces": surfaces, "stopped": stopped }))
 }
 
 pub fn run_open(
