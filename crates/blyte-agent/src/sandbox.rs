@@ -276,8 +276,14 @@ fn push_home_local_grants(home_path: &Path, allowed: &mut Vec<PathBuf>) {
     }
 }
 
-/// Returns the blyte state directory (`$XDG_STATE_HOME/blyte` when set, else `$HOME/.local/state/blyte`).
+/// Returns the blyte state directory (`$BLYTE_STATE_DIR` when set and non-empty, else
+/// `$XDG_STATE_HOME/blyte` when set, else `$HOME/.local/state/blyte`).
 pub fn state_blyte_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("BLYTE_STATE_DIR") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
     if let Some(xdg) = std::env::var_os("XDG_STATE_HOME") {
         if !xdg.is_empty() {
             return Some(PathBuf::from(xdg).join("blyte"));
@@ -547,11 +553,13 @@ pub(crate) fn is_in_blyte_own_dir(real_target: &Path) -> Result<bool, String> {
     if let Some(dir) = state_blyte_dir() {
         raw.push(dir);
     }
-    if let Some(dir) = std::env::var_os("BLYTE_STATE_DIR").filter(|d| !d.is_empty()) {
-        raw.push(PathBuf::from(dir));
+    if let Some(xdg) = std::env::var_os("XDG_STATE_HOME").filter(|d| !d.is_empty()) {
+        raw.push(PathBuf::from(xdg).join("blyte"));
     }
     if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
-        raw.push(PathBuf::from(home).join(".config").join("blyte"));
+        let home_path = PathBuf::from(home);
+        raw.push(home_path.join(".local").join("state").join("blyte"));
+        raw.push(home_path.join(".config").join("blyte"));
     }
     for dir in raw {
         let resolved = resolve_protected_prefix(&dir)?;

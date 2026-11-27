@@ -129,6 +129,7 @@ fn state_home() -> &'static Path {
         .get_or_init(|| {
             let dir = tempfile::tempdir().unwrap();
             std::env::set_var("XDG_STATE_HOME", dir.path());
+            std::env::set_var("BLYTE_STATE_DIR", dir.path().join("blyte"));
             dir
         })
         .path()
@@ -159,7 +160,7 @@ fn dispatch_command(repo_dir: &Path, home: &Path, port: u16) -> Command {
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home)
         .env("XDG_STATE_HOME", state_home())
-        .env("BLYTE_STATE_DIR", home.join("state"))
+        .env("BLYTE_STATE_DIR", state_home().join("blyte"))
         .env("BLYTE_GATE_SLOT_DIR", home.join("slots"))
         .env("BLYTE_GATE_SLOTS", "16")
         .env("BLYTE_ENV_FILE", "")
