@@ -1,3 +1,9 @@
+## v0.73.0 (2026-11-27)
+
+### Feat
+
+- **surface**: a resumed surface's model remembers the conversation (#454)
+
 ## v0.72.1 (2026-11-27)
 
 ### Fix
