@@ -699,5 +699,7 @@ pub fn run(args: &DispatchArgs) -> i32 {
         &mut std::io::stderr(),
     );
     drop(_lock);
+    let notify_outcome = crate::surface_notify::notify_runs_changed(&root, &summary.id);
+    crate::surface_notify::report(&notify_outcome, &mut std::io::stderr());
     exit
 }

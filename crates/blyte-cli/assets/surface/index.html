@@ -1105,6 +1105,33 @@
       word-break: break-word;
     }
 
+    .undo-result {
+      margin-top: 6px;
+      padding: 5px 8px;
+      border-radius: 4px;
+      background: var(--color-surface);
+      border: 1px solid var(--color-line);
+      color: var(--color-ink);
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .undo-confirm {
+      margin-top: 6px;
+      padding: 8px 10px;
+      border-radius: 4px;
+      background: var(--color-surface);
+      border: 1px solid var(--color-line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      font-size: 12px;
+    }
+
     .queue-group {
       background: var(--color-card);
       border: 1px solid var(--color-line);
@@ -2707,6 +2734,9 @@
     const noteDrafts = new Map();
     const noteErrors = new Map();
     const cardErrors = new Map();
+    const pendingUndoConfirm = new Set();
+    const undoInFlight = new Set();
+    const undoResults = new Map();
 
     let lastQueueSig = "";
     let lastMapSig = "";
@@ -3052,6 +3082,12 @@
             return "/api/runs: runs[" + i + "] invalid field hold";
           }
         }
+        if (hasOwn(r, "in_place") && typeof r.in_place !== "boolean") {
+          return "/api/runs: runs[" + i + "] invalid field in_place";
+        }
+        if (hasOwn(r, "undone") && typeof r.undone !== "boolean") {
+          return "/api/runs: runs[" + i + "] invalid field undone";
+        }
       }
       if (!Array.isArray(data.skipped)) return "/api/runs: missing skipped array";
       for (let i = 0; i < data.skipped.length; i++) {
@@ -3195,7 +3231,7 @@
 
     function renderNoRepoNotice(repository) {
       if (repository === false) {
-        return escapeHtml("not a git repository");
+        return escapeHtml("not a git repository: runs edit this folder in place; combining and publishing are off");
       }
       return "";
     }
@@ -4554,6 +4590,45 @@
       return shown + more;
     }
 
+    function canUndoRun(r) {
+      return Boolean(
+        r &&
+        r.in_place === true &&
+        !r.research &&
+        r.card !== "research" &&
+        !r.undone &&
+        Array.isArray(r.changed_files) &&
+        r.changed_files.length > 0
+      );
+    }
+
+    function renderUndoButtonHtml(r) {
+      if (!canUndoRun(r)) return "";
+      const busy = undoInFlight.has(r.key);
+      return '<button type="button" class="btn btn-danger" data-undo-run="' + escapeHtml(r.key) + '"' + (busy ? " disabled" : "") + '>Undo</button>';
+    }
+
+    function renderUndoConfirmHtml(r) {
+      if (!pendingUndoConfirm.has(r.key) || !canUndoRun(r)) return "";
+      const busy = undoInFlight.has(r.key);
+      return '<div class="undo-confirm" data-undo-confirm="' + escapeHtml(r.key) + '">' +
+        '<span>Undo changes from ' + escapeHtml(r.id) + '? This restores the files it edited.</span>' +
+        '<div class="row-actions">' +
+          '<button type="button" class="btn btn-danger" data-confirm-undo="' + escapeHtml(r.key) + '"' + (busy ? " disabled" : "") + '>' + (busy ? "Undoing..." : "Confirm undo") + '</button>' +
+          '<button type="button" class="btn btn-ghost" data-cancel-undo="' + escapeHtml(r.key) + '"' + (busy ? " disabled" : "") + '>Cancel</button>' +
+        '</div>' +
+      '</div>';
+    }
+
+    function renderUndoFeedbackHtml(r) {
+      const res = undoResults.get(r.key);
+      if (!res) return "";
+      if (res.ok) {
+        return '<div class="undo-result" data-undo-result="' + escapeHtml(r.key) + '">' + escapeHtml(res.message) + '</div>';
+      }
+      return '<div class="card-error" data-undo-error="' + escapeHtml(r.key) + '">' + escapeHtml(res.message) + '</div>';
+    }
+
     function renderRunCard(r) {
       const held = isHeld(r);
       const holdNote = held ? r.hold.note : "";
@@ -4615,9 +4690,12 @@
             '</div>' +
             '<div class="row-actions">' +
               '<button type="button" class="btn btn-ghost" data-toggle-details="' + escapeHtml(r.key) + '">' + (isOpen ? "Hide details" : "Details") + '</button>' +
+              renderUndoButtonHtml(r) +
               '<button type="button" class="btn btn-pass" data-action="accept" data-run-key="' + escapeHtml(r.key) + '">Accept</button>' +
             '</div>' +
           '</div>' +
+          renderUndoConfirmHtml(r) +
+          renderUndoFeedbackHtml(r) +
           cardErrHtml +
           renderDetailsHtml(r) +
         '</div>';
@@ -4654,6 +4732,7 @@
               '<button type="button" class="btn btn-warn" data-action="send_back" data-run-key="' + escapeHtml(r.key) + '">Send back</button>' +
               '<button type="button" class="btn btn-danger" data-action="redo" data-run-key="' + escapeHtml(r.key) + '">Redo</button>' +
               '<button type="button" class="btn" data-action="hold" data-run-key="' + escapeHtml(r.key) + '">Hold</button>' +
+              renderUndoButtonHtml(r) +
             '</div>' +
             '<div class="row-actions">' +
               '<button type="button" class="btn btn-ghost" data-toggle-details="' + escapeHtml(r.key) + '">' + (isOpen ? "Hide details" : "Details") + '</button>' +
@@ -4661,6 +4740,8 @@
           '</div>' +
           cardErrHtml +
         '</div>' +
+        renderUndoConfirmHtml(r) +
+        renderUndoFeedbackHtml(r) +
         promptHtml +
         renderDetailsHtml(r) +
       '</div>';
@@ -4670,7 +4751,7 @@
       if (mode !== "review") return;
 
       const runningSig = state.inProgress.map(r => r.key + ":" + r.turns + ":" + r.activity + ":" + (r.gate_running ? "1" : "0")).join(",");
-      const runsSig = state.undecidedArrived.map(r => r.key + ":" + (r.hold ? r.hold.note : "")).join(",");
+      const runsSig = state.undecidedArrived.map(r => r.key + ":" + (r.hold ? r.hold.note : "") + ":" + (r.undone ? "1" : "0")).join(",");
       const detailsSig = Array.from(openDetails).map(k => {
         const d = runDiffs.get(k);
         return k + ":" + (d ? (d.loading ? "L" : (d.error ? "E" : "T")) : "N");
@@ -4678,7 +4759,10 @@
       const pendingSig = Array.from(pendingNoteAction.entries()).map(([k, v]) => k + ":" + v).join(",");
       const noteErrSig = Array.from(noteErrors.entries()).map(([k, v]) => k + ":" + v).join(",");
       const cardErrSig = Array.from(cardErrors.entries()).map(([k, v]) => k + ":" + v).join(",");
-      const sig = [runningSig, runsSig, detailsSig, pendingSig, noteErrSig, cardErrSig, focusedGroup || "", openReportKey || ""].join("||");
+      const undoConfirmSig = Array.from(pendingUndoConfirm).join(",");
+      const undoFlightSig = Array.from(undoInFlight).join(",");
+      const undoResSig = Array.from(undoResults.entries()).map(([k, v]) => k + ":" + (v.ok ? "1" : "0") + ":" + v.message).join(",");
+      const sig = [runningSig, runsSig, detailsSig, pendingSig, noteErrSig, cardErrSig, undoConfirmSig, undoFlightSig, undoResSig, focusedGroup || "", openReportKey || ""].join("||");
 
       if (!force && sig === lastQueueSig) return;
       lastQueueSig = sig;
@@ -6408,6 +6492,64 @@
       return true;
     }
 
+    async function postUndo(runKey) {
+      const run = findRunByKey(runKey);
+      if (!run) {
+        undoResults.set(runKey, { ok: false, message: "run not found in queue" });
+        pendingUndoConfirm.delete(runKey);
+        renderAll(true);
+        return false;
+      }
+      if (!surfaceToken) {
+        undoResults.set(runKey, { ok: false, message: MISSING_TOKEN_MSG });
+        pendingUndoConfirm.delete(runKey);
+        renderAll(true);
+        return false;
+      }
+      undoInFlight.add(runKey);
+      undoResults.delete(runKey);
+      renderAll(true);
+      const url = "/api/runs/" + encodeURIComponent(run.id) + "/undo";
+      try {
+        const res = await fetchWithRetry(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}"
+        });
+        if (!res.ok) {
+          const errMsg = await parseErrorPayload(res, url);
+          pendingUndoConfirm.delete(runKey);
+          undoResults.set(runKey, { ok: false, message: errMsg });
+          return false;
+        }
+        let data;
+        try {
+          data = await res.json();
+        } catch (err) {
+          const msg = url + " returned invalid JSON: " + (err && err.message ? err.message : String(err));
+          pendingUndoConfirm.delete(runKey);
+          undoResults.set(runKey, { ok: false, message: msg });
+          return false;
+        }
+        const lines = isPlainObject(data) && Array.isArray(data.lines) && data.lines.every(x => typeof x === "string")
+          ? data.lines
+          : null;
+        if (!lines) {
+          pendingUndoConfirm.delete(runKey);
+          undoResults.set(runKey, { ok: false, message: url + " returned unexpected payload" });
+          return false;
+        }
+        pendingUndoConfirm.delete(runKey);
+        run.undone = true;
+        undoResults.set(runKey, { ok: true, message: lines.length > 0 ? lines.join("\n") : "Undone." });
+        await fetchRuns();
+        return true;
+      } finally {
+        undoInFlight.delete(runKey);
+        renderAll(true);
+      }
+    }
+
     async function acceptAllCleanInGroup(groupName) {
       const state = computeState();
       const targets = state.undecidedArrived.filter(
@@ -6658,6 +6800,30 @@
           pendingNoteAction.delete(key);
           noteErrors.delete(key);
           renderAll(true);
+          return;
+        }
+
+        const undoBtn = e.target.closest("[data-undo-run]");
+        if (undoBtn && !undoBtn.disabled) {
+          const key = undoBtn.dataset.undoRun;
+          pendingUndoConfirm.add(key);
+          undoResults.delete(key);
+          renderAll(true);
+          return;
+        }
+
+        const cancelUndoBtn = e.target.closest("[data-cancel-undo]");
+        if (cancelUndoBtn && !cancelUndoBtn.disabled) {
+          const key = cancelUndoBtn.dataset.cancelUndo;
+          pendingUndoConfirm.delete(key);
+          renderAll(true);
+          return;
+        }
+
+        const confirmUndoBtn = e.target.closest("[data-confirm-undo]");
+        if (confirmUndoBtn && !confirmUndoBtn.disabled) {
+          const key = confirmUndoBtn.dataset.confirmUndo;
+          postUndo(key);
           return;
         }
 

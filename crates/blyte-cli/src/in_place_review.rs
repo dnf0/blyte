@@ -92,13 +92,23 @@ fn validate_rel_path(rel_path: &str) -> Result<PathBuf, String> {
     Ok(p.to_path_buf())
 }
 
-fn record_verdict(
+pub fn record_verdict(
     store: &Path,
     id: &str,
     verdict: crate::cli::ReviewVerdict,
     notes: &str,
 ) -> Result<(), String> {
     let now = crate::dispatch_in_place::unix_timestamp_secs(std::time::SystemTime::now())?;
+    record_verdict_at(store, id, verdict, notes, now)
+}
+
+pub fn record_verdict_at(
+    store: &Path,
+    id: &str,
+    verdict: crate::cli::ReviewVerdict,
+    notes: &str,
+    now: u64,
+) -> Result<(), String> {
     let verdict_path = store.join(format!("{id}.verdict.json"));
     let verdict_obj = serde_json::json!({
         "verdict": verdict.as_str(),
@@ -109,6 +119,137 @@ fn record_verdict(
         .map_err(|e| format!("cannot serialize verdict: {e}"))?;
     std::fs::write(&verdict_path, json_str + "\n")
         .map_err(|e| format!("cannot write {}: {e}", verdict_path.display()))
+}
+
+pub fn is_undone(store: &Path, id: &str) -> bool {
+    store.join(format!("{id}.undone.json")).exists()
+}
+
+pub struct RunChecks {
+    pub flags: Vec<String>,
+    pub hcmds: Vec<String>,
+    pub reads: Vec<String>,
+    pub undone: bool,
+}
+
+pub fn checks_for_run(
+    root: &Path,
+    store: &Path,
+    id: &str,
+    summary_val: &serde_json::Value,
+    summary_path: &Path,
+) -> Result<RunChecks, String> {
+    let canonical = root
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve {}: {e}", root.display()))?;
+    let undone_path = store.join(format!("{id}.undone.json"));
+    let undone_val = read_required_json(&undone_path)?;
+
+    let log_path = store.join(format!("{id}.log"));
+    let log_content = std::fs::read_to_string(&log_path)
+        .map_err(|e| format!("cannot read the run's log {}: {e}", log_path.display()))?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        "HOME is not set, so reads outside the folder cannot be checked".to_string()
+    })?;
+    let hcmds = host_commands(&log_content);
+    let reads = outside_reads(&log_content, &[canonical], &home);
+    let (refused_count, refused_paths) = refused_reads(&log_content);
+
+    let outcome = summary_val
+        .get("outcome")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("missing outcome in {}", summary_path.display()))?;
+
+    let mut flags = Vec::new();
+    if !matches!(outcome, "finished" | "verified") {
+        flags.push(format!("outcome {outcome}: review in depth"));
+    }
+    if !hcmds.is_empty() {
+        flags.push(format!(
+            "{} host command(s): see == host commands",
+            hcmds.len()
+        ));
+    }
+    if !reads.is_empty() {
+        flags.push(format!(
+            "{} read(s) outside the repository: see == reads outside the repository",
+            reads.len()
+        ));
+    }
+    if refused_count > 0 {
+        let first_3: Vec<&str> = refused_paths.iter().take(3).map(|s| s.as_str()).collect();
+        flags.push(format!(
+            "refused reads: {refused_count} (outside the workspace and --allow-read): {}",
+            first_3.join(", ")
+        ));
+    }
+    let undone = undone_val.is_some();
+    if let Some(ref u) = undone_val {
+        if let Some(ts) = u.get("undone_at").and_then(|v| v.as_u64()) {
+            flags.push(format!("run {id} was undone at {ts}"));
+        } else {
+            flags.push(format!("run {id} was undone"));
+        }
+    }
+
+    Ok(RunChecks {
+        flags,
+        hcmds,
+        reads,
+        undone,
+    })
+}
+
+fn format_files_section(manifest: &BTreeMap<String, bool>) -> String {
+    let mut out = String::from("== files\n");
+    for (path, existed) in manifest {
+        let kind = if *existed { "modified" } else { "created" };
+        out.push_str(&format!("{kind} {path}\n"));
+    }
+    out
+}
+
+fn format_diff_section(diff: &str) -> String {
+    let mut out = String::from("== diff\n");
+    if !diff.is_empty() {
+        out.push_str(diff);
+        if !diff.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+pub fn diff_for_run(store: &Path, id: &str) -> Result<String, String> {
+    let start_path = store.join(format!("{id}.start.json"));
+    let start_val =
+        read_required_json(&start_path)?.ok_or_else(|| format!("no run {id} in this folder"))?;
+
+    let summary_path = store.join(format!("{id}.json"));
+    let summary_val =
+        read_required_json(&summary_path)?.ok_or_else(|| format!("run {id} has not finished"))?;
+
+    let is_research = start_val
+        .get("research")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        || store.join(format!("{id}.report.md")).exists();
+
+    if is_research {
+        let report_path = store.join(format!("{id}.report.md"));
+        return std::fs::read_to_string(&report_path)
+            .map_err(|e| format!("cannot read report {}: {e}", report_path.display()));
+    }
+
+    let manifest_path = store.join(format!("{id}.changes.json"));
+    let manifest = read_manifest_map(&manifest_path, &summary_val, &summary_path)?;
+    let diff_path = store.join(format!("{id}.diff"));
+    let diff_content = std::fs::read_to_string(&diff_path)
+        .map_err(|e| format!("cannot read diff file {}: {e}", diff_path.display()))?;
+
+    let mut out = format_files_section(&manifest);
+    out.push_str(&format_diff_section(&diff_content));
+    Ok(out)
 }
 
 pub fn review(args: &ReviewArgs) -> i32 {
@@ -175,70 +316,23 @@ fn review_inner(args: &ReviewArgs) -> Result<(), String> {
         None
     };
 
-    let undone_path = store.join(format!("{}.undone.json", args.id));
-    let undone_val = read_required_json(&undone_path)?;
-
-    let log_path = store.join(format!("{}.log", args.id));
-    let log_content = std::fs::read_to_string(&log_path)
-        .map_err(|e| format!("cannot read the run's log {}: {e}", log_path.display()))?;
-    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
-        "HOME is not set, so reads outside the folder cannot be checked".to_string()
-    })?;
-    let hcmds = host_commands(&log_content);
-    let reads = outside_reads(&log_content, &[root], &home);
-    let (refused_count, refused_paths) = refused_reads(&log_content);
-
+    let checks = checks_for_run(&root, &store, &args.id, &summary_val, &summary_path)?;
     let outcome = summary_val
         .get("outcome")
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("missing outcome in {}", summary_path.display()))?;
 
-    let mut flags = Vec::new();
-    if !matches!(outcome, "finished" | "verified") {
-        flags.push(format!("outcome {outcome}: review in depth"));
-    }
-    if !hcmds.is_empty() {
-        flags.push(format!(
-            "{} host command(s): see == host commands",
-            hcmds.len()
-        ));
-    }
-    if !reads.is_empty() {
-        flags.push(format!(
-            "{} read(s) outside the repository: see == reads outside the repository",
-            reads.len()
-        ));
-    }
-    if refused_count > 0 {
-        let first_3: Vec<&str> = refused_paths.iter().take(3).map(|s| s.as_str()).collect();
-        flags.push(format!(
-            "refused reads: {refused_count} (outside the workspace and --allow-read): {}",
-            first_3.join(", ")
-        ));
-    }
-    if let Some(ref u) = undone_val {
-        if let Some(ts) = u.get("undone_at").and_then(|v| v.as_u64()) {
-            flags.push(format!("run {} was undone at {ts}", args.id));
-        } else {
-            flags.push(format!("run {} was undone", args.id));
-        }
-    }
-
     println!("== checks");
-    if flags.is_empty() {
+    if checks.flags.is_empty() {
         println!("nothing flagged");
     } else {
-        for flag in &flags {
+        for flag in &checks.flags {
             println!("! {flag}");
         }
     }
 
     if !is_research {
-        println!("== files");
-        for (path, existed) in &manifest {
-            let kind = if *existed { "modified" } else { "created" };
-            println!("{kind} {path}");
-        }
+        print!("{}", format_files_section(&manifest));
     }
 
     println!("== report");
@@ -274,27 +368,21 @@ fn review_inner(args: &ReviewArgs) -> Result<(), String> {
         }
     }
 
-    if !hcmds.is_empty() {
+    if !checks.hcmds.is_empty() {
         println!("== host commands (may have changed things outside the worktree)");
-        for cmd in hcmds {
+        for cmd in checks.hcmds {
             println!("{cmd}");
         }
     }
-    if !reads.is_empty() {
+    if !checks.reads.is_empty() {
         println!("== reads outside the repository");
-        for cmd in reads {
+        for cmd in checks.reads {
             println!("{cmd}");
         }
     }
 
     if let Some(diff) = diff_content {
-        println!("== diff");
-        if !diff.is_empty() {
-            print!("{diff}");
-            if !diff.ends_with('\n') {
-                println!();
-            }
-        }
+        print!("{}", format_diff_section(&diff));
     }
 
     Ok(())
@@ -334,6 +422,14 @@ pub fn undo(args: &UndoArgs) -> i32 {
 
 fn undo_inner(args: &UndoArgs) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("{e}"))?;
+    let lines = undo_in(&cwd, &args.id)?;
+    for line in lines {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+pub fn undo_in(cwd: &Path, id: &str) -> Result<Vec<String>, String> {
     let root = cwd
         .canonicalize()
         .map_err(|e| format!("cannot resolve {}: {e}", cwd.display()))?;
@@ -351,13 +447,13 @@ fn undo_inner(args: &UndoArgs) -> Result<(), String> {
     let store = crate::surface_dir::run_store(&state_dir, &root)?;
     let lock_path = crate::surface_dir::in_place_lock_path(&state_dir, &root)?;
 
-    let start_path = store.join(format!("{}.start.json", args.id));
-    let start_val = read_required_json(&start_path)?
-        .ok_or_else(|| format!("no run {} in this folder", args.id))?;
+    let start_path = store.join(format!("{id}.start.json"));
+    let start_val =
+        read_required_json(&start_path)?.ok_or_else(|| format!("no run {id} in this folder"))?;
 
-    let summary_path = store.join(format!("{}.json", args.id));
-    let summary_val = read_required_json(&summary_path)?
-        .ok_or_else(|| format!("run {} has not finished", args.id))?;
+    let summary_path = store.join(format!("{id}.json"));
+    let summary_val =
+        read_required_json(&summary_path)?.ok_or_else(|| format!("run {id} has not finished"))?;
 
     if start_val
         .get("research")
@@ -365,28 +461,27 @@ fn undo_inner(args: &UndoArgs) -> Result<(), String> {
         .unwrap_or(false)
     {
         return Err(format!(
-            "run {} is a research run and made no edits to undo",
-            args.id
+            "run {id} is a research run and made no edits to undo"
         ));
     }
 
-    let undone_path = store.join(format!("{}.undone.json", args.id));
+    let undone_path = store.join(format!("{id}.undone.json"));
     if undone_path.exists() {
-        return Err(format!("run {} was already undone", args.id));
+        return Err(format!("run {id} was already undone"));
     }
 
     let holder = blyte_agent::folder_lock::Holder {
         pid: std::process::id(),
         kind: "undo".to_string(),
-        id: args.id.clone(),
+        id: id.to_string(),
     };
     let _lock = blyte_agent::folder_lock::acquire(&lock_path, &holder)?;
 
     if undone_path.exists() {
-        return Err(format!("run {} was already undone", args.id));
+        return Err(format!("run {id} was already undone"));
     }
 
-    let manifest_path = store.join(format!("{}.changes.json", args.id));
+    let manifest_path = store.join(format!("{id}.changes.json"));
     let manifest = read_manifest_map(&manifest_path, &summary_val, &summary_path)?;
 
     let changed_set: HashSet<String> = summary_val
@@ -397,8 +492,8 @@ fn undo_inner(args: &UndoArgs) -> Result<(), String> {
         .filter_map(|v| v.as_str().map(String::from))
         .collect();
 
-    let before_dir = store.join(format!("{}.before", args.id));
-    let after_dir = store.join(format!("{}.after", args.id));
+    let before_dir = store.join(format!("{id}.before"));
+    let after_dir = store.join(format!("{id}.after"));
 
     let mut actions = Vec::with_capacity(manifest.len());
     let mut drifted = Vec::new();
@@ -462,12 +557,12 @@ fn undo_inner(args: &UndoArgs) -> Result<(), String> {
 
     if !drifted.is_empty() {
         return Err(format!(
-            "changed since run {} ended: {}",
-            args.id,
+            "changed since run {id} ended: {}",
             drifted.join(", ")
         ));
     }
 
+    let mut lines = Vec::with_capacity(actions.len());
     for action in actions {
         match action {
             UndoAction::Restore {
@@ -481,18 +576,18 @@ fn undo_inner(args: &UndoArgs) -> Result<(), String> {
                 }
                 std::fs::write(&target, &before_bytes)
                     .map_err(|e| format!("cannot restore {}: {e}", target.display()))?;
-                println!("restored {rel_path}");
+                lines.push(format!("restored {rel_path}"));
             }
             UndoAction::Remove { rel_path, target } => {
                 std::fs::remove_file(&target)
                     .map_err(|e| format!("cannot remove {}: {e}", target.display()))?;
-                println!("removed {rel_path}");
+                lines.push(format!("removed {rel_path}"));
             }
             UndoAction::AlreadyRestored { rel_path } => {
-                println!("restored {rel_path} (already restored)");
+                lines.push(format!("restored {rel_path} (already restored)"));
             }
             UndoAction::AlreadyRemoved { rel_path } => {
-                println!("removed {rel_path} (already removed)");
+                lines.push(format!("removed {rel_path} (already removed)"));
             }
         }
     }
@@ -505,5 +600,5 @@ fn undo_inner(args: &UndoArgs) -> Result<(), String> {
         .map_err(|e| format!("cannot write {}: {e}", undone_path.display()))?;
 
     drop(_lock);
-    Ok(())
+    Ok(lines)
 }

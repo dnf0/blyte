@@ -93,8 +93,8 @@ fn post_runs_changed(port: u16, token: &str) -> Result<u16, String> {
     parse_status_code(&raw)
 }
 
-pub fn notify_runs_changed(main_checkout: &Path, id: &str) -> NotifyOutcome {
-    let start_path = main_checkout.join(".wt").join(format!("{id}.start.json"));
+fn notify_runs_changed_in(records_dir: &Path, surfaces_root: &Path, id: &str) -> NotifyOutcome {
+    let start_path = records_dir.join(format!("{id}.start.json"));
     let start_raw = match std::fs::read_to_string(&start_path) {
         Ok(s) => s,
         Err(e) => {
@@ -113,13 +113,14 @@ pub fn notify_runs_changed(main_checkout: &Path, id: &str) -> NotifyOutcome {
     if let Err(e) = blyte_agent::sandbox::validate_surface_id(&sid) {
         return NotifyOutcome::Failed(e);
     }
-    if !crate::surface_dir::surface_dir(main_checkout, &sid).is_dir() {
+    let surface_dir = surfaces_root.join(&sid);
+    if !surface_dir.is_dir() {
         return NotifyOutcome::Failed(format!(
             "run {id} belongs to surface {sid}, which has no directory under {}",
-            crate::surface_dir::surfaces_dir(main_checkout).display()
+            surfaces_root.display()
         ));
     }
-    let record = match crate::surface_dir::read_record(main_checkout, &sid) {
+    let record = match crate::surface_dir::read_record_in(&surface_dir, &sid) {
         Ok(r) => r,
         Err(e) => return NotifyOutcome::Failed(e),
     };
@@ -151,6 +152,33 @@ pub fn notify_runs_changed(main_checkout: &Path, id: &str) -> NotifyOutcome {
         }
         Err(reason) => format_notify_failure(record.port, id, &reason),
     }
+}
+
+pub fn notify_runs_changed(main_checkout: &Path, id: &str) -> NotifyOutcome {
+    if blyte_agent::sandbox::is_git_repository(main_checkout) || main_checkout.join(".wt").is_dir()
+    {
+        return notify_runs_changed_in(
+            &main_checkout.join(".wt"),
+            &crate::surface_dir::surfaces_dir(main_checkout),
+            id,
+        );
+    }
+    let state_dir = match crate::surface_registry::state_dir() {
+        Ok(d) => d,
+        Err(e) => return NotifyOutcome::Failed(e),
+    };
+    let store = match crate::surface_dir::existing_folder_store(&state_dir, main_checkout) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            let start_path = main_checkout.join(".wt").join(format!("{id}.start.json"));
+            return NotifyOutcome::Failed(format!(
+                "cannot read {}: no run store",
+                start_path.display()
+            ));
+        }
+        Err(e) => return NotifyOutcome::Failed(e),
+    };
+    notify_runs_changed_in(&store.join("runs"), &store.join("surfaces"), id)
 }
 
 pub fn report(outcome: &NotifyOutcome, err: &mut dyn Write) {

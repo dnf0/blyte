@@ -282,8 +282,27 @@ fn format_failure_queue_message(run_id: &str, summary: &ParsedSummary) -> String
     }
 }
 
-fn format_research_queue_message(run_id: &str, summary: &ParsedSummary) -> String {
-    if summary.outcome == "verified" {
+fn format_research_queue_message(
+    run_id: &str,
+    summary: &ParsedSummary,
+    records_dir: &Path,
+    in_place: bool,
+) -> String {
+    if in_place {
+        if matches!(summary.outcome.as_str(), "verified" | "finished") {
+            format!(
+                "Research run {run_id} finished: {}. Report: {}",
+                summary.outcome,
+                records_dir.join(format!("{run_id}.report.md")).display()
+            )
+        } else {
+            format!(
+                "Research run {run_id} finished: {}. Log: {}",
+                summary.outcome,
+                records_dir.join(format!("{run_id}.log")).display()
+            )
+        }
+    } else if summary.outcome == "verified" {
         format!("Research run {run_id} finished: verified. Report: .wt/{run_id}.report.md")
     } else {
         format!(
@@ -338,6 +357,7 @@ fn report_single_run(
     run_id: &str,
     request: &str,
     is_research: bool,
+    in_place: bool,
 ) -> Result<(), String> {
     let marker_path = wt_dir.join(format!("{run_id}.reported.json"));
     if marker_path.exists() {
@@ -369,9 +389,17 @@ fn report_single_run(
             )
         })?;
 
+    let passed = if in_place {
+        matches!(summary.outcome.as_str(), "verified" | "finished")
+    } else {
+        summary.outcome == "verified"
+    };
+
     let queued_message = if is_research {
-        Some(format_research_queue_message(run_id, &summary))
-    } else if summary.outcome != "verified" {
+        Some(format_research_queue_message(
+            run_id, &summary, wt_dir, in_place,
+        ))
+    } else if !passed {
         Some(format_failure_queue_message(run_id, &summary))
     } else {
         None
@@ -404,12 +432,24 @@ fn report_single_run(
 
 pub fn report_finished_runs(surface: &Surface) -> Result<(), String> {
     let wt_dir = surface.root.join(".wt");
-    let start_files = list_start_files(&wt_dir)?;
+    report_finished_runs_impl(surface, &wt_dir, false)
+}
+
+pub fn report_finished_runs_in(surface: &Surface, records_dir: &Path) -> Result<(), String> {
+    report_finished_runs_impl(surface, records_dir, true)
+}
+
+fn report_finished_runs_impl(
+    surface: &Surface,
+    records_dir: &Path,
+    in_place: bool,
+) -> Result<(), String> {
+    let start_files = list_start_files(records_dir)?;
     let mut candidates = Vec::new();
     let mut errors = Vec::new();
 
     for path in start_files {
-        match parse_start_file(&wt_dir, &path) {
+        match parse_start_file(records_dir, &path) {
             Ok(info) => {
                 if info.surface.as_deref() == Some(surface.surface_id.as_str()) {
                     if let Some(request) = info.request {
@@ -424,7 +464,14 @@ pub fn report_finished_runs(surface: &Surface) -> Result<(), String> {
     candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 
     for (_, run_id, request, is_research) in candidates {
-        if let Err(e) = report_single_run(surface, &wt_dir, &run_id, &request, is_research) {
+        if let Err(e) = report_single_run(
+            surface,
+            records_dir,
+            &run_id,
+            &request,
+            is_research,
+            in_place,
+        ) {
             errors.push(e);
         }
     }

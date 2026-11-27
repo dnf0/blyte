@@ -206,7 +206,10 @@ pub fn in_place_lock_path(state_dir: &Path, root: &Path) -> Result<PathBuf, Stri
     Ok(folder_store(state_dir, root)?.join("in-place.lock"))
 }
 
-fn existing_folder_store(state_dir: &Path, root: &Path) -> Result<Option<PathBuf>, String> {
+pub(crate) fn existing_folder_store(
+    state_dir: &Path,
+    root: &Path,
+) -> Result<Option<PathBuf>, String> {
     let canonical = match root.canonicalize() {
         Ok(c) => c,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
