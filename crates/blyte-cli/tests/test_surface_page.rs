@@ -290,27 +290,36 @@ function makeNode(html) {
   };
 }
 
-const threadEl = {
-  children: [],
-  scrollHeight: 0,
-  scrollTop: 0,
-  clientHeight: 100,
-  appendChild(node) { this.children.push(node); },
-  insertBefore(node, ref) {
-    const idx = this.children.indexOf(ref);
-    if (idx === -1) this.children.push(node);
-    else this.children.splice(idx, 0, node);
-  },
-  querySelector(sel) {
-    if (sel === ".thread-empty") return null;
-    const m = sel.match(/^\[data-seq="([^"]+)"\]$/);
-    if (m) return this.children.find(c => c.seq === m[1]) || null;
-    return null;
-  },
-};
+function makeContainer() {
+  return {
+    children: [],
+    scrollHeight: 0,
+    scrollTop: 0,
+    clientHeight: 100,
+    appendChild(node) { this.children.push(node); },
+    insertBefore(node, ref) {
+      const idx = this.children.indexOf(ref);
+      if (idx === -1) this.children.push(node);
+      else this.children.splice(idx, 0, node);
+    },
+    querySelector(sel) {
+      if (sel === ".thread-empty") return null;
+      const m = sel.match(/^\[data-seq="([^"]+)"\]$/);
+      if (m) return this.children.find(c => c.seq === m[1]) || null;
+      return null;
+    },
+  };
+}
+
+const threadEl = makeContainer();
+const activityEl = makeContainer();
 
 global.document = {
-  getElementById(id) { return id === "conversation-thread" ? threadEl : null; },
+  getElementById(id) {
+    if (id === "conversation-thread") return threadEl;
+    if (id === "activity") return activityEl;
+    return null;
+  },
   createElement(tag) {
     if (tag === "template") {
       return {
@@ -329,7 +338,7 @@ applyLogEntries([
 applyLogEntries([
   { seq: 102, ts, kind: "tool_finished", name: "blyte", summary: "exit 2", is_error: true },
 ]);
-const liveWait = threadEl.querySelector('[data-seq="101"]');
+const liveWait = activityEl.querySelector('[data-seq="101"]');
 assert.strictEqual(liveWait.statusEl.className, "tool-status tool-waiting");
 assert.strictEqual(liveWait.statusEl.textContent, "still waiting");
 
@@ -343,14 +352,15 @@ applyLogEntries([
   { seq: 109, ts, kind: "tool_started", name: "blyte", input: "blyte wait --any IS3" },
   { seq: 110, ts, kind: "tool_finished", name: "blyte", summary: "still waiting", is_error: false },
 ]);
-assert.strictEqual(threadEl.querySelector('[data-seq="103"]').statusEl.className, "tool-status tool-error");
-assert.strictEqual(threadEl.querySelector('[data-seq="103"]').statusEl.textContent, "exit 1");
-assert.strictEqual(threadEl.querySelector('[data-seq="105"]').statusEl.className, "tool-status tool-error");
-assert.strictEqual(threadEl.querySelector('[data-seq="105"]').statusEl.textContent, "exit 2");
-assert.strictEqual(threadEl.querySelector('[data-seq="107"]').statusEl.className, "tool-status tool-error");
-assert.strictEqual(threadEl.querySelector('[data-seq="107"]').statusEl.textContent, "exit 2");
-assert.strictEqual(threadEl.querySelector('[data-seq="109"]').statusEl.className, "tool-status tool-waiting");
-assert.strictEqual(threadEl.querySelector('[data-seq="109"]').statusEl.textContent, "still waiting");
+assert.strictEqual(activityEl.querySelector('[data-seq="103"]').statusEl.className, "tool-status tool-error");
+assert.strictEqual(activityEl.querySelector('[data-seq="103"]').statusEl.textContent, "exit 1");
+assert.strictEqual(activityEl.querySelector('[data-seq="105"]').statusEl.className, "tool-status tool-error");
+assert.strictEqual(activityEl.querySelector('[data-seq="105"]').statusEl.textContent, "exit 2");
+assert.strictEqual(activityEl.querySelector('[data-seq="107"]').statusEl.className, "tool-status tool-error");
+assert.strictEqual(activityEl.querySelector('[data-seq="107"]').statusEl.textContent, "exit 2");
+assert.strictEqual(activityEl.querySelector('[data-seq="109"]').statusEl.className, "tool-status tool-waiting");
+assert.strictEqual(activityEl.querySelector('[data-seq="109"]').statusEl.textContent, "still waiting");
+assert.strictEqual(threadEl.children.filter(c => c.html.includes("entry-tool")).length, 0);
 "#;
     run_surface_script(harness);
 }
@@ -2279,4 +2289,312 @@ assert.strictEqual(elements["no-repo-badge"].hidden, true);
 "#
     );
     run_surface_script(&harness);
+}
+
+#[test]
+fn surface_page_has_an_activity_tab() {
+    let html = load_surface_html();
+    assert!(
+        html.contains("id=\"mode-activity\""),
+        "surface page must contain id=\"mode-activity\""
+    );
+    assert!(
+        html.contains("id=\"activity\""),
+        "surface page must contain id=\"activity\""
+    );
+
+    let harness = format!(
+        "{}\n{}",
+        review_queue_test_prelude(),
+        r#"
+const tabIds = ["mode-design", "mode-review", "mode-activity"];
+const paneIds = ["conversation", "review-wrap", "activity"];
+
+for (const id of tabIds) {
+  const el = document.getElementById(id);
+  const tracked = new Set();
+  el.classList = {
+    toggle(name, force) {
+      if (force) tracked.add(name);
+      else tracked.delete(name);
+    },
+    add(name) { tracked.add(name); },
+    remove(name) { tracked.delete(name); },
+    contains(name) { return tracked.has(name); },
+  };
+}
+
+function assertOnlyActive(expectedTab, expectedPane) {
+  for (const id of tabIds) {
+    const el = document.getElementById(id);
+    const isExpected = id === expectedTab;
+    assert.strictEqual(el.classList.contains("active"), isExpected, id + " active class");
+    assert.strictEqual(el.getAttribute("aria-selected"), isExpected ? "true" : "false", id + " aria-selected");
+  }
+  for (const id of paneIds) {
+    const el = document.getElementById(id);
+    assert.strictEqual(el.hidden, id !== expectedPane, id + " hidden");
+  }
+}
+
+renderModeChrome();
+assertOnlyActive("mode-design", "conversation");
+
+switchMode("review");
+assertOnlyActive("mode-review", "review-wrap");
+
+switchMode("activity");
+assertOnlyActive("mode-activity", "activity");
+
+switchMode("design");
+assertOnlyActive("mode-design", "conversation");
+"#
+    );
+    run_surface_script(&harness);
+}
+
+#[test]
+fn surface_page_summarises_activity_in_the_chat() {
+    let html = load_surface_html();
+    assert!(
+        html.contains("activity-summary"),
+        "surface page must contain activity-summary"
+    );
+    assert!(
+        html.contains("function activitySummaryText("),
+        "surface page must define activitySummaryText"
+    );
+
+    let harness = r#"
+const assert = require("assert");
+const ts = "2026-01-01T00:00:00Z";
+
+assert.strictEqual(
+  activitySummaryText([
+    { seq: 1, ts, kind: "tool_started", name: "bash", input: "ls" },
+    { seq: 2, ts, kind: "tool_finished", name: "bash", summary: "exit 0", is_error: false },
+    { seq: 3, ts, kind: "tool_started", name: "bash", input: "cargo test" },
+    { seq: 4, ts, kind: "tool_finished", name: "bash", summary: "exit 1", is_error: true },
+    { seq: 5, ts, kind: "tool_started", name: "read", input: "src/lib.rs" },
+    { seq: 6, ts, kind: "tool_finished", name: "read", summary: "ok", is_error: false },
+  ]),
+  "2 commands · 1 file read · 1 failed"
+);
+
+assert.strictEqual(
+  activitySummaryText([
+    { seq: 1, ts, kind: "tool_started", name: "bash", input: "echo hi" },
+    { seq: 2, ts, kind: "tool_finished", name: "bash", summary: "exit 0", is_error: false },
+    { seq: 3, ts, kind: "tool_started", name: "write", input: "a.rs" },
+    { seq: 4, ts, kind: "tool_finished", name: "write", summary: "ok", is_error: false },
+    { seq: 5, ts, kind: "tool_started", name: "edit", input: "b.rs" },
+    { seq: 6, ts, kind: "tool_finished", name: "edit", summary: "ok", is_error: false },
+    { seq: 7, ts, kind: "tool_started", name: "blyte", input: '{"args":["wait","--any","T1"]}' },
+    { seq: 8, ts, kind: "tool_finished", name: "blyte", summary: "exit 2", is_error: true },
+    { seq: 9, ts, kind: "tool_started", name: "blyte", input: '{"args":["status"]}' },
+    { seq: 10, ts, kind: "tool_finished", name: "blyte", summary: "exit 0", is_error: false },
+    { seq: 11, ts, kind: "tool_started", name: "custom_probe", input: "x" },
+    { seq: 12, ts, kind: "tool_finished", name: "custom_probe", summary: "ok", is_error: false },
+  ]),
+  "1 command · 2 files changed · 2 blyte · 1 custom_probe"
+);
+
+assert.strictEqual(activitySummaryText([]), "");
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn activity_tab_groups_model_work_and_chat_shows_live_and_final_summary() {
+    let harness = r#"
+const assert = require("assert");
+const ts = "2026-01-01T12:34:56Z";
+
+function makeNode(html) {
+  const seqMatch = html.match(/data-seq="([^"]*)"/);
+  const replyMatch = html.match(/data-activity-reply="([^"]*)"/);
+  const statusMatch = html.match(/<span class="([^"]*tool-status[^"]*)">([^<]*)<\/span>/);
+  const statusEl = statusMatch ? { className: statusMatch[1], textContent: statusMatch[2] } : null;
+  const textMatch = html.match(/^<[^>]+>([^<]*)<\/[^>]+>$/);
+  const classes = new Set();
+  const classMatch = html.match(/class="([^"]*)"/);
+  if (classMatch) {
+    for (const c of classMatch[1].split(/\s+/)) {
+      if (c) classes.add(c);
+    }
+  }
+  return {
+    html,
+    seq: seqMatch ? seqMatch[1] : null,
+    replyId: replyMatch ? replyMatch[1] : null,
+    textContent: textMatch ? textMatch[1] : "",
+    statusEl,
+    scrolled: false,
+    classList: {
+      toggle(name, force) {
+        if (force) classes.add(name);
+        else classes.delete(name);
+      },
+      contains(name) { return classes.has(name); },
+    },
+    hasAttribute(name) {
+      if (name === "data-seq") return this.seq !== null;
+      if (name === "data-activity-reply") return this.replyId !== null;
+      return false;
+    },
+    getAttribute(name) {
+      if (name === "data-seq") return this.seq;
+      if (name === "data-activity-reply") return this.replyId;
+      return null;
+    },
+    querySelector(sel) {
+      if (sel === ".tool-status") return this.statusEl;
+      return null;
+    },
+    scrollIntoView() { this.scrolled = true; },
+  };
+}
+
+function makePane(id) {
+  const attrs = new Map();
+  const classes = new Set();
+  return {
+    id,
+    children: [],
+    hidden: false,
+    innerHTML: "",
+    textContent: "",
+    scrollHeight: 0,
+    scrollTop: 0,
+    clientHeight: 100,
+    style: {},
+    dataset: {},
+    classList: {
+      toggle(name, force) {
+        if (force) classes.add(name);
+        else classes.delete(name);
+      },
+      add(name) { classes.add(name); },
+      remove(name) { classes.delete(name); },
+      contains(name) { return classes.has(name); },
+    },
+    setAttribute(name, val) { attrs.set(name, String(val)); },
+    getAttribute(name) { return attrs.has(name) ? attrs.get(name) : null; },
+    appendChild(node) { this.children.push(node); },
+    insertBefore(node, ref) {
+      const idx = this.children.indexOf(ref);
+      if (idx === -1) this.children.push(node);
+      else this.children.splice(idx, 0, node);
+    },
+    querySelector(sel) {
+      if (sel === ".thread-empty") return null;
+      if (sel === ".metric-val") return { textContent: "" };
+      const seqM = sel.match(/^\[data-seq="([^"]+)"\]$/);
+      if (seqM) return this.children.find(c => c.seq === seqM[1]) || null;
+      const replyM = sel.match(/^\[data-activity-reply="([^"]+)"\]$/);
+      if (replyM) return this.children.find(c => c.replyId === replyM[1]) || null;
+      return null;
+    },
+    querySelectorAll() { return []; },
+  };
+}
+
+const elements = {};
+global.document = {
+  getElementById(id) {
+    if (!elements[id]) elements[id] = makePane(id);
+    return elements[id];
+  },
+  querySelector() { return null; },
+  querySelectorAll() { return []; },
+  createElement(tag) {
+    if (tag === "template") {
+      return {
+        _inner: "",
+        set innerHTML(v) { this._inner = v; },
+        get content() { return { firstElementChild: makeNode(this._inner) }; },
+      };
+    }
+    return makePane(tag);
+  },
+};
+
+const threadEl = document.getElementById("conversation-thread");
+const activityEl = document.getElementById("activity");
+
+const longPrompt = "Investigate why the parser rejects nested brackets when running integration tests across every crate in the workspace";
+
+applyLogEntries([
+  { seq: 1, ts, kind: "user_message", text: longPrompt, reports: [], queued: false },
+  { seq: 2, ts, kind: "turn", n: 1, text: "", input_tokens: 10, output_tokens: 5, cost_usd: 0.01 },
+  { seq: 3, ts, kind: "tool_started", name: "bash", input: "cargo test -p parser" },
+]);
+
+const summaryBtn = threadEl.children.find(c => c.classList.contains("activity-summary"));
+assert.ok(summaryBtn, "chat must show activity-summary button while running");
+assert.strictEqual(summaryBtn.textContent, "working · bash cargo test -p parser");
+assert.ok(summaryBtn.classList.contains("activity-summary-running"));
+
+applyLogEntries([
+  { seq: 4, ts, kind: "tool_finished", name: "bash", summary: "exit 1", is_error: true },
+  { seq: 5, ts, kind: "tool_started", name: "read", input: "src/parser.rs" },
+  { seq: 6, ts, kind: "tool_finished", name: "read", summary: "120 lines", is_error: false },
+  { seq: 7, ts, kind: "tool_started", name: "bash", input: "cargo test" },
+]);
+
+assert.strictEqual(summaryBtn.textContent, "working · bash cargo test");
+
+applyLogEntries([
+  { seq: 8, ts, kind: "tool_finished", name: "bash", summary: "exit 0", is_error: false },
+  { seq: 9, ts, kind: "retry", attempt: 1, max: 3, wait_ms: 1000, reason: "overloaded" },
+  { seq: 10, ts, kind: "turn", n: 2, text: "Found and explained the issue.", input_tokens: 20, output_tokens: 15, cost_usd: 0.02 },
+  { seq: 11, ts, kind: "idle", turns: 2, cost_usd: 0.03, seconds: 2.5 },
+  { seq: 12, ts, kind: "model_changed", model: "claude-opus" },
+  { seq: 13, ts, kind: "effort_changed", effort: "high" },
+  { seq: 14, ts, kind: "decision", run: "T1", action: "accept", note: null },
+]);
+
+assert.strictEqual(summaryBtn.textContent, "2 commands · 1 file read · 1 failed");
+assert.ok(!summaryBtn.classList.contains("activity-summary-running"));
+
+const summaryIdx = threadEl.children.indexOf(summaryBtn);
+const replyIdx = threadEl.children.findIndex(c => c.html.includes("Found and explained the issue."));
+assert.ok(summaryIdx > 0 && replyIdx > summaryIdx, "activity-summary must appear before the reply text");
+
+assert.ok(!threadEl.children.some(c => c.html.includes("entry-tool")));
+assert.ok(!threadEl.children.some(c => c.html.includes("entry-retry")));
+assert.ok(!threadEl.children.some(c => c.html.includes("conversation model · turn")));
+assert.ok(!threadEl.children.some(c => c.html.includes("model changed to")));
+assert.ok(!threadEl.children.some(c => c.html.includes("effort changed to")));
+assert.ok(!threadEl.children.some(c => c.html.includes("decision on T1")));
+assert.ok(threadEl.children.some(c => c.html.includes("2 turns · USD 0.03 · 2.5 s")));
+
+const heading = activityEl.children.find(c => c.classList.contains("activity-heading"));
+assert.ok(heading, "activity pane must group entries under a heading");
+assert.ok(heading.html.includes(longPrompt.slice(0, 80)), heading.html);
+assert.ok(heading.html.includes("activity-heading-time"), heading.html);
+assert.ok(activityEl.children.some(c => c.html.includes("conversation model · turn 1")));
+assert.ok(activityEl.children.some(c => c.html.includes("conversation model · turn 2")));
+assert.ok(activityEl.children.some(c => c.html.includes("entry-tool")));
+assert.ok(activityEl.children.some(c => c.html.includes("entry-retry")));
+assert.ok(activityEl.children.some(c => c.html.includes("model changed to claude-opus")));
+assert.ok(activityEl.children.some(c => c.html.includes("effort changed to high")));
+assert.ok(activityEl.children.some(c => c.html.includes("decision on T1: accept")));
+
+switchMode("activity", summaryBtn.replyId);
+assert.strictEqual(elements["activity"].hidden, false);
+assert.strictEqual(elements["conversation"].hidden, true);
+assert.strictEqual(heading.scrolled, true);
+
+applyLogEntries([
+  { seq: 20, ts, kind: "user_message", text: "Thanks!", reports: [], queued: false },
+  { seq: 21, ts, kind: "turn", n: 1, text: "You are welcome.", input_tokens: 5, output_tokens: 5, cost_usd: 0.0 },
+  { seq: 22, ts, kind: "idle", turns: 1, cost_usd: 0.0, seconds: 0.4 },
+]);
+assert.strictEqual(
+  threadEl.children.filter(c => c.classList.contains("activity-summary")).length,
+  1
+);
+"#;
+    run_surface_script(harness);
 }
