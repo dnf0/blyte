@@ -406,15 +406,9 @@ fn corrupt_run_artifacts_record_problems() {
     )
     .unwrap();
 
-    let runs_repo = d.path().join("runs").join("beta");
-    std::fs::create_dir_all(&runs_repo).unwrap();
-    let bad_agy = runs_repo.join("R1.json");
-    std::fs::write(&bad_agy, "not json").unwrap();
-    std::fs::write(runs_repo.join("R1.log"), "turn 1\n").unwrap();
-
     let src = Sources {
         roots: vec![d.path().join("repos")],
-        runs_dirs: vec![d.path().join("runs")],
+        runs_dirs: vec![],
         hours: 24,
     };
     let jobs = collect_jobs(&src, now());
@@ -442,15 +436,6 @@ fn corrupt_run_artifacts_record_problems() {
             .any(|p| p.contains(&bad_log.display().to_string())),
         "missing log problem: {:?}",
         s1.problems
-    );
-
-    let r1 = by_id.get("R1").expect("job R1 missing");
-    assert!(
-        r1.problems
-            .iter()
-            .any(|p| p.contains(&bad_agy.display().to_string())),
-        "missing agy json problem: {:?}",
-        r1.problems
     );
 }
 

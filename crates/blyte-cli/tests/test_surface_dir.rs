@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use blyte_agent::sandbox::validate_surface_id;
 use blyte_cli::surface_dir::{
-    entries_path, is_running, list_records, new_surface_id, pick_name, read_record, record_path,
-    surface_dir, surfaces_dir, validate_surface_name, write_record, SurfaceRecord,
+    is_running, list_records_in, new_surface_id, pick_name, read_record, surface_dir, surfaces_dir,
+    validate_surface_name, write_record_in, SurfaceRecord,
 };
 
 fn sample_record(id: &str, name: &str, port: u16, started_at: u64) -> SurfaceRecord {
@@ -113,26 +113,18 @@ fn path_helpers_build_expected_paths() {
         surface_dir(checkout, id),
         checkout.join(".wt/surfaces/s0123456789abcdef")
     );
-    assert_eq!(
-        record_path(checkout, id),
-        checkout.join(".wt/surfaces/s0123456789abcdef/surface.json")
-    );
-    assert_eq!(
-        entries_path(checkout, id),
-        checkout.join(".wt/surfaces/s0123456789abcdef/entries.jsonl")
-    );
 }
 
 #[test]
 fn write_record_then_read_record_round_trips_with_no_temp_files() {
     let tmp = tempfile::tempdir().unwrap();
     let rec = sample_record("s0123456789abcdef", "blyte", 18080, 1_700_000_000);
-    write_record(tmp.path(), &rec).unwrap();
+    let dir = surface_dir(tmp.path(), &rec.id);
+    write_record_in(&dir, &rec).unwrap();
 
     let got = read_record(tmp.path(), &rec.id).unwrap();
     assert_eq!(got, rec);
 
-    let dir = surface_dir(tmp.path(), &rec.id);
     let mut names: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -140,7 +132,7 @@ fn write_record_then_read_record_round_trips_with_no_temp_files() {
     names.sort();
     assert_eq!(names, vec!["surface.json".to_string()]);
 
-    let raw = std::fs::read_to_string(record_path(tmp.path(), &rec.id)).unwrap();
+    let raw = std::fs::read_to_string(dir.join("surface.json")).unwrap();
     assert!(raw.ends_with('\n'));
 }
 
@@ -151,7 +143,7 @@ fn read_record_errors_when_inner_id_differs() {
     let inner_id = "sfedcba9876543210";
     let dir = surface_dir(tmp.path(), dir_id);
     std::fs::create_dir_all(&dir).unwrap();
-    let path = record_path(tmp.path(), dir_id);
+    let path = dir.join("surface.json");
     let rec = sample_record(inner_id, "blyte", 18080, 1_700_000_000);
     std::fs::write(&path, serde_json::to_string_pretty(&rec).unwrap()).unwrap();
 
@@ -168,34 +160,39 @@ fn read_record_errors_when_inner_id_differs() {
 #[test]
 fn list_records_handles_missing_dir_sorting_stray_files_and_errors() {
     let tmp = tempfile::tempdir().unwrap();
-    assert_eq!(list_records(tmp.path()).unwrap(), Vec::new());
+    let sdir = surfaces_dir(tmp.path());
+    assert_eq!(list_records_in(&sdir).unwrap(), Vec::new());
 
     let r_later = sample_record("s0000000000000002", "blyte-2", 18082, 200);
     let r_earlier = sample_record("s0000000000000001", "blyte", 18081, 100);
     let r_tie_b = sample_record("s000000000000000b", "blyte-b", 18084, 150);
     let r_tie_a = sample_record("s000000000000000a", "blyte-a", 18083, 150);
-    write_record(tmp.path(), &r_later).unwrap();
-    write_record(tmp.path(), &r_tie_b).unwrap();
-    write_record(tmp.path(), &r_earlier).unwrap();
-    write_record(tmp.path(), &r_tie_a).unwrap();
+    write_record_in(&surface_dir(tmp.path(), &r_later.id), &r_later).unwrap();
+    write_record_in(&surface_dir(tmp.path(), &r_tie_b.id), &r_tie_b).unwrap();
+    write_record_in(&surface_dir(tmp.path(), &r_earlier.id), &r_earlier).unwrap();
+    write_record_in(&surface_dir(tmp.path(), &r_tie_a.id), &r_tie_a).unwrap();
 
-    std::fs::write(surfaces_dir(tmp.path()).join("stray.txt"), "ignore me\n").unwrap();
+    std::fs::write(sdir.join("stray.txt"), "ignore me\n").unwrap();
 
-    let listed = list_records(tmp.path()).unwrap();
+    let listed: Vec<SurfaceRecord> = list_records_in(&sdir)
+        .unwrap()
+        .into_iter()
+        .map(|l| l.record)
+        .collect();
     assert_eq!(listed, vec![r_earlier, r_tie_a, r_tie_b, r_later]);
 
     let missing_json_dir = surface_dir(tmp.path(), "s0000000000000003");
     std::fs::create_dir_all(&missing_json_dir).unwrap();
-    let err = list_records(tmp.path()).unwrap_err();
+    let err = list_records_in(&sdir).unwrap_err();
     assert!(
         err.contains(&missing_json_dir.display().to_string()),
         "{err}"
     );
     std::fs::remove_dir_all(&missing_json_dir).unwrap();
 
-    let bad_dir = surfaces_dir(tmp.path()).join("not-a-surface-id");
+    let bad_dir = sdir.join("not-a-surface-id");
     std::fs::create_dir_all(&bad_dir).unwrap();
-    let err = list_records(tmp.path()).unwrap_err();
+    let err = list_records_in(&sdir).unwrap_err();
     assert!(err.contains(&bad_dir.display().to_string()), "{err}");
 }
 

@@ -69,7 +69,7 @@ fn an_empty_start_record_keeps_the_worktree() {
     let root = repo.path();
     write_file(&root.join(".wt/T1.start.json"), "");
     assert!(matches!(
-        blyte_cli::clean::check_removable(root, "T1", 14),
+        CleanContext::new(root).check_removable("T1", 14),
         Err(KeptReason::UnreadableStartRecord(_))
     ));
 }
@@ -80,7 +80,7 @@ fn a_truncated_start_record_keeps_the_worktree() {
     let root = repo.path();
     write_file(&root.join(".wt/T1.start.json"), "{\"id\":\"T1\",\"pid\":");
     assert!(matches!(
-        blyte_cli::clean::check_removable(root, "T1", 14),
+        CleanContext::new(root).check_removable("T1", 14),
         Err(KeptReason::UnreadableStartRecord(_))
     ));
     blyte_cli::clean::clean_repo_with_options(root, 14, false, None, true, 7, Some(Ok(vec![])));
@@ -102,7 +102,7 @@ fn a_finished_merged_run_is_still_removed() {
         &root.join(".wt/T1.start.json"),
         &serde_json::json!({"id": "T1", "pid": 0, "started_at": now_secs()}).to_string(),
     );
-    assert!(blyte_cli::clean::check_removable(root, "T1", 14).is_ok());
+    assert!(CleanContext::new(root).check_removable("T1", 14).is_ok());
 }
 
 #[test]

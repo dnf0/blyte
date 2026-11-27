@@ -490,14 +490,6 @@ impl LocalShell {
         }
     }
 
-    /// Creates a local shell sandboxed with a conversation sandbox profile and optional private `TMPDIR`.
-    pub fn conversation_sandboxed(sandbox: crate::sandbox::ConversationSandbox) -> Self {
-        Self {
-            profile: Some(sandbox.profile),
-            tmpdir: sandbox.tmpdir,
-        }
-    }
-
     /// Overrides `TMPDIR` for commands executed by this shell when `tmpdir` is `Some`.
     pub fn with_tmpdir(mut self, tmpdir: Option<PathBuf>) -> Self {
         self.tmpdir = tmpdir;
@@ -1243,10 +1235,6 @@ impl PersistentShell {
             profile: Some(profile.into()),
             tmpdir: None,
         })
-    }
-
-    pub fn sandboxed(root: PathBuf, profile: impl Into<Profile>) -> Self {
-        Self::local_sandboxed(root, profile)
     }
 
     pub fn container(container_id: String, workdir: PathBuf) -> Self {

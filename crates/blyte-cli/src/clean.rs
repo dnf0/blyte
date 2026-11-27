@@ -1628,16 +1628,6 @@ impl<'a> CleanContext<'a> {
     }
 }
 
-/// Evaluates whether a worktree is removable according to the clean rules.
-pub fn check_removable(
-    root: &Path,
-    id: &str,
-    older_than_days: u64,
-) -> Result<RemovalReason, KeptReason> {
-    let mut ctx = CleanContext::new(root);
-    ctx.check_removable(id, older_than_days)
-}
-
 /// Identifies the default branch (origin/HEAD's target, else main, else master).
 pub fn find_default_branch(root: &Path) -> String {
     let sym_out = std::process::Command::new("git")
@@ -1771,29 +1761,6 @@ where
     }
 }
 
-/// Resolves candidate git refs for a run's base branch.
-/// Returns (display_name, targets) if `base` is a branch name that resolves.
-/// Returns None if `base` is not a branch name (e.g. HEAD, commit id, wip/ branch)
-/// or if none of the candidate refs resolve in git.
-pub fn resolve_base_targets(root: &Path, base: &str) -> Option<(String, Vec<String>)> {
-    resolve_base_targets_with(base, |cand| {
-        git_ok(root, &["rev-parse", "--verify", "--quiet", cand])
-    })
-}
-
-/// Reads `base` from `.wt/<id>.start.json` if present.
-pub fn read_run_base(root: &Path, id: &str) -> Option<String> {
-    let start_path = root.join(".wt").join(format!("{id}.start.json"));
-    std::fs::read_to_string(&start_path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| {
-            v.get("base")
-                .and_then(|b| b.as_str())
-                .map(|s| s.to_string())
-        })
-}
-
 /// Returns the commit SHA at the tip of `branch_name` if it exists.
 pub fn get_branch_tip(root: &Path, branch_name: &str) -> Option<String> {
     let check = std::process::Command::new("git")
@@ -1830,45 +1797,6 @@ pub fn get_branch_tip(root: &Path, branch_name: &str) -> Option<String> {
 pub fn is_branch_merged(root: &Path, branch_name: &str) -> bool {
     let mut ctx = CleanContext::new(root);
     ctx.is_branch_merged(branch_name)
-}
-
-/// Checks whether a branch's work is on the default branch or any of the extra target refs.
-pub fn is_branch_merged_with_targets(
-    root: &Path,
-    branch_name: &str,
-    extra_targets: &[&str],
-) -> bool {
-    let mut ctx = CleanContext::new(root);
-    ctx.is_branch_merged_with_targets(branch_name, extra_targets)
-}
-
-/// Checks whether a branch's work is on the default branch or any of the extra target refs.
-pub fn is_branch_merged_with_extra_targets(
-    root: &Path,
-    branch_name: &str,
-    extra_targets: &[&str],
-) -> bool {
-    is_branch_merged_with_targets(root, branch_name, extra_targets)
-}
-
-/// Checks whether a commit's work is on the default branch when any of:
-/// - `git merge-base --is-ancestor <commit> <default>` succeeds;
-/// - every commit `git cherry <default> <commit>` lists is marked `-`;
-/// - merging it would change nothing: `git merge-tree --write-tree <default> <commit>` exits 0
-///   and the tree id it prints equals `git rev-parse <default>^{tree}`.
-pub fn is_commit_merged(root: &Path, commit_sha: &str) -> bool {
-    let mut ctx = CleanContext::new(root);
-    ctx.is_commit_merged(commit_sha)
-}
-
-/// Checks whether a commit's work is on the default branch or any of the extra target refs.
-pub fn is_commit_merged_with_targets(
-    root: &Path,
-    commit_sha: &str,
-    extra_targets: &[&str],
-) -> bool {
-    let mut ctx = CleanContext::new(root);
-    ctx.is_commit_merged_with_targets(commit_sha, extra_targets)
 }
 
 fn git_ok(root: &Path, args: &[&str]) -> bool {
@@ -1936,28 +1864,6 @@ fn is_squash_merged_with_base(root: &Path, commit_sha: &str, target: &str, base:
     }
 
     subjects.iter().all(|s| haystack_lines.contains(*s))
-}
-
-/// Lists all run IDs that have a corresponding `.wt/<id>.start.json`.
-pub fn list_all_run_ids(root: &Path) -> Vec<String> {
-    let wt_dir = root.join(".wt");
-    let mut ids = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&wt_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(id) = name.strip_suffix(".start.json") {
-                ids.push(id.to_string());
-            }
-        }
-    }
-    ids.sort();
-    ids
-}
-
-/// Finds a follow-up run that makes `<id>` merged.
-pub fn find_merged_followup(root: &Path, id: &str) -> Result<Option<String>, String> {
-    let mut ctx = CleanContext::new(root);
-    ctx.find_merged_followup(id)
 }
 
 /// Lists all `.wt/<id>` directories that have a corresponding `.wt/<id>.start.json`.
@@ -2130,7 +2036,7 @@ pub fn is_worktree_idle(wt_path: &Path, idle_days: u64) -> Result<bool, String> 
     Ok(true)
 }
 
-fn check_session_worktree_removable_with_ctx(
+pub fn check_session_worktree_removable_with_ctx(
     ctx: &mut CleanContext<'_>,
     wt: &GitWorktreeInfo,
     cwds: &Result<Vec<PathBuf>, String>,
@@ -2185,17 +2091,6 @@ fn check_session_worktree_removable_with_ctx(
             .unwrap_or_else(|| "detached".to_string())
     });
     Ok(RemovalReason::SessionMerged(branch_label))
-}
-
-/// Evaluates whether a session worktree is removable.
-pub fn check_session_worktree_removable(
-    root: &Path,
-    wt: &GitWorktreeInfo,
-    cwds: &Result<Vec<PathBuf>, String>,
-    idle_days: u64,
-) -> Result<RemovalReason, KeptReason> {
-    let mut ctx = CleanContext::new(root);
-    check_session_worktree_removable_with_ctx(&mut ctx, wt, cwds, idle_days)
 }
 
 fn branch_checked_out_elsewhere(
@@ -2818,7 +2713,6 @@ pub struct GitWorktreeInfo {
     pub path: PathBuf,
     pub head_sha: Option<String>,
     pub branch: Option<String>,
-    pub is_detached: bool,
     pub is_bare: bool,
 }
 
@@ -2840,23 +2734,19 @@ pub fn parse_worktree_list(root: &Path) -> Vec<GitWorktreeInfo> {
     let mut cur_path: Option<PathBuf> = None;
     let mut cur_head: Option<String> = None;
     let mut cur_branch: Option<String> = None;
-    let mut cur_detached = false;
     let mut cur_bare = false;
 
     let mut finish_entry = |path: &mut Option<PathBuf>,
                             head: &mut Option<String>,
                             branch: &mut Option<String>,
-                            detached: &mut bool,
                             bare: &mut bool| {
         if let Some(p) = path.take() {
             list.push(GitWorktreeInfo {
                 path: p,
                 head_sha: head.take(),
                 branch: branch.take(),
-                is_detached: *detached,
                 is_bare: *bare,
             });
-            *detached = false;
             *bare = false;
         }
     };
@@ -2864,21 +2754,9 @@ pub fn parse_worktree_list(root: &Path) -> Vec<GitWorktreeInfo> {
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
-            finish_entry(
-                &mut cur_path,
-                &mut cur_head,
-                &mut cur_branch,
-                &mut cur_detached,
-                &mut cur_bare,
-            );
+            finish_entry(&mut cur_path, &mut cur_head, &mut cur_branch, &mut cur_bare);
         } else if let Some(p) = line.strip_prefix("worktree ") {
-            finish_entry(
-                &mut cur_path,
-                &mut cur_head,
-                &mut cur_branch,
-                &mut cur_detached,
-                &mut cur_bare,
-            );
+            finish_entry(&mut cur_path, &mut cur_head, &mut cur_branch, &mut cur_bare);
             cur_path = Some(PathBuf::from(p.trim()));
         } else if let Some(h) = line.strip_prefix("HEAD ") {
             cur_head = Some(h.trim().to_string());
@@ -2886,19 +2764,11 @@ pub fn parse_worktree_list(root: &Path) -> Vec<GitWorktreeInfo> {
             let b_str = b.trim();
             let b_name = b_str.strip_prefix("refs/heads/").unwrap_or(b_str);
             cur_branch = Some(b_name.to_string());
-        } else if line == "detached" {
-            cur_detached = true;
         } else if line == "bare" {
             cur_bare = true;
         }
     }
-    finish_entry(
-        &mut cur_path,
-        &mut cur_head,
-        &mut cur_branch,
-        &mut cur_detached,
-        &mut cur_bare,
-    );
+    finish_entry(&mut cur_path, &mut cur_head, &mut cur_branch, &mut cur_bare);
     list
 }
 
@@ -3096,18 +2966,6 @@ fn report_other_worktrees_with_ctx(
             format_size(other_bytes)
         );
     }
-}
-
-/// Inspects other worktrees (excluding main checkout, linked-worktree roots,
-/// and blyte's `.wt/<id>` runs), and reports any that are both merged and clean.
-/// Never deletes them.
-pub fn report_other_worktrees(root: &Path) {
-    if is_linked_worktree(root) {
-        return;
-    }
-    let worktrees = parse_worktree_list(root);
-    let mut ctx = CleanContext::new(root);
-    report_other_worktrees_with_ctx(root, &mut ctx, &worktrees);
 }
 
 struct CleanLockGuard(PathBuf);

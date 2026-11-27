@@ -26,10 +26,6 @@ pub fn repo_root() -> Result<PathBuf, String> {
     Ok(PathBuf::from(trimmed))
 }
 
-pub fn render(dispatch_tool: bool, answers: Answers, root: &Path) -> Result<String, String> {
-    render_with_sandbox(dispatch_tool, answers, root, true)
-}
-
 pub fn render_with_sandbox(
     dispatch_tool: bool,
     answers: Answers,

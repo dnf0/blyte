@@ -163,5 +163,4 @@ fn recent_calls_keep_their_thought_signatures() {
         .expect("a call in the tail");
     assert_eq!(last_call, Some("sig150".into()));
     assert_eq!(Folded::default().budget_tokens, 48_000);
-    assert_eq!(Folded::default().name(), "folded");
 }

@@ -24,7 +24,6 @@ pub trait ContextStrategy: Send + Sync {
     fn fold_budget(&self, _history: &[Message]) -> Option<usize> {
         None
     }
-    fn name(&self) -> &'static str;
 }
 
 /// Everything, every time. The baseline to beat.
@@ -34,9 +33,6 @@ pub struct Conversational;
 impl ContextStrategy for Conversational {
     fn build(&self, _state: &State, history: &[Message]) -> Vec<Message> {
         history.to_vec()
-    }
-    fn name(&self) -> &'static str {
-        "conversational"
     }
 }
 
@@ -206,9 +202,5 @@ impl ContextStrategy for Folded {
 
     fn fold_budget(&self, _history: &[Message]) -> Option<usize> {
         Some(self.budget_tokens)
-    }
-
-    fn name(&self) -> &'static str {
-        "folded"
     }
 }

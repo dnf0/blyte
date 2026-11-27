@@ -122,10 +122,6 @@ impl ModelReviewResult {
         }
     }
 
-    pub fn waits_in_queue(&self) -> bool {
-        self.has_findings() || self.is_failed()
-    }
-
     pub fn flag(&self) -> Option<String> {
         if self.is_failed() {
             let reason = self.failure_detail();
@@ -780,12 +776,6 @@ pub fn print_result(result: &ModelReviewResult) {
     print!("{}", format_result(result));
 }
 
-pub fn load_saved_review(path: &Path) -> Result<SavedModelReview, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    serde_json::from_str(&raw).map_err(|e| format!("cannot parse {}: {e}", path.display()))
-}
-
 fn read_task_text(root: &Path, start_path: &Path) -> Option<String> {
     let content = std::fs::read_to_string(start_path).ok()?;
     let val: serde_json::Value = serde_json::from_str(&content).ok()?;
@@ -1130,7 +1120,7 @@ Overall looks okay otherwise.
     }
 
     #[test]
-    fn test_save_review_record_and_load_old_format() {
+    fn test_save_review_record() {
         let dir = tempfile::tempdir().unwrap();
         let concerns = vec![Concern {
             file: "foo.rs".to_string(),
@@ -1165,25 +1155,6 @@ Overall looks okay otherwise.
         assert_eq!(val["fallbacks"][0]["verdict"], "not_fallback");
         assert!(val["error"].is_null());
         assert!(val["ts"].as_u64().unwrap() > 0);
-
-        let loaded = load_saved_review(&path).unwrap();
-        assert_eq!(loaded.fallbacks.len(), 1);
-
-        let old_path = dir.path().join(".wt/OLD.model-review.json");
-        std::fs::write(
-            &old_path,
-            r#"{
-  "model": "gemini/gemini-3.8-flash",
-  "cost_usd": 0.001,
-  "concerns": [],
-  "ts": 1700000000,
-  "error": null
-}"#,
-        )
-        .unwrap();
-        let old_loaded = load_saved_review(&old_path).unwrap();
-        assert_eq!(old_loaded.model.as_deref(), Some("gemini/gemini-3.8-flash"));
-        assert!(old_loaded.fallbacks.is_empty());
     }
 
     #[test]

@@ -9,9 +9,6 @@ pub enum Command {
     Init(InitArgs),
     /// Serve a local dashboard of running and recent jobs
     Dashboard(DashboardArgs),
-    /// Serve a local replay of recent runs
-    #[command(hide = true)]
-    Mock(MockArgs),
     /// Combine a request's passed runs on a work branch and run the repository's check
     Combine(CombineArgs),
     /// Run one task in its own git worktree (.wt/<id>, branch wip/<id>) and print a JSON summary
@@ -133,41 +130,12 @@ pub struct DashboardArgs {
     pub open: bool,
 }
 
-#[derive(clap::Args, Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct SurfaceArgs {
-    #[arg(
-        long,
-        default_value_t = 0,
-        value_name = "N",
-        help = "Port to listen on (default: a free port)"
-    )]
     pub port: u16,
-
-    #[arg(long, help = "Do not open the live surface in the browser")]
     pub no_open: bool,
-
-    #[arg(
-        long,
-        default_value_t = 14,
-        value_name = "N",
-        value_parser = clap::value_parser!(u64).range(1..=31),
-        help = "How many days back to include finished runs (1 to 31)"
-    )]
     pub days: u64,
-
-    #[arg(
-        long,
-        value_name = "NAME",
-        help = "Name for this surface (default: the repository directory name)"
-    )]
     pub name: Option<String>,
-
-    #[arg(
-        long,
-        value_name = "NAME",
-        conflicts_with = "name",
-        help = "Restart a stopped surface, by name or id, with its transcript"
-    )]
     pub resume: Option<String>,
 }
 
@@ -181,26 +149,6 @@ impl Default for SurfaceArgs {
             resume: None,
         }
     }
-}
-
-#[derive(clap::Args, Debug, PartialEq, Clone)]
-pub struct MockArgs {
-    /// Port to listen on (0 for a free port)
-    #[arg(long, default_value = "7272", value_name = "N")]
-    pub port: u16,
-
-    /// How many days back to include finished runs (1 to 31)
-    #[arg(
-        long,
-        default_value = "7",
-        value_name = "N",
-        value_parser = clap::value_parser!(u64).range(1..=31)
-    )]
-    pub days: u64,
-
-    /// Directory holding repositories or worktrees (repeatable)
-    #[arg(long = "root", value_name = "DIR")]
-    pub roots: Vec<PathBuf>,
 }
 
 #[derive(clap::Args, Debug, PartialEq, Clone)]

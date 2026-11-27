@@ -1214,10 +1214,6 @@ pub fn collect_plans(src: &Sources, now: u64) -> serde_json::Value {
     collect_plans_with_options(src, now, CollectPlansOptions::default())
 }
 
-pub fn collect_plans_running(src: &Sources, now: u64) -> serde_json::Value {
-    collect_plans_with_options(src, now, CollectPlansOptions { running_only: true })
-}
-
 pub fn collect_plans_filtered(src: &Sources, now: u64, running_only: bool) -> serde_json::Value {
     collect_plans_with_options(src, now, CollectPlansOptions { running_only })
 }

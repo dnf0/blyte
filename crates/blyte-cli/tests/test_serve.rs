@@ -20,7 +20,7 @@ use blyte_cli::serve::{
     TOKEN_HEADER,
 };
 use blyte_cli::session::{peer_prompt, EntryBody, PromptRunner, Session};
-use blyte_cli::surface_dir::{entries_path, list_records, record_path, surfaces_dir};
+use blyte_cli::surface_dir::{list_records_in, surface_dir, surfaces_dir};
 use blyte_cli::surface_registry::{entry_path, registry_dir, write_entry, RegistryEntry};
 
 struct RecordedCall {
@@ -1271,13 +1271,13 @@ fn bare_blyte_starts_the_surface_without_a_terminal() {
         !repo.join(".wt/surface.json").exists(),
         "legacy .wt/surface.json must not be created"
     );
-    let records = list_records(&repo).unwrap();
+    let records = list_records_in(&surfaces_dir(&repo)).unwrap();
     assert_eq!(
         records.len(),
         1,
         "expected one surface record after startup, got {records:?}"
     );
-    let surface_file = record_path(&repo, &records[0].id);
+    let surface_file = surface_dir(&repo, &records[0].record.id).join("surface.json");
     assert!(
         surface_file.exists(),
         "expected {} to exist after surface startup",
@@ -1785,7 +1785,7 @@ fn secret_never_leaks_and_origin_check_stays() {
     assert!(!wt_dir.join("surface.json").exists());
     assert!(!wt_dir.join("surface.token").exists());
     assert!(!wt_dir.join("sessions").exists());
-    assert_eq!(list_records(&repo).unwrap().len(), 1);
+    assert_eq!(list_records_in(&surfaces_dir(&repo)).unwrap().len(), 1);
     assert_no_file_under_contains(&wt_dir, &token);
 }
 
@@ -2214,8 +2214,8 @@ fn token_file_is_private_and_removed_on_shutdown() {
     let health = fetch_health(port);
     let surface_id = health["surface_id"].as_str().unwrap().to_string();
     let token_path = surface_token_path_for_id(&surface_id).unwrap();
-    let surface_path = record_path(&repo, &surface_id);
-    let entries_file = entries_path(&repo, &surface_id);
+    let surface_path = surface_dir(&repo, &surface_id).join("surface.json");
+    let entries_file = surface_dir(&repo, &surface_id).join("entries.jsonl");
     assert!(
         !repo.join(".wt/surface.json").exists(),
         ".wt/surface.json must not be created"
@@ -2397,7 +2397,9 @@ fn linked_worktree_uses_main_checkout() {
         "expected 'linked worktree' on stderr, got: {err_str}"
     );
     assert!(
-        record_path(&repo, &surface_id).exists(),
+        surface_dir(&repo, &surface_id)
+            .join("surface.json")
+            .exists(),
         "expected surface record under main checkout"
     );
     assert!(
@@ -2516,7 +2518,7 @@ fn events_survive_a_restart() {
             .any(|e| e["kind"] == "user_message" && e["text"] == "hello before restart"),
         "expected user_message before restart, got: {before_entries:?}"
     );
-    assert!(entries_path(&repo, &id1).exists());
+    assert!(surface_dir(&repo, &id1).join("entries.jsonl").exists());
     assert!(!repo.join(".wt/sessions").exists());
 
     stop1.store(true, Ordering::Relaxed);
@@ -2677,11 +2679,12 @@ fn a_runs_changed_post_combines_without_waiting_for_the_timer() {
         .success());
 
     let now = now_secs();
-    let surface_id = blyte_cli::surface_dir::list_records(&repo)
+    let surface_id = list_records_in(&surfaces_dir(&repo))
         .unwrap()
         .into_iter()
         .next()
         .expect("surface record")
+        .record
         .id;
     write_file(
         &repo.join(".wt/NC1.start.json"),
@@ -2930,17 +2933,17 @@ fn a_combined_run_without_a_verdict_is_marked_combined() {
     assert_eq!(runs[0]["id"], "CM1");
     assert_eq!(runs[0]["combined"], true);
     assert!(runs[0]["verdict"].is_null());
-    assert_eq!(
-        blyte_cli::requests::run_is_combined(&repo, "CM1", Some("req-cm")),
-        Ok(true)
-    );
-    assert_eq!(
-        blyte_cli::requests::run_is_combined(&repo, "CM1", None),
-        Ok(false)
-    );
-    assert_eq!(
-        blyte_cli::requests::run_is_combined(&repo, "OTHER", Some("req-cm")),
-        Ok(false)
+    let combined = blyte_cli::requests::combined_run_ids(
+        &repo,
+        &[("CM1", Some("req-cm")), ("OTHER", Some("req-cm"))],
+    )
+    .unwrap();
+    assert!(combined.contains("CM1"));
+    assert!(!combined.contains("OTHER"));
+    assert!(
+        blyte_cli::requests::combined_run_ids(&repo, &[("CM1", None)])
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -3509,7 +3512,7 @@ fn surface_keeps_token_out_of_wt_and_rejects_unauthenticated_actions() {
     assert!(!repo.join(".wt/surface.json").exists());
     assert!(!repo.join(".wt/surface.token").exists());
     assert!(!repo.join(".wt/sessions").exists());
-    assert_eq!(list_records(&repo).unwrap().len(), 1);
+    assert_eq!(list_records_in(&surfaces_dir(&repo)).unwrap().len(), 1);
     assert_no_file_under_contains(&repo.join(".wt"), &token);
 
     let token_dir = fake_home.join(".local/state/blyte/surface");
@@ -3704,9 +3707,9 @@ fn started_surface_writes_registry_entry_with_metadata_and_idle() {
         None,
     );
 
-    let records = list_records(&repo).unwrap();
+    let records = list_records_in(&surfaces_dir(&repo)).unwrap();
     assert_eq!(records.len(), 1);
-    let rec = &records[0];
+    let rec = &records[0].record;
 
     let entry = read_registry_entry(&reg_dir, &rec.id);
     assert_eq!(entry.id, rec.id);
@@ -3742,18 +3745,18 @@ fn stopped_surface_removes_registry_entry_and_keeps_surface_record() {
         None,
     );
 
-    let records = list_records(&repo).unwrap();
+    let records = list_records_in(&surfaces_dir(&repo)).unwrap();
     assert_eq!(records.len(), 1);
-    let surface_id = records[0].id.clone();
+    let surface_id = records[0].record.id.clone();
     assert!(entry_path(&reg_dir, &surface_id).exists());
 
     running.stop.store(true, Ordering::Relaxed);
     assert_eq!(running.handle.join().unwrap(), 0);
 
     assert!(!entry_path(&reg_dir, &surface_id).exists());
-    let records_after = list_records(&repo).unwrap();
+    let records_after = list_records_in(&surfaces_dir(&repo)).unwrap();
     assert_eq!(records_after.len(), 1);
-    assert_eq!(records_after[0].id, surface_id);
+    assert_eq!(records_after[0].record.id, surface_id);
 }
 
 #[test]
@@ -3845,10 +3848,10 @@ fn explicit_name_used_in_different_repo_fails_and_writes_no_registry_entry() {
         err_text.contains("a running surface is already named reg-cross-repo-name"),
         "expected existing pick_name duplicate error, got: {err_text}"
     );
-    assert!(list_records(&repo2).unwrap().is_empty());
-    let first_records = list_records(&repo1).unwrap();
+    assert!(list_records_in(&surfaces_dir(&repo2)).unwrap().is_empty());
+    let first_records = list_records_in(&surfaces_dir(&repo1)).unwrap();
     assert_eq!(first_records.len(), 1);
-    let first_id = &first_records[0].id;
+    let first_id = &first_records[0].record.id;
     assert!(entry_path(&reg_dir, first_id).exists());
     let repo2_canon = repo2.canonicalize().unwrap();
     let mut stray = Vec::new();
@@ -4034,9 +4037,9 @@ fn registry_doing_tracks_running_turn_first_line_and_returns_to_idle() {
         Box::new(runner),
     );
 
-    let records = list_records(&repo).unwrap();
+    let records = list_records_in(&surfaces_dir(&repo)).unwrap();
     assert_eq!(records.len(), 1);
-    let surface_id = records[0].id.clone();
+    let surface_id = records[0].record.id.clone();
 
     assert_eq!(read_registry_entry(&reg_dir, &surface_id).doing, "idle");
 
@@ -4147,9 +4150,9 @@ fn start_recording_surface(
         },
         Box::new(runner),
     );
-    let records = list_records(repo).unwrap();
+    let records = list_records_in(&surfaces_dir(repo)).unwrap();
     assert_eq!(records.len(), 1);
-    let surface_id = records[0].id.clone();
+    let surface_id = records[0].record.id.clone();
     (running, surface_id, prompts)
 }
 

@@ -76,8 +76,8 @@ fn state_home() -> &'static Path {
 
 fn write_surface_files(repo_dir: &Path, surface_id: &str, port: u16, token: &str) {
     let _ = state_home();
-    blyte_cli::surface_dir::write_record(
-        repo_dir,
+    blyte_cli::surface_dir::write_record_in(
+        &blyte_cli::surface_dir::surface_dir(repo_dir, surface_id),
         &blyte_cli::surface_dir::SurfaceRecord {
             id: surface_id.to_string(),
             name: "demo".to_string(),

@@ -22,7 +22,6 @@ pub mod live_runs;
 pub mod map;
 pub mod map_python;
 pub mod map_rust;
-pub mod mock;
 pub mod model_review;
 pub mod outside_env;
 pub mod passed_trees;

@@ -159,16 +159,7 @@ fn add_usage(dst: &mut Usage, src: &Usage) {
     dst.thinking += src.thinking;
 }
 
-/// Check up to [`MAX_CLAIMS`] claims in batches of [`BATCH_SIZE`] using `provider`.
-pub fn check_claims(
-    provider: &dyn Provider,
-    claims: &[Claim],
-    deadline: Option<std::time::Instant>,
-) -> ClaimCheck {
-    check_claims_with_clock(provider, claims, deadline, &std::time::Instant::now)
-}
-
-/// Like [`check_claims`], reading the current time from `now`.
+/// Check up to [`MAX_CLAIMS`] claims in batches of [`BATCH_SIZE`] using `provider`, reading the current time from `now`.
 pub fn check_claims_with_clock(
     provider: &dyn Provider,
     claims: &[Claim],
@@ -342,7 +333,7 @@ mod tests {
     fn seventeen_claims_batched_into_8_8_1() {
         let provider = ScriptedProvider::new(Vec::new());
         let claims = make_claims(17);
-        let res = check_claims(&provider, &claims, None);
+        let res = check_claims_with_clock(&provider, &claims, None, &std::time::Instant::now);
         assert_eq!(res.checked, 17);
         assert_eq!(res.unchecked, 0);
         assert_eq!(res.calls, 3);
@@ -354,7 +345,7 @@ mod tests {
     fn seventy_claims_caps_at_64_checked_and_6_unchecked() {
         let provider = ScriptedProvider::new(Vec::new());
         let claims = make_claims(70);
-        let res = check_claims(&provider, &claims, None);
+        let res = check_claims_with_clock(&provider, &claims, None, &std::time::Instant::now);
         assert_eq!(res.checked, 64);
         assert_eq!(res.unchecked, 6);
         assert_eq!(res.calls, 8);
@@ -386,7 +377,7 @@ mod tests {
             }),
         ]);
         let claims = make_claims(2);
-        let res = check_claims(&provider, &claims, None);
+        let res = check_claims_with_clock(&provider, &claims, None, &std::time::Instant::now);
         assert_eq!(res.calls, 2);
         assert_eq!(res.parse_errors, 0);
         assert_eq!(res.not_enough_evidence, 1);
@@ -426,7 +417,7 @@ mod tests {
             }),
         ]);
         let claims = make_claims(3);
-        let res = check_claims(&provider, &claims, None);
+        let res = check_claims_with_clock(&provider, &claims, None, &std::time::Instant::now);
         assert_eq!(res.calls, 2);
         assert_eq!(res.parse_errors, 3);
         assert_eq!(
@@ -451,7 +442,7 @@ mod tests {
             ..Default::default()
         })]);
         let claims = make_claims(2);
-        let res = check_claims(&provider, &claims, None);
+        let res = check_claims_with_clock(&provider, &claims, None, &std::time::Instant::now);
         assert_eq!(res.calls, 1);
         assert_eq!(res.parse_errors, 0);
         assert_eq!(
@@ -505,7 +496,7 @@ mod tests {
         };
         let claims = make_claims(17); // 3 batches (8, 8, 1)
         let deadline = Some(Instant::now() + Duration::from_millis(200));
-        let res = check_claims(&provider, &claims, deadline);
+        let res = check_claims_with_clock(&provider, &claims, deadline, &Instant::now);
         assert_eq!(res.calls, 1);
         assert_eq!(res.checked, 8);
         assert_eq!(res.unchecked, 9);

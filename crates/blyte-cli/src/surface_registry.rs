@@ -171,23 +171,6 @@ pub fn find_by_name(dir: &Path, name: &str) -> Result<RegistryEntry, String> {
     }
 }
 
-pub fn set_doing(dir: &Path, id: &str, doing: &str) -> Result<(), String> {
-    let path = entry_path(dir, id);
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-    let mut entry: RegistryEntry = serde_json::from_str(&text)
-        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
-    if entry.id != id {
-        return Err(format!(
-            "surface registry entry {} has id {}, expected {id}",
-            path.display(),
-            entry.id
-        ));
-    }
-    entry.doing = doing.to_string();
-    write_entry(dir, &entry)
-}
-
 pub fn first_line(text: &str) -> String {
     for line in text.lines() {
         let trimmed = line.trim();

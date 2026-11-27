@@ -1,4 +1,4 @@
-use blyte_cli::http::{serve, Request, Response};
+use blyte_cli::http::{serve_until, Request, Response};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -12,7 +12,7 @@ where
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
     let port = listener.local_addr().expect("local_addr").port();
     std::thread::spawn(move || {
-        let _ = serve(listener, handler);
+        let _ = serve_until(listener, || false, handler);
     });
     port
 }

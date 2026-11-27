@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use blyte_agent::sandbox::surface_token_path_for_id;
 use blyte_cli::serve::TOKEN_HEADER;
-use blyte_cli::surface_dir::{write_record, SurfaceRecord};
+use blyte_cli::surface_dir::{surface_dir, write_record_in, SurfaceRecord};
 use blyte_cli::surface_notify::{notify_runs_changed, report, NotifyOutcome};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -54,8 +54,8 @@ fn write_start_record(root: &Path, id: &str, surface: Option<&str>) {
 }
 
 fn write_surface_files(root: &Path, sid: &str, name: &str, port: u16, token: Option<&str>) {
-    write_record(
-        root,
+    write_record_in(
+        &surface_dir(root, sid),
         &SurfaceRecord {
             id: sid.to_string(),
             name: name.to_string(),

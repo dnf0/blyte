@@ -7,8 +7,8 @@ use std::sync::OnceLock;
 use blyte_cli::combine::{combine_in, CombineCheck, CombineRecord, CombineState};
 use blyte_cli::dispatch::{decide_base_check, record_passed_after_run, BaseCheckDecision};
 use blyte_cli::passed_trees::{
-    check_key, has_passed, record_passed, record_passed_at, record_path, tree_of,
-    worktree_is_clean, MAX_AGE_SECS,
+    check_key, has_passed, passed_dir, record_passed, record_passed_at, tree_of, worktree_is_clean,
+    MAX_AGE_SECS,
 };
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -244,7 +244,7 @@ fn passed_trees_record_lookup_expiry_corrupt_and_linked_worktree() {
     assert!(!has_passed(root, &tree_a, &key2, now).unwrap());
     assert!(!has_passed(root, &tree_a, &key1, now + 8 * 24 * 60 * 60).unwrap());
 
-    let bad_path = record_path(root, &tree_b, &key1);
+    let bad_path = passed_dir(root).join(format!("{tree_b}.{key1}.json"));
     std::fs::write(&bad_path, "{ not valid json").unwrap();
     let err = has_passed(root, &tree_b, &key1, now).unwrap_err();
     assert!(
@@ -469,7 +469,7 @@ fn combine_errors_on_unparseable_passed_tree_record() {
     let tip = add_verified_run(root, "T1", "req-corrupt", &base, 100, "a.txt", "a\n");
     let tip_tree = tree_of(root, &tip).unwrap();
     let key = check_key(gate, &BTreeMap::new());
-    let bad_path = record_path(root, &tip_tree, &key);
+    let bad_path = passed_dir(root).join(format!("{tip_tree}.{key}.json"));
     std::fs::create_dir_all(bad_path.parent().unwrap()).unwrap();
     std::fs::write(&bad_path, "corrupt").unwrap();
 
@@ -735,7 +735,7 @@ fn dispatch_stops_before_child_on_corrupt_passed_record_and_research_ignores_it(
 
     let base_tree = tree_of(root, "HEAD").unwrap();
     let key = check_key(&gate, &BTreeMap::new());
-    let bad_path = record_path(root, &base_tree, &key);
+    let bad_path = passed_dir(root).join(format!("{base_tree}.{key}.json"));
     std::fs::create_dir_all(bad_path.parent().unwrap()).unwrap();
     std::fs::write(&bad_path, "{ bad json").unwrap();
 

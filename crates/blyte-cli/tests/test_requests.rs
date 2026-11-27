@@ -2007,7 +2007,11 @@ fn start_stoppable_surface(
         session_id: format!("sess-{surface_name}"),
         started_at: 1_700_000_000,
     };
-    blyte_cli::surface_dir::write_record(repo, &rec).unwrap();
+    blyte_cli::surface_dir::write_record_in(
+        &blyte_cli::surface_dir::surface_dir(repo, &rec.id),
+        &rec,
+    )
+    .unwrap();
     let out_buf = Arc::new(Mutex::new(Vec::new()));
     let err_buf = Arc::new(Mutex::new(Vec::new()));
     let stop = Arc::new(AtomicBool::new(false));

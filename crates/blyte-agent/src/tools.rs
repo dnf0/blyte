@@ -1086,23 +1086,7 @@ pub fn execute(
     name: &str,
     args: &Value,
 ) -> ToolOutcome {
-    execute_with_deadline(root, shell, fs, name, args, None)
-}
-
-pub fn execute_with_deadline(
-    root: &Path,
-    shell: &dyn Shell,
-    fs: &dyn Fs,
-    name: &str,
-    args: &Value,
-    deadline: Option<std::time::Instant>,
-) -> ToolOutcome {
-    let ceiling = command_ceiling(name, args);
-    let command_timeout = match deadline {
-        Some(d) => ceiling.min(d.saturating_duration_since(std::time::Instant::now())),
-        None => ceiling,
-    };
-    execute_with_timeout(root, shell, fs, name, args, command_timeout)
+    execute_with_timeout(root, shell, fs, name, args, command_ceiling(name, args))
 }
 
 pub fn execute_with_timeout(

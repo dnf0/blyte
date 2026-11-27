@@ -161,11 +161,6 @@ impl ChatGpt {
         &self.account_id
     }
 
-    /// Returns the stripped wire model identifier.
-    pub fn model(&self) -> &str {
-        &self.model
-    }
-
     /// Serializes a normalised [`Request`] into an OpenAI Responses API streaming request body.
     pub fn body(&self, req: &Request) -> Value {
         let instructions = if req.system.trim().is_empty() {

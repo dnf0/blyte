@@ -45,10 +45,6 @@ pub fn passed_dir(root: &Path) -> PathBuf {
     main.join(".wt").join("passed")
 }
 
-pub fn record_path(root: &Path, tree: &str, key: &str) -> PathBuf {
-    passed_dir(root).join(format!("{tree}.{key}.json"))
-}
-
 pub fn record_passed(root: &Path, tree: &str, key: &str) -> Result<(), String> {
     record_passed_at(root, tree, key, now_secs())
 }

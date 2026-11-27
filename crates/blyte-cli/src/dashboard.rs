@@ -693,15 +693,6 @@ fn get_process_etime(pid: i64) -> Option<u64> {
     None
 }
 
-#[derive(serde::Deserialize, Debug)]
-struct AgySummary {
-    status: Option<String>,
-    error: Option<String>,
-    duration_seconds: Option<f64>,
-    num_turns: Option<u64>,
-    response: Option<String>,
-}
-
 struct RawJob {
     id: String,
     repo: String,
@@ -724,7 +715,6 @@ struct RawJob {
     changed_files: Vec<String>,
     summary_final_msg: Option<String>,
     is_runs_dir: bool,
-    agy_summary_path: Option<PathBuf>,
     problems: Vec<String>,
     problem_mtime: Option<u64>,
 }
@@ -951,7 +941,6 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                         changed_files,
                         summary_final_msg,
                         is_runs_dir: false,
-                        agy_summary_path: None,
                         problems,
                         problem_mtime: start_mtime,
                     });
@@ -983,20 +972,11 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                                 }
 
                                 let report_path = repo_path.join(format!("{id}.report.json"));
-                                let agy_path = repo_path.join(format!("{id}.json"));
                                 let log_path = repo_path.join(format!("{id}.log"));
                                 let report_mtime = file_mtime(&report_path);
-                                let agy_mtime = file_mtime(&agy_path);
                                 let log_mtime = file_mtime(&log_path);
 
                                 if report_mtime.is_some_and(|m| m < cutoff)
-                                    && agy_mtime.is_none_or(|m| m < cutoff)
-                                    && log_mtime.is_none_or(|m| m < cutoff)
-                                {
-                                    continue;
-                                }
-                                if report_mtime.is_none()
-                                    && agy_mtime.is_some_and(|m| m < cutoff)
                                     && log_mtime.is_none_or(|m| m < cutoff)
                                 {
                                     continue;
@@ -1028,10 +1008,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                                         OptionalFile::Missing | OptionalFile::Err => (None, None),
                                     };
 
-                                if report_mtime.is_none()
-                                    && agy_mtime.is_none()
-                                    && log_mtime.is_none_or(|m| m < cutoff)
-                                {
+                                if report_mtime.is_none() && log_mtime.is_none_or(|m| m < cutoff) {
                                     let is_alive = pid.is_some_and(|p| {
                                         p > 0
                                             && unsafe { libc::kill(p as libc::pid_t, 0) == 0 }
@@ -1105,8 +1082,6 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                                     Some(p.to_path_buf())
                                 });
 
-                                let agy_summary_path = Some(agy_path);
-
                                 raw_jobs.push(RawJob {
                                     id: id.clone(),
                                     repo: repo.clone(),
@@ -1129,7 +1104,6 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                                     changed_files: Vec::new(),
                                     summary_final_msg: None,
                                     is_runs_dir: true,
-                                    agy_summary_path,
                                     problems,
                                     problem_mtime: log_mtime,
                                 });
@@ -1226,14 +1200,6 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
         let report_state = read_optional_json::<serde_json::Value>(&raw.report_path, &mut problems);
         let report_mtime = file_mtime(&raw.report_path);
 
-        let agy_state = match report_state {
-            OptionalFile::Missing => match raw.agy_summary_path.as_ref() {
-                Some(p) => read_optional_json::<AgySummary>(p, &mut problems),
-                None => OptionalFile::Missing,
-            },
-            OptionalFile::Ok(_) | OptionalFile::Err => OptionalFile::Missing,
-        };
-
         let (
             status,
             gate_running,
@@ -1245,8 +1211,8 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
             finished_at,
             elapsed_s,
             now_str,
-        ) = match (report_state, agy_state) {
-            (OptionalFile::Ok(report), _) => {
+        ) = match report_state {
+            OptionalFile::Ok(report) => {
                 let outcome = match report.get("outcome") {
                     Some(v) => match v.as_str() {
                         Some(s) if !s.is_empty() => s.to_string(),
@@ -1349,7 +1315,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                     now_str,
                 )
             }
-            (OptionalFile::Err, _) => {
+            OptionalFile::Err => {
                 let finished_at = report_mtime;
                 let elapsed_s = match (finished_at, raw.started_at) {
                     (Some(fin), Some(st)) if fin >= st => Some(fin - st),
@@ -1369,72 +1335,7 @@ pub fn collect_jobs(src: &Sources, now: u64) -> Vec<Job> {
                     now_str,
                 )
             }
-            (OptionalFile::Missing, OptionalFile::Ok(agy)) => {
-                let status = if agy.status.as_deref() == Some("ERROR") {
-                    "error".to_string()
-                } else {
-                    "finished".to_string()
-                };
-                let cost = None;
-                let turns = agy.num_turns.unwrap_or(log_info.turns);
-                let gate_attempts = log_info.gate_attempts;
-                let gate_failures = Vec::new();
-                let model = None;
-                let finished_at = raw.agy_summary_path.as_ref().and_then(|p| file_mtime(p));
-                let elapsed_s = agy.duration_seconds.map(|d| d.round() as u64);
-                let now_str = if status == "error" {
-                    let err = agy.error.as_deref().unwrap_or("");
-                    let s = extract_now_from_final_message(err);
-                    if !s.is_empty() {
-                        s
-                    } else {
-                        err.lines().next().unwrap_or("").chars().take(200).collect()
-                    }
-                } else {
-                    let resp = agy.response.as_deref().unwrap_or("");
-                    let s = extract_now_from_final_message(resp);
-                    if !s.is_empty() {
-                        s
-                    } else {
-                        resp.lines()
-                            .next()
-                            .unwrap_or("")
-                            .chars()
-                            .take(200)
-                            .collect()
-                    }
-                };
-
-                (
-                    status,
-                    false,
-                    cost,
-                    turns,
-                    gate_attempts,
-                    gate_failures,
-                    model,
-                    finished_at,
-                    elapsed_s,
-                    now_str,
-                )
-            }
-            (OptionalFile::Missing, OptionalFile::Err) => {
-                let finished_at = raw.agy_summary_path.as_ref().and_then(|p| file_mtime(p));
-                let now_str = log_info.last_tool.clone().unwrap_or_default();
-                (
-                    "error".to_string(),
-                    false,
-                    None,
-                    log_info.turns,
-                    log_info.gate_attempts,
-                    Vec::new(),
-                    None,
-                    finished_at,
-                    None,
-                    now_str,
-                )
-            }
-            (OptionalFile::Missing, OptionalFile::Missing) => {
+            OptionalFile::Missing => {
                 let is_alive = raw.pid.is_some_and(|p| {
                     p > 0
                         && unsafe { libc::kill(p as libc::pid_t, 0) == 0 }

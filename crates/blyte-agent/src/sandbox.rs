@@ -1159,16 +1159,6 @@ pub fn conversation_profile_net(
     Ok(conversation_sandbox_net(root, allow_read, network)?.profile)
 }
 
-/// Returns the `--converse` sandbox profile allowing writes in the given open edit worktrees.
-pub fn conversation_profile_with_edits(
-    root: &Path,
-    allow_read: &[PathBuf],
-    network: bool,
-    edit_worktrees: &[PathBuf],
-) -> Result<Profile, String> {
-    Ok(conversation_sandbox_with_edits(root, allow_read, network, edit_worktrees)?.profile)
-}
-
 /// Builds the `--converse` sandbox profile including all currently open edit worktrees.
 pub fn conversation_profile_for_open_edits(
     root: &Path,
@@ -1456,8 +1446,9 @@ mod tests {
         let wt = tmp.path().join(".wt/E1");
         std::fs::create_dir_all(&wt).unwrap();
         let Profile::Seatbelt(sbpl) =
-            conversation_profile_with_edits(tmp.path(), &[], false, std::slice::from_ref(&wt))
+            conversation_sandbox_with_edits(tmp.path(), &[], false, std::slice::from_ref(&wt))
                 .unwrap()
+                .profile
         else {
             panic!("expected Seatbelt profile on macOS");
         };

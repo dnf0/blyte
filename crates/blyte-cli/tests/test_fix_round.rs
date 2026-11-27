@@ -552,9 +552,6 @@ fn unit_task_text_and_should_run_and_config() {
     .unwrap();
     let err = blyte_cli::config::load(d.path()).unwrap_err();
     assert!(err.contains("blyte.toml"), "{err}");
-
-    let rendered = blyte_cli::config::render(&["true".to_string()]);
-    assert!(rendered.contains("# fix_round = true"), "{rendered}");
 }
 
 #[test]
