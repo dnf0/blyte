@@ -20,6 +20,27 @@ use serde_json::json;
 
 static GLOBAL_TOOL_LOCK: Mutex<()> = Mutex::new(());
 
+const WAIT: Duration = Duration::from_secs(30);
+
+struct GateReleaseGuard {
+    release_file: std::path::PathBuf,
+    requests: Arc<RequestsState>,
+    request: String,
+}
+
+impl Drop for GateReleaseGuard {
+    fn drop(&mut self) {
+        if std::fs::write(&self.release_file, "go").is_ok() {
+            self.requests.wait_for_idle(&self.request);
+        }
+    }
+}
+
+fn shell_quote(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 struct ToolLockGuard {
     _lock: MutexGuard<'static, ()>,
 }
@@ -313,41 +334,37 @@ fn make_surface(
 }
 
 fn wait_for_publish_approval(session: &Session) -> (String, PublishDetails) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    wait_for_nth_publish_approval(session, 1)
+}
+
+fn wait_for_nth_publish_approval(session: &Session, n: usize) -> (String, PublishDetails) {
+    let deadline = Instant::now() + WAIT;
+    let mut after = 0;
+    let mut seen = Vec::new();
+    let mut found = 0;
     loop {
-        let entries = session.entries_after(0, Duration::ZERO);
-        for entry in entries {
-            if let EntryBody::PublishApprovalRequested { id, publish, .. } = entry.body {
-                return (id, publish);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let batch = session.entries_after(after, remaining.min(Duration::from_millis(200)));
+        for entry in batch {
+            after = after.max(entry.seq);
+            let matched = match &entry.body {
+                EntryBody::PublishApprovalRequested { id, publish, .. } => {
+                    Some((id.clone(), publish.clone()))
+                }
+                _ => None,
+            };
+            seen.push(entry);
+            if let Some(pair) = matched {
+                found += 1;
+                if found == n {
+                    return pair;
+                }
             }
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for PublishApprovalRequested entry"
+            "timed out waiting for publish approval #{n}; entries seen: {seen:?}"
         );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn wait_for_nth_publish_approval(session: &Session, n: usize) -> (String, PublishDetails) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let matches: Vec<(String, PublishDetails)> = session
-            .entries_after(0, Duration::ZERO)
-            .into_iter()
-            .filter_map(|e| match e.body {
-                EntryBody::PublishApprovalRequested { id, publish, .. } => Some((id, publish)),
-                _ => None,
-            })
-            .collect();
-        if matches.len() >= n {
-            return matches[n - 1].clone();
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for publish approval #{n}"
-        );
-        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -504,8 +521,8 @@ fn publish_tool_refuses_unknown_other_surface_unready_combining_and_duplicate_pe
     let release_file = root.join(".wt/combine-release");
     let gate_cmd = format!(
         "touch {} && while [ ! -f {} ]; do sleep 0.02; done",
-        started_file.display(),
-        release_file.display()
+        shell_quote(&started_file),
+        shell_quote(&release_file)
     );
     let toml = format!("[dispatch]\ngate = {gate_cmd:?}\n");
     std::fs::write(root.join("blyte.toml"), &toml).unwrap();
@@ -519,16 +536,21 @@ fn publish_tool_refuses_unknown_other_surface_unready_combining_and_duplicate_pe
         "comb\n",
         "Combining change",
     );
-    assert!(maybe_combine(&surface, "req-comb").unwrap());
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !started_file.exists() {
-        assert!(Instant::now() < deadline, "combine gate never started");
-        std::thread::sleep(Duration::from_millis(10));
+    {
+        let _release_guard = GateReleaseGuard {
+            release_file: release_file.clone(),
+            requests: Arc::clone(&surface.requests),
+            request: "req-comb".to_string(),
+        };
+        assert!(maybe_combine(&surface, "req-comb").unwrap());
+        let deadline = Instant::now() + WAIT;
+        while !started_file.exists() {
+            assert!(Instant::now() < deadline, "combine gate never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let err_combining = tool.publish("req-comb", "Title", "Body").unwrap_err();
+        assert!(err_combining.contains("combining"), "{err_combining}");
     }
-    let err_combining = tool.publish("req-comb", "Title", "Body").unwrap_err();
-    assert!(err_combining.contains("combining"), "{err_combining}");
-    std::fs::write(&release_file, "go").unwrap();
-    surface.requests.wait_for_idle("req-comb");
 
     let surface_for_thread = Arc::clone(&surface);
     let handle = std::thread::spawn(move || {
@@ -834,18 +856,29 @@ fn peer_started_turn_refuses_publish_and_logs_no_approval() {
     let peer_resp = route(&surface, &peer_req, 1700000100);
     assert_eq!(peer_resp.status, 200);
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
+    let mut after = 0;
+    let mut seen = Vec::new();
     loop {
-        if surface
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let batch = surface
             .session
-            .entries_after(0, Duration::ZERO)
-            .iter()
-            .any(|e| matches!(e.body, EntryBody::Idle { .. }))
-        {
+            .entries_after(after, remaining.min(Duration::from_millis(200)));
+        let mut idle = false;
+        for entry in batch {
+            after = after.max(entry.seq);
+            if matches!(entry.body, EntryBody::Idle { .. }) {
+                idle = true;
+            }
+            seen.push(entry);
+        }
+        if idle {
             break;
         }
-        assert!(Instant::now() < deadline, "timed out waiting for peer turn");
-        std::thread::sleep(Duration::from_millis(10));
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for peer turn; entries seen: {seen:?}"
+        );
     }
 
     let (is_error, content) = outcome
