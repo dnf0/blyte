@@ -70,6 +70,8 @@ pub enum EntryBody {
     Idle {
         turns: u32,
         cost_usd: Option<f64>,
+        seconds: Option<f64>,
+        first_output_seconds: Option<f64>,
     },
     ModelChanged {
         model: String,
@@ -143,6 +145,10 @@ enum EntryBodyWire {
     Idle {
         turns: u32,
         cost_usd: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seconds: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_output_seconds: Option<f64>,
     },
     ModelChanged {
         model: String,
@@ -223,7 +229,17 @@ impl From<EntryBody> for EntryBodyWire {
                 reason,
             },
             EntryBody::Error { message } => EntryBodyWire::Error { message },
-            EntryBody::Idle { turns, cost_usd } => EntryBodyWire::Idle { turns, cost_usd },
+            EntryBody::Idle {
+                turns,
+                cost_usd,
+                seconds,
+                first_output_seconds,
+            } => EntryBodyWire::Idle {
+                turns,
+                cost_usd,
+                seconds,
+                first_output_seconds,
+            },
             EntryBody::ModelChanged { model } => EntryBodyWire::ModelChanged { model },
             EntryBody::EffortChanged { effort } => EntryBodyWire::EffortChanged { effort },
             EntryBody::Decision { run, action, note } => {
@@ -323,7 +339,17 @@ impl From<EntryBodyWire> for EntryBody {
                 reason,
             },
             EntryBodyWire::Error { message } => EntryBody::Error { message },
-            EntryBodyWire::Idle { turns, cost_usd } => EntryBody::Idle { turns, cost_usd },
+            EntryBodyWire::Idle {
+                turns,
+                cost_usd,
+                seconds,
+                first_output_seconds,
+            } => EntryBody::Idle {
+                turns,
+                cost_usd,
+                seconds,
+                first_output_seconds,
+            },
             EntryBodyWire::ModelChanged { model } => EntryBody::ModelChanged { model },
             EntryBodyWire::EffortChanged { effort } => EntryBody::EffortChanged { effort },
             EntryBodyWire::Decision { run, action, note } => {
@@ -1061,6 +1087,7 @@ pub struct Session {
 struct TurnTotals {
     turns: u32,
     cost_usd: Option<f64>,
+    first_output: Option<Instant>,
 }
 
 impl Session {
@@ -1482,21 +1509,35 @@ fn worker_loop(mut runner: Box<dyn PromptRunner>, shared: Arc<Shared>) {
             }
         };
 
+        let started = Instant::now();
         call_activity_hook(&shared, Some(&msg.prompt));
 
         let totals = Mutex::new(TurnTotals {
             turns: 0,
             cost_usd: Some(0.0),
+            first_output: None,
         });
         let emit_shared = Arc::clone(&shared);
         let emit = |body: EntryBody| {
-            if let EntryBody::Turn { cost_usd, .. } = &body {
-                let mut t = totals.lock().unwrap_or_else(|e| e.into_inner());
-                t.turns += 1;
-                match (t.cost_usd, cost_usd) {
-                    (Some(acc), Some(c)) => t.cost_usd = Some(acc + c),
-                    _ => t.cost_usd = None,
+            match &body {
+                EntryBody::Turn { cost_usd, .. } => {
+                    let mut t = totals.lock().unwrap_or_else(|e| e.into_inner());
+                    t.turns += 1;
+                    match (t.cost_usd, cost_usd) {
+                        (Some(acc), Some(c)) => t.cost_usd = Some(acc + c),
+                        _ => t.cost_usd = None,
+                    }
+                    if t.first_output.is_none() {
+                        t.first_output = Some(Instant::now());
+                    }
                 }
+                EntryBody::ToolStarted { .. } => {
+                    let mut t = totals.lock().unwrap_or_else(|e| e.into_inner());
+                    if t.first_output.is_none() {
+                        t.first_output = Some(Instant::now());
+                    }
+                }
+                _ => {}
             }
             let mut state = emit_shared.lock_state();
             state.push_entry(body);
@@ -1510,9 +1551,9 @@ fn worker_loop(mut runner: Box<dyn PromptRunner>, shared: Arc<Shared>) {
 
         call_activity_hook(&shared, None);
 
-        let (turns, cost_usd) = {
+        let (turns, cost_usd, first_output) = {
             let t = totals.lock().unwrap_or_else(|e| e.into_inner());
-            (t.turns, t.cost_usd)
+            (t.turns, t.cost_usd, t.first_output)
         };
 
         let mut state = shared.lock_state();
@@ -1526,7 +1567,16 @@ fn worker_loop(mut runner: Box<dyn PromptRunner>, shared: Arc<Shared>) {
                 state.push_entry(EntryBody::Error { message });
             }
         }
-        state.push_entry(EntryBody::Idle { turns, cost_usd });
+        let finished = Instant::now();
+        let seconds = Some(round_tenth(finished.saturating_duration_since(started)));
+        let first_output_seconds =
+            first_output.map(|at| round_tenth(at.saturating_duration_since(started)));
+        state.push_entry(EntryBody::Idle {
+            turns,
+            cost_usd,
+            seconds,
+            first_output_seconds,
+        });
         state.busy = false;
         shared.log_cv.notify_all();
     }
@@ -1564,6 +1614,10 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     } else {
         "runner panicked".to_string()
     }
+}
+
+fn round_tenth(d: Duration) -> f64 {
+    (d.as_secs_f64() * 10.0).round() / 10.0
 }
 
 fn now_secs() -> u64 {

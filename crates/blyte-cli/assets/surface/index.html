@@ -3401,8 +3401,22 @@
           if (!hasOwn(entry, "cost_usd") || (entry.cost_usd !== null && (typeof entry.cost_usd !== "number" || !Number.isFinite(entry.cost_usd)))) {
             return renderEntryError(entry.seq, "idle entry missing or invalid field cost_usd");
           }
+          const hasSeconds = hasOwn(entry, "seconds") && entry.seconds !== null && entry.seconds !== undefined;
+          if (hasSeconds && (typeof entry.seconds !== "number" || !Number.isFinite(entry.seconds))) {
+            return renderEntryError(entry.seq, "idle entry invalid field seconds");
+          }
+          const hasFirstOutput = hasOwn(entry, "first_output_seconds") && entry.first_output_seconds !== null && entry.first_output_seconds !== undefined;
+          if (hasFirstOutput && (typeof entry.first_output_seconds !== "number" || !Number.isFinite(entry.first_output_seconds))) {
+            return renderEntryError(entry.seq, "idle entry invalid field first_output_seconds");
+          }
           const costStr = entry.cost_usd === null ? "cost not known" : "USD " + entry.cost_usd.toFixed(2);
-          const line = entry.turns + " turns · " + costStr;
+          let line = entry.turns + " turns · " + costStr;
+          if (hasSeconds) {
+            line += " · " + entry.seconds.toFixed(1) + " s";
+            if (hasFirstOutput) {
+              line += " (first output " + entry.first_output_seconds.toFixed(1) + " s)";
+            }
+          }
           return '<div class="entry entry-quiet" data-seq="' + seqAttr + '">' + escapeHtml(line) + '</div>';
         }
         case "model_changed": {

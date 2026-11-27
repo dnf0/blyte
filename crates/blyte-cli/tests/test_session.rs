@@ -191,7 +191,8 @@ fn entries_are_numbered_without_gaps() {
         entries[4].body,
         EntryBody::Idle {
             turns: 1,
-            cost_usd: Some(c)
+            cost_usd: Some(c),
+            ..
         } if (c - 0.01).abs() < 1e-12
     ));
 }
@@ -385,7 +386,8 @@ fn runner_error_becomes_error_then_idle() {
         entries[3].body,
         EntryBody::Idle {
             turns: 1,
-            cost_usd: Some(c)
+            cost_usd: Some(c),
+            ..
         } if (c - 0.005).abs() < 1e-12
     ));
 }
@@ -434,7 +436,8 @@ fn runner_panic_becomes_error_then_idle_and_the_next_prompt_runs() {
         all[5].body,
         EntryBody::Idle {
             turns: 1,
-            cost_usd: Some(c)
+            cost_usd: Some(c),
+            ..
         } if (c - 0.002).abs() < 1e-12
     ));
 
@@ -513,6 +516,7 @@ fn idle_sums_turn_costs() {
         EntryBody::Idle {
             turns,
             cost_usd: Some(total),
+            ..
         } => {
             assert_eq!(turns, 2);
             assert!((total - 0.04).abs() < 1e-12, "got {total}");
@@ -544,13 +548,14 @@ fn idle_cost_is_none_when_a_turn_has_no_price() {
     session.submit("missing price", Vec::new()).unwrap();
 
     let entries = wait_for_entries(&session, 4);
-    assert_eq!(
+    assert!(matches!(
         entries[3].body,
         EntryBody::Idle {
             turns: 2,
-            cost_usd: None
+            cost_usd: None,
+            ..
         }
-    );
+    ));
 }
 
 #[test]
@@ -1384,6 +1389,8 @@ fn a_cut_off_last_line_is_dropped_and_reported() {
         body: EntryBody::Idle {
             turns: 0,
             cost_usd: Some(0.0),
+            seconds: None,
+            first_output_seconds: None,
         },
     };
     let raw = format!(
@@ -1463,6 +1470,8 @@ fn a_bad_line_in_the_middle_stops_the_start_naming_the_line() {
         body: EntryBody::Idle {
             turns: 0,
             cost_usd: Some(0.0),
+            seconds: None,
+            first_output_seconds: None,
         },
     };
     let raw = format!(
@@ -1589,6 +1598,8 @@ fn a_complete_bad_last_line_stops_the_start() {
         body: EntryBody::Idle {
             turns: 0,
             cost_usd: Some(0.0),
+            seconds: None,
+            first_output_seconds: None,
         },
     };
     // The bad line ends in a newline, so it was written whole: not a cut-off write.
@@ -1701,6 +1712,8 @@ fn a_gap_in_the_saved_entries_is_shown_at_load() {
         body: EntryBody::Idle {
             turns: 0,
             cost_usd: Some(0.0),
+            seconds: None,
+            first_output_seconds: None,
         },
     };
     let e5 = Entry {
@@ -1709,6 +1722,8 @@ fn a_gap_in_the_saved_entries_is_shown_at_load() {
         body: EntryBody::Idle {
             turns: 1,
             cost_usd: Some(0.01),
+            seconds: None,
+            first_output_seconds: None,
         },
     };
     let l1 = serde_json::to_string(&e1).unwrap();
@@ -1790,6 +1805,8 @@ fn a_missing_first_entry_is_shown_at_load() {
         body: EntryBody::Idle {
             turns: 0,
             cost_usd: Some(0.0),
+            seconds: None,
+            first_output_seconds: None,
         },
     };
     let l2 = serde_json::to_string(&e2).unwrap();
@@ -1846,6 +1863,8 @@ fn entries_out_of_order_stop_the_start() {
         body: EntryBody::Idle {
             turns: 0,
             cost_usd: Some(0.0),
+            seconds: None,
+            first_output_seconds: None,
         },
     };
     let e3 = Entry {
@@ -1854,6 +1873,8 @@ fn entries_out_of_order_stop_the_start() {
         body: EntryBody::Idle {
             turns: 0,
             cost_usd: Some(0.0),
+            seconds: None,
+            first_output_seconds: None,
         },
     };
     let e2 = Entry {
@@ -1862,6 +1883,8 @@ fn entries_out_of_order_stop_the_start() {
         body: EntryBody::Idle {
             turns: 0,
             cost_usd: Some(0.0),
+            seconds: None,
+            first_output_seconds: None,
         },
     };
     let raw = format!(
@@ -1901,6 +1924,8 @@ fn a_repeated_seq_stops_the_start() {
         body: EntryBody::Idle {
             turns: 0,
             cost_usd: Some(0.0),
+            seconds: None,
+            first_output_seconds: None,
         },
     };
     let raw = format!(
@@ -1939,6 +1964,8 @@ fn seq_zero_stops_the_start() {
         body: EntryBody::Idle {
             turns: 0,
             cost_usd: Some(0.0),
+            seconds: None,
+            first_output_seconds: None,
         },
     };
     let raw = format!("{}\n", serde_json::to_string(&e0).unwrap());
@@ -1960,4 +1987,89 @@ fn seq_zero_stops_the_start() {
     assert!(err.contains("line 1"), "got: {err}");
     assert!(err.contains("seq 0 does not follow seq 0"), "got: {err}");
     assert_eq!(std::fs::read_to_string(&log_path).unwrap(), raw);
+}
+
+#[test]
+fn idle_entry_records_how_long_the_reply_took() {
+    let (runner, _) = ScriptedRunner::new(vec![
+        ScriptAction::Ok(vec![EntryBody::Turn {
+            n: 1,
+            text: "done".into(),
+            input_tokens: 100,
+            output_tokens: 50,
+            cost_usd: Some(0.01),
+        }]),
+        ScriptAction::Err {
+            emit: Vec::new(),
+            message: "no output".into(),
+        },
+    ]);
+
+    let session = Session::start(Box::new(runner), "gemini-4-neon".into());
+    session.submit("first", Vec::new()).unwrap();
+    let entries = wait_for_entries(&session, 3);
+    match entries[2].body {
+        EntryBody::Idle {
+            seconds: Some(s),
+            first_output_seconds: Some(f),
+            ..
+        } => {
+            assert!(s >= 0.0, "expected seconds >= 0.0, got {s}");
+            assert!(f >= 0.0, "expected first_output_seconds >= 0.0, got {f}");
+            assert!(
+                f <= s,
+                "expected first_output_seconds ({f}) <= seconds ({s})"
+            );
+        }
+        ref other => panic!("expected Idle with reply timings, got {other:?}"),
+    }
+
+    session.submit("second", Vec::new()).unwrap();
+    let all = wait_for_entries(&session, 6);
+    match all[5].body {
+        EntryBody::Idle {
+            seconds: Some(s),
+            first_output_seconds: None,
+            ..
+        } => {
+            assert!(s >= 0.0, "expected seconds >= 0.0, got {s}");
+        }
+        ref other => {
+            panic!("expected Idle with seconds and no first_output_seconds, got {other:?}")
+        }
+    }
+}
+
+#[test]
+fn idle_entry_without_times_still_reads() {
+    let line = r#"{"seq":1,"ts":1,"kind":"idle","turns":1,"cost_usd":0.01}"#;
+    let entry: Entry = serde_json::from_str(line).unwrap();
+    assert_eq!(
+        entry,
+        Entry {
+            seq: 1,
+            ts: 1,
+            body: EntryBody::Idle {
+                turns: 1,
+                cost_usd: Some(0.01),
+                seconds: None,
+                first_output_seconds: None,
+            },
+        }
+    );
+
+    let encoded: serde_json::Value = serde_json::to_value(&entry).unwrap();
+    let obj = encoded.as_object().unwrap();
+    assert!(!obj.contains_key("seconds"), "unexpected key in {encoded}");
+    assert!(
+        !obj.contains_key("first_output_seconds"),
+        "unexpected key in {encoded}"
+    );
+}
+
+#[test]
+fn surface_page_shows_reply_time() {
+    let html = include_str!("../assets/surface/index.html");
+    assert!(html.contains("first_output_seconds"));
+    assert!(html.contains("first output"));
 }
