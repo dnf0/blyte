@@ -252,6 +252,7 @@ fn start_scripted_surface(
         days: 14,
         name: Some(name.to_string()),
         resume: None,
+        open_in: blyte_cli::open_window::OpenIn::Browser,
     };
     let handle = std::thread::spawn(move || {
         let cfg = default_repl_config(repo_bg);
