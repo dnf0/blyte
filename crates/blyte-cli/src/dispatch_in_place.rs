@@ -108,6 +108,12 @@ pub fn in_place_outcome(
     }
 }
 
+pub fn unix_timestamp_secs(now: std::time::SystemTime) -> Result<u64, String> {
+    now.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|e| format!("system clock is before UNIX_EPOCH: {e}"))
+}
+
 struct FreshStartGuard {
     path: PathBuf,
     armed: bool,
@@ -283,10 +289,13 @@ pub fn run(args: &DispatchArgs) -> i32 {
         }
     }
 
-    let started_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let started_at = match unix_timestamp_secs(std::time::SystemTime::now()) {
+        Ok(secs) => secs,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
     let env_names: Vec<&String> = dispatch_cfg.env.keys().collect();
     let session = crate::usage_log::session_from(
         std::env::var("BLYTE_SESSION").ok(),
@@ -358,6 +367,7 @@ pub fn run(args: &DispatchArgs) -> i32 {
     };
 
     let append_log_header = is_restart.then_some("== restart");
+    let mut spawned = false;
     let run_res = run_implementer_pass(
         &impl_cfg,
         &log_path,
@@ -366,6 +376,7 @@ pub fn run(args: &DispatchArgs) -> i32 {
         &prompt,
         None,
         |child_pid| {
+            spawned = true;
             start_guard.armed = false;
             start_record["pid"] = serde_json::json!(child_pid);
             let _ = write_start_record(&start_path, &start_record);
@@ -377,6 +388,14 @@ pub fn run(args: &DispatchArgs) -> i32 {
             Ok(r) => r,
             Err(err_msg) => pass_report_from_error(err_msg, &args.sandbox),
         },
+        Err(err_msg) if !spawned => {
+            if err_msg.starts_with("error") {
+                eprintln!("{err_msg}");
+            } else {
+                eprintln!("error: {err_msg}");
+            }
+            return 2;
+        }
         Err(err_msg) => pass_report_from_error(err_msg, &args.sandbox),
     };
 

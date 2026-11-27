@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use blyte_agent::sandbox;
 use blyte_cli::dispatch::exit_code;
 use blyte_cli::dispatch_in_place::{
-    in_place_outcome, records_dir_for, wrap_in_place_task, IN_PLACE_RULES,
+    in_place_outcome, records_dir_for, unix_timestamp_secs, wrap_in_place_task, IN_PLACE_RULES,
 };
 
 fn sandbox_can_apply() -> Result<(), &'static str> {
@@ -681,4 +681,199 @@ fn outcome_table_and_in_place_rules() {
     assert!(wrapped.ends_with(IN_PLACE_RULES));
     assert!(IN_PLACE_RULES.contains("write and edit"));
     assert!(IN_PLACE_RULES.contains("do not commit"));
+}
+
+#[test]
+fn unix_timestamp_secs_rejects_pre_epoch_time() {
+    let post_epoch = std::time::UNIX_EPOCH + std::time::Duration::from_secs(12345);
+    assert_eq!(unix_timestamp_secs(post_epoch), Ok(12345));
+
+    let pre_epoch = std::time::UNIX_EPOCH
+        .checked_sub(std::time::Duration::from_secs(1))
+        .expect("pre-epoch SystemTime");
+    let err = unix_timestamp_secs(pre_epoch).unwrap_err();
+    assert!(
+        err.contains("UNIX_EPOCH"),
+        "expected error naming UNIX_EPOCH, got: {err}"
+    );
+}
+
+#[test]
+fn pre_spawn_failure_removes_fresh_start_record_and_allows_reuse() {
+    let env = TestEnv::new();
+    let store = env.run_store();
+    std::fs::create_dir_all(store.join("P1.log")).unwrap();
+
+    let out = env.blyte(&["dispatch", "P1", env.task_file.to_str().unwrap()], None);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("error"),
+        "expected error on stderr, got: {stderr}"
+    );
+    assert!(
+        !store.join("P1.json").exists(),
+        "pre-spawn failure must not write summary record"
+    );
+    assert!(
+        !store.join("P1.start.json").exists(),
+        "pre-spawn failure must clean up fresh start record"
+    );
+
+    std::fs::write(store.join("R2.start.json"), "{\"id\":\"R2\"}\n").unwrap();
+    std::fs::create_dir_all(store.join("R2.log")).unwrap();
+    let restart_out = env.blyte(&["dispatch", "R2", env.task_file.to_str().unwrap()], None);
+    assert_eq!(restart_out.status.code(), Some(2));
+    assert!(
+        !store.join("R2.json").exists(),
+        "pre-spawn failure on restart must not write summary record"
+    );
+    assert!(
+        store.join("R2.start.json").exists(),
+        "pre-spawn failure on restart must preserve existing start record"
+    );
+
+    if let Err(reason) = sandbox_can_apply() {
+        eprintln!("skipping reuse dispatch part: {reason}");
+        return;
+    }
+
+    std::fs::remove_dir(store.join("P1.log")).unwrap();
+    std::fs::write(env.folder.join("a.txt"), "before\n").unwrap();
+    let port = start_scripted_server(vec![
+        write_tool_turn("a.txt", "after\n"),
+        stop_turn("reused P1"),
+    ]);
+    let reused = env.blyte(
+        &["dispatch", "P1", env.task_file.to_str().unwrap()],
+        Some(port),
+    );
+    assert_eq!(
+        reused.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&reused.stdout),
+        String::from_utf8_lossy(&reused.stderr)
+    );
+    let summary: serde_json::Value = serde_json::from_slice(&reused.stdout).expect("JSON summary");
+    assert_eq!(summary["outcome"], "finished");
+}
+
+#[test]
+fn gate_failed_leaves_in_place_edits_recorded_without_rollback() {
+    if let Err(reason) = sandbox_can_apply() {
+        eprintln!("skipping gate_failed_leaves_in_place_edits_recorded_without_rollback: {reason}");
+        return;
+    }
+
+    let env = TestEnv::new();
+    std::fs::write(env.folder.join("a.txt"), "old line\n").unwrap();
+    let port = start_scripted_server(vec![
+        write_tool_turn("a.txt", "edited line\n"),
+        stop_turn("updated a.txt"),
+    ]);
+
+    let out = env.blyte(
+        &[
+            "dispatch",
+            "G1",
+            env.task_file.to_str().unwrap(),
+            "--gate",
+            "false",
+        ],
+        Some(port),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(exit_code("gate_failed")),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON summary");
+    assert_eq!(summary["outcome"], "gate_failed");
+    assert_eq!(summary["changed_files"], serde_json::json!(["a.txt"]));
+
+    assert_eq!(
+        std::fs::read_to_string(env.folder.join("a.txt")).unwrap(),
+        "edited line\n",
+        "in-place edit must not be rolled back on gate failure"
+    );
+
+    let store = env.run_store();
+    assert_eq!(
+        std::fs::read_to_string(store.join("G1.before").join("a.txt")).unwrap(),
+        "old line\n"
+    );
+    let diff = std::fs::read_to_string(store.join("G1.diff")).unwrap();
+    assert!(diff.contains("-old line"), "diff missing old line: {diff}");
+    assert!(
+        diff.contains("+edited line"),
+        "diff missing edited line: {diff}"
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(store.join("G1.report.json")).unwrap())
+            .unwrap();
+    assert_eq!(report["outcome"], "gate_failed");
+    assert_eq!(report["rollbacks"], 0);
+
+    let status = env.blyte(&["status", "G1"], None);
+    assert_eq!(status.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&status.stdout).contains("outcome: gate_failed"));
+}
+
+#[test]
+fn budget_exhausted_leaves_in_place_edits_recorded_without_rollback() {
+    if let Err(reason) = sandbox_can_apply() {
+        eprintln!(
+            "skipping budget_exhausted_leaves_in_place_edits_recorded_without_rollback: {reason}"
+        );
+        return;
+    }
+
+    let env = TestEnv::new();
+    std::fs::write(env.folder.join("a.txt"), "old line\n").unwrap();
+    let port = start_scripted_server(vec![write_tool_turn("a.txt", "partial edit\n")]);
+
+    let out = env.blyte(
+        &[
+            "dispatch",
+            "B1",
+            env.task_file.to_str().unwrap(),
+            "--max-turns",
+            "1",
+        ],
+        Some(port),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(exit_code("budget_exhausted")),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON summary");
+    assert_eq!(summary["outcome"], "budget_exhausted");
+    assert_eq!(summary["changed_files"], serde_json::json!(["a.txt"]));
+
+    assert_eq!(
+        std::fs::read_to_string(env.folder.join("a.txt")).unwrap(),
+        "partial edit\n",
+        "in-place edit must not be rolled back on budget exhaustion"
+    );
+
+    let store = env.run_store();
+    let diff = std::fs::read_to_string(store.join("B1.diff")).unwrap();
+    assert!(diff.contains("-old line"), "diff missing old line: {diff}");
+    assert!(
+        diff.contains("+partial edit"),
+        "diff missing partial edit: {diff}"
+    );
 }
