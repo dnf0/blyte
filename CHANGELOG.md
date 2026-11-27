@@ -1,3 +1,9 @@
+## v0.68.3 (2026-11-27)
+
+### Fix
+
+- review of a research run, a quieter surface, reply times and an Activity tab (#442)
+
 ## v0.68.2 (2026-11-27)
 
 ### Refactor
