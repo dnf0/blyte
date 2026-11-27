@@ -1359,19 +1359,34 @@ fn resolve_main_checkout(worktree_root: &Path) -> Result<PathBuf, String> {
     };
     let git_dir_path = PathBuf::from(git_dir.trim());
     let common_dir_path = PathBuf::from(common_dir.trim());
-    let same_git_dir = match (git_dir_path.canonicalize(), common_dir_path.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => git_dir_path == common_dir_path,
-    };
-    if same_git_dir {
-        return Ok(worktree_root.to_path_buf());
+    let git_dir_canon = git_dir_path
+        .canonicalize()
+        .map_err(|e| format!("cannot canonicalize {}: {e}", git_dir_path.display()))?;
+    let common_dir_canon = common_dir_path
+        .canonicalize()
+        .map_err(|e| format!("cannot canonicalize {}: {e}", common_dir_path.display()))?;
+    if git_dir_canon == common_dir_canon {
+        return worktree_root
+            .canonicalize()
+            .map_err(|e| format!("cannot canonicalize {}: {e}", worktree_root.display()));
     }
-    crate::config::main_checkout(worktree_root).ok_or_else(|| {
+    let main = crate::config::main_checkout(worktree_root).ok_or_else(|| {
         format!(
             "cannot find the main checkout of {}",
             worktree_root.display()
         )
-    })
+    })?;
+    main.canonicalize()
+        .map_err(|e| format!("cannot canonicalize {}: {e}", main.display()))
+}
+
+pub(crate) fn resolve_folder(folder: &Path) -> Result<PathBuf, String> {
+    match find_git_toplevel(folder)? {
+        GitToplevel::Repository(worktree_root) => resolve_main_checkout(&worktree_root),
+        GitToplevel::NotARepository => folder
+            .canonicalize()
+            .map_err(|e| format!("cannot canonicalize {}: {e}", folder.display())),
+    }
 }
 
 fn current_branch(main_checkout: &Path) -> Result<Option<String>, String> {

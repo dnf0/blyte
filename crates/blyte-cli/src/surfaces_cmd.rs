@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::session::{Entry, EntryBody};
 use crate::surface_dir::{is_running, list_records_for_root};
@@ -18,65 +18,6 @@ pub struct StoppedSurface {
     pub name: String,
     pub last_used: u64,
     pub last_message: Option<String>,
-}
-
-fn resolve_folder(folder: &Path) -> Result<PathBuf, String> {
-    if !crate::serve::is_repository(folder)? {
-        return folder
-            .canonicalize()
-            .map_err(|e| format!("cannot canonicalize {}: {e}", folder.display()));
-    }
-    if let Some(main) = crate::config::main_checkout(folder) {
-        return Ok(main);
-    }
-    if folder.join(".git").is_dir() {
-        return folder
-            .canonicalize()
-            .map_err(|e| format!("cannot canonicalize {}: {e}", folder.display()));
-    }
-    let out = std::process::Command::new("git")
-        .args([
-            "rev-parse",
-            "--path-format=absolute",
-            "--show-toplevel",
-            "--git-dir",
-            "--git-common-dir",
-        ])
-        .current_dir(folder)
-        .output()
-        .map_err(|e| format!("failed to run git rev-parse: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "cannot find the main checkout of {}",
-            folder.display()
-        ));
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut lines = text.lines();
-    let (Some(toplevel), Some(git_dir), Some(common_dir)) =
-        (lines.next(), lines.next(), lines.next())
-    else {
-        return Err(format!(
-            "cannot find the main checkout of {}",
-            folder.display()
-        ));
-    };
-    let worktree_root = PathBuf::from(toplevel.trim());
-    let git_dir_path = PathBuf::from(git_dir.trim());
-    let common_dir_path = PathBuf::from(common_dir.trim());
-    let same_git_dir = match (git_dir_path.canonicalize(), common_dir_path.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => git_dir_path == common_dir_path,
-    };
-    if same_git_dir {
-        return Ok(worktree_root);
-    }
-    crate::config::main_checkout(&worktree_root).ok_or_else(|| {
-        format!(
-            "cannot find the main checkout of {}",
-            worktree_root.display()
-        )
-    })
 }
 
 fn scan_entries_summary(path: &Path) -> Result<(Option<u64>, Option<String>), String> {
@@ -158,7 +99,7 @@ fn stopped_surfaces_for_root(root: &Path, state_dir: &Path) -> Result<Vec<Stoppe
 
 /// Collect stopped surfaces belonging to `folder`, newest first by `last_used`, then by `id`.
 pub fn stopped_surfaces(folder: &Path, state_dir: &Path) -> Result<Vec<StoppedSurface>, String> {
-    let root = resolve_folder(folder)?;
+    let root = crate::serve::resolve_folder(folder)?;
     stopped_surfaces_for_root(&root, state_dir)
 }
 
@@ -242,7 +183,7 @@ pub fn run_stopped_surfaces(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
-    let root = match resolve_folder(folder) {
+    let root = match crate::serve::resolve_folder(folder) {
         Ok(root) => root,
         Err(e) => {
             let _ = writeln!(err, "blyte: {e}");
