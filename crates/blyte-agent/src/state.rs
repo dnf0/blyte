@@ -45,6 +45,9 @@ pub struct Runtime {
     /// conversation, so it stays identical and its cache holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_goal: Option<String>,
+    /// Extra parts (such as images) attached to the next user prompt only; never serialised.
+    #[serde(skip)]
+    pub pending_user_parts: Vec<blyte_provider::UserPart>,
 }
 
 /// Execution state across two regions: [`Brief`] and [`Runtime`].

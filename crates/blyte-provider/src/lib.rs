@@ -282,10 +282,39 @@ pub struct Request {
     pub timeout: Option<std::time::Duration>,
 }
 
+mod arc_str_serde {
+    use std::sync::Arc;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &Arc<str>, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(v)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Arc<str>, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(Arc::from(s))
+    }
+}
+
+/// One part of a multipart user message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum UserPart {
+    Text(String),
+    /// An image: its MIME type and its bytes, base64-encoded (standard alphabet, padded).
+    Image {
+        mime_type: String,
+        #[serde(with = "arc_str_serde")]
+        data: std::sync::Arc<str>,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Message {
     /// Text from the user or runtime.
     User(String),
+    /// Multipart user content, such as text alongside images.
+    UserParts(Vec<UserPart>),
     /// The model's own prior text.
     Assistant(String),
     /// The model asked to call a tool.
@@ -310,6 +339,27 @@ pub enum Message {
         content: String,
         is_error: bool,
     },
+}
+
+impl Message {
+    /// Returns the text of a `User` message, or the `Text` parts of a `UserParts` message joined
+    /// with `\n`; `None` for non-user messages.
+    pub fn user_text(&self) -> Option<String> {
+        match self {
+            Message::User(t) => Some(t.clone()),
+            Message::UserParts(parts) => Some(
+                parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        UserPart::Text(t) => Some(t.as_str()),
+                        UserPart::Image { .. } => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        }
+    }
 }
 
 /// What a model turn produced. A turn yields text, tool calls, or both.
@@ -500,6 +550,32 @@ mod tests {
         assert_eq!(utc_date_from_epoch_secs(0), (1970, 1, 1));
         assert_eq!(utc_date_from_epoch_secs(1_796_083_199), (2026, 11, 30));
         assert_eq!(utc_date_from_epoch_secs(1_796_083_200), (2026, 12, 1));
+    }
+
+    #[test]
+    fn test_message_user_text() {
+        assert_eq!(Message::User("hi".into()).user_text(), Some("hi".into()));
+        assert_eq!(
+            Message::UserParts(vec![
+                UserPart::Text("first".into()),
+                UserPart::Image {
+                    mime_type: "image/png".into(),
+                    data: std::sync::Arc::from("QUJD"),
+                },
+                UserPart::Text("second".into()),
+            ])
+            .user_text(),
+            Some("first\nsecond".into())
+        );
+        assert_eq!(
+            Message::UserParts(vec![UserPart::Image {
+                mime_type: "image/png".into(),
+                data: std::sync::Arc::from("QUJD"),
+            }])
+            .user_text(),
+            Some(String::new())
+        );
+        assert_eq!(Message::Assistant("hi".into()).user_text(), None);
     }
 }
 

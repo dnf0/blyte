@@ -152,6 +152,17 @@ fn parse_json_object(body: &[u8]) -> Result<serde_json::Map<String, serde_json::
         .ok_or_else(|| json_error(400, "request body must be a JSON object"))
 }
 
+fn handle_surfaces(surface: &Surface) -> Response {
+    let registry_dir = match crate::surface_registry::registry_dir() {
+        Ok(dir) => dir,
+        Err(e) => return json_error(500, e),
+    };
+    match crate::surfaces_cmd::surfaces_payload(&registry_dir, &surface.surface_id) {
+        Ok(payload) => Response::json(200, &payload),
+        Err(e) => json_error(500, e),
+    }
+}
+
 fn health_response(surface: &Surface) -> Response {
     Response::json(
         200,
@@ -237,8 +248,25 @@ fn handle_post_message(surface: &Surface, req: &Request) -> Response {
         Ok(o) => o,
         Err(resp) => return resp,
     };
+    let attachment_ids: Vec<String> = match obj.get("attachments") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(arr)) => {
+            let mut ids = Vec::with_capacity(arr.len());
+            for item in arr {
+                match item.as_str() {
+                    Some(s) => ids.push(s.to_string()),
+                    None => {
+                        return json_error(400, "field attachments must be an array of strings");
+                    }
+                }
+            }
+            ids
+        }
+        Some(_) => return json_error(400, "field attachments must be an array of strings"),
+    };
     let text = match obj.get("text") {
         Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Null) | None if !attachment_ids.is_empty() => String::new(),
         Some(_) => return json_error(400, "field text must be a string"),
         None => return json_error(400, "missing required field: text"),
     };
@@ -256,8 +284,22 @@ fn handle_post_message(surface: &Surface, req: &Request) -> Response {
         }
         Some(_) => return json_error(400, "field reports must be an array of strings"),
     };
+    let pastes: Vec<crate::session::Paste> = match obj.get("pastes") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(arr)) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for item in arr {
+                match serde_json::from_value::<crate::session::Paste>(item.clone()) {
+                    Ok(p) => out.push(p),
+                    Err(e) => return json_error(400, format!("invalid paste entry: {e}")),
+                }
+            }
+            out
+        }
+        Some(_) => return json_error(400, "field pastes must be an array"),
+    };
 
-    let mut attachments = Vec::with_capacity(report_ids.len());
+    let mut report_attachments = Vec::with_capacity(report_ids.len());
     for id in report_ids {
         let path = surface.root.join(".wt").join(format!("{id}.report.md"));
         if !is_valid_run_id(&id) {
@@ -267,7 +309,7 @@ fn handle_post_message(surface: &Surface, req: &Request) -> Response {
             );
         }
         match std::fs::read_to_string(&path) {
-            Ok(body) => attachments.push(Attachment {
+            Ok(body) => report_attachments.push(Attachment {
                 run: id,
                 text: body,
             }),
@@ -283,9 +325,72 @@ fn handle_post_message(surface: &Surface, req: &Request) -> Response {
         }
     }
 
-    match surface.session.submit(&text, attachments) {
+    let mut file_attachments = Vec::with_capacity(attachment_ids.len());
+    if !attachment_ids.is_empty() {
+        let Some(record_dir) = surface.session.attachments_root() else {
+            return json_error(500, "attachments directory is not configured");
+        };
+        for id in attachment_ids {
+            match crate::attachments::load_with_path(&record_dir, &id) {
+                Ok((meta, path, _)) => {
+                    file_attachments.push(crate::session::QueuedAttachment { meta, path })
+                }
+                Err(e) => return json_error(400, e),
+            }
+        }
+    }
+
+    match surface.session.submit_with_attachments(
+        &text,
+        report_attachments,
+        file_attachments,
+        pastes,
+    ) {
         Ok(seq) => Response::json(200, &serde_json::json!({ "seq": seq })),
         Err(e) => json_error(400, e),
+    }
+}
+
+fn handle_post_attachment(surface: &Surface, req: &Request) -> Response {
+    let Some(raw_name) = req
+        .query_value("name")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return json_error(400, "missing required query parameter: name");
+    };
+    if req.body.len() > crate::attachments::MAX_ATTACHMENT_BYTES {
+        return Response::text(
+            413,
+            &format!("{raw_name} is larger than the 10 MiB limit for one file"),
+        );
+    }
+    if req.body.is_empty() {
+        return json_error(400, format!("{raw_name} is empty"));
+    }
+    let Some(record_dir) = surface.session.attachments_root() else {
+        return json_error(500, "attachments directory is not configured");
+    };
+    match crate::attachments::store(&record_dir, raw_name, &req.body) {
+        Ok(meta) => match serde_json::to_value(&meta) {
+            Ok(v) => Response::json(200, &v),
+            Err(e) => json_error(500, format!("failed to serialise attachment metadata: {e}")),
+        },
+        Err(e) => json_error(400, e),
+    }
+}
+
+fn handle_get_attachment(surface: &Surface, id: &str) -> Response {
+    let Some(record_dir) = surface.session.attachments_root() else {
+        return json_error(500, "attachments directory is not configured");
+    };
+    match crate::attachments::load(&record_dir, id) {
+        Ok((_meta, bytes)) => {
+            let content_type =
+                crate::attachments::detect_image(&bytes).unwrap_or("application/octet-stream");
+            Response::bytes(200, content_type, bytes)
+        }
+        Err(e) => json_error(404, e),
     }
 }
 
@@ -1019,11 +1124,23 @@ pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
     }
 
     match req.path.as_str() {
+        "/api/surfaces" => {
+            if req.method != "GET" {
+                return method_not_allowed(req);
+            }
+            handle_surfaces(surface)
+        }
         "/api/session/messages" => {
             if req.method != "POST" {
                 return method_not_allowed(req);
             }
             handle_post_message(surface, req)
+        }
+        "/api/session/attachments" => {
+            if req.method != "POST" {
+                return method_not_allowed(req);
+            }
+            handle_post_attachment(surface, req)
         }
         "/api/session/model" => {
             if req.method != "POST" {
@@ -1044,6 +1161,14 @@ pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
             handle_runs_changed(surface)
         }
         path => {
+            if let Some(id) = path.strip_prefix("/api/session/attachments/") {
+                if !id.is_empty() && !id.contains('/') {
+                    if req.method != "GET" {
+                        return method_not_allowed(req);
+                    }
+                    return handle_get_attachment(surface, id);
+                }
+            }
             if let Some(id) = path.strip_prefix("/api/session/approvals/") {
                 if !id.is_empty() && !id.contains('/') {
                     if req.method != "POST" {
@@ -1501,6 +1626,13 @@ pub fn run_with_hooks(
     )
 }
 
+pub type RunnerFactory = Box<
+    dyn FnOnce(
+        &ReplConfig,
+        Arc<dyn blyte_agent::approval::Approver>,
+    ) -> Result<(Box<dyn PromptRunner>, Option<PathBuf>), String>,
+>;
+
 pub fn run_with_runner(
     args: &SurfaceArgs,
     config: ReplConfig,
@@ -1517,7 +1649,27 @@ pub fn run_with_runner(
         err,
         opener,
         move || stop.load(Ordering::Relaxed),
-        Some(runner),
+        Some(Box::new(|_, _| Ok((runner, None)))),
+    )
+}
+
+pub fn run_with_runner_factory(
+    args: &SurfaceArgs,
+    config: ReplConfig,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    opener: &mut dyn FnMut(&str),
+    stop: Arc<AtomicBool>,
+    factory: RunnerFactory,
+) -> i32 {
+    run_inner(
+        args,
+        config,
+        out,
+        err,
+        opener,
+        move || stop.load(Ordering::Relaxed),
+        Some(factory),
     )
 }
 
@@ -1595,7 +1747,7 @@ fn run_inner<S>(
     err: &mut dyn Write,
     opener: &mut dyn FnMut(&str),
     should_stop: S,
-    custom_runner: Option<Box<dyn PromptRunner>>,
+    custom_runner: Option<RunnerFactory>,
 ) -> i32
 where
     S: Fn() -> bool,
@@ -1894,6 +2046,21 @@ where
         let _ = writeln!(err, "blyte: {e}");
         return 1;
     }
+    let attachments_dir = match prepare_attachments_dir(&surface_record_dir) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            return 1;
+        }
+    };
+    let mut read_roots = blyte_agent::tools::read_roots();
+    if !read_roots.iter().any(|p| p == &attachments_dir) {
+        read_roots.push(attachments_dir.clone());
+        blyte_agent::tools::set_read_roots(read_roots);
+    }
+    if !config.allow_read.iter().any(|p| p == &attachments_dir) {
+        config.allow_read.push(attachments_dir);
+    }
     let registry_entry = crate::surface_registry::RegistryEntry {
         id: surface_id.clone(),
         name: surface_name.clone(),
@@ -1925,7 +2092,11 @@ where
     let session =
         match Session::try_start_with_log_io(model, Some(entries_log_path), err, |approver| {
             match custom_runner {
-                Some(r) => Ok(r),
+                Some(factory) => {
+                    let (runner, tmpdir) = factory(&config, approver)?;
+                    _private_tmp_guard = tmpdir.map(|path| PrivateTmpDirGuard { path });
+                    Ok(runner)
+                }
                 None => {
                     let runner = AgentRunner::try_new(&config, approver)?;
                     _private_tmp_guard = runner.private_tmpdir().map(|path| PrivateTmpDirGuard {
@@ -2026,5 +2197,64 @@ where
             let _ = writeln!(err, "blyte: server error: {e}");
             1
         }
+    }
+}
+
+fn canonicalize_attachments_dir(attachments_dir: &Path) -> Result<PathBuf, String> {
+    std::fs::canonicalize(attachments_dir).map_err(|e| {
+        format!(
+            "failed to canonicalize attachments directory {}: {e}",
+            attachments_dir.display()
+        )
+    })
+}
+
+fn prepare_attachments_dir(surface_record_dir: &Path) -> Result<PathBuf, String> {
+    let attachments_dir = crate::attachments::attachments_dir(surface_record_dir);
+    std::fs::create_dir_all(&attachments_dir)
+        .map_err(|e| format!("failed to create {}: {e}", attachments_dir.display()))?;
+    canonicalize_attachments_dir(&attachments_dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonicalize_attachments_dir_errors_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist").join("attachments");
+        let err = canonicalize_attachments_dir(&missing).unwrap_err();
+        assert!(
+            err.contains(&missing.display().to_string()),
+            "expected error to name missing path, got: {err}"
+        );
+        assert!(err.contains("canonicalize"), "unexpected error: {err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonicalize_attachments_dir_errors_on_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let dangling = dir.path().join("attachments");
+        std::os::unix::fs::symlink(dir.path().join("missing-target"), &dangling).unwrap();
+        let err = canonicalize_attachments_dir(&dangling).unwrap_err();
+        assert!(
+            err.contains(&dangling.display().to_string()),
+            "expected error to name symlink path, got: {err}"
+        );
+        assert!(err.contains("canonicalize"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn prepare_attachments_dir_errors_when_attachments_path_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = crate::attachments::attachments_dir(dir.path());
+        std::fs::write(&blocker, b"not a dir").unwrap();
+        let err = prepare_attachments_dir(dir.path()).unwrap_err();
+        assert!(
+            err.contains(&blocker.display().to_string()),
+            "expected error to name path, got: {err}"
+        );
     }
 }

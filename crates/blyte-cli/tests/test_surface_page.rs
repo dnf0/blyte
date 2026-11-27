@@ -2597,7 +2597,7 @@ applyLogEntries([
   { seq: 21, ts, kind: "turn", n: 1, text: "You are welcome.", input_tokens: 5, output_tokens: 5, cost_usd: 0.0 },
   { seq: 22, ts, kind: "idle", turns: 1, cost_usd: 0.0, seconds: 0.4 },
 ]);
-assert.strictEqual(
+  assert.strictEqual(
   threadEl.children.filter(c => c.classList.contains("activity-summary")).length,
   1
 );
@@ -2765,6 +2765,658 @@ fn post_undo_records_error_and_closes_confirm_on_network_failure() {
   process.exit(1);
 });
 "##
+    );
+    run_surface_script(&harness);
+}
+
+#[test]
+fn page_supports_attachments_and_paste_markers() {
+    let html = load_surface_html();
+    for needle in [
+        "/api/session/attachments",
+        "function pasteMarker(",
+        "function needsPasteMarker(",
+        "function imageMarker(",
+        "addEventListener(\"drop\"",
+        "addEventListener(\"paste\"",
+    ] {
+        assert!(html.contains(needle), "surface page must contain {needle}");
+    }
+}
+
+#[test]
+fn paste_and_image_marker_functions_follow_contract() {
+    let harness = r#"
+const assert = require("node:assert");
+
+const fourLinesOfTen = "1234567890\n1234567890\n1234567890\n1234567890";
+assert.strictEqual(needsPasteMarker(fourLinesOfTen), false);
+assert.strictEqual(needsPasteMarker("a\nb\nc\nd\ne"), true);
+assert.strictEqual(needsPasteMarker("a".repeat(800)), false);
+assert.strictEqual(needsPasteMarker("a".repeat(801)), true);
+assert.strictEqual(pasteMarker(1, "a\nb\nc\nd\ne"), "[Pasted text #1 +5 lines]");
+assert.strictEqual(imageMarker(1), "[Image #1]");
+assert.strictEqual(imageMarker(2), "[Image #2]");
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn drop_paste_upload_chips_and_submit_flow() {
+    let harness = r#"
+const assert = require("node:assert");
+
+(async () => {
+  const elements = {};
+  const listeners = new Map();
+  function makeStub(id) {
+    const classes = new Set();
+    const el = {
+      id,
+      value: "",
+      selectionStart: 0,
+      selectionEnd: 0,
+      hidden: false,
+      disabled: false,
+      innerHTML: "",
+      textContent: "",
+      classList: {
+        toggle(name, force) {
+          if (force) classes.add(name);
+          else classes.delete(name);
+        },
+        add(name) { classes.add(name); },
+        remove(name) { classes.delete(name); },
+        contains(name) { return classes.has(name); },
+      },
+      setSelectionRange(start, end) {
+        this.selectionStart = start;
+        this.selectionEnd = end;
+      },
+      addEventListener(type, fn) {
+        const key = id + ":" + type;
+        if (!listeners.has(key)) listeners.set(key, []);
+        listeners.get(key).push(fn);
+      },
+      querySelector() { return null; },
+      querySelectorAll() { return []; },
+    };
+    return el;
+  }
+
+  const docListeners = new Map();
+  global.window = {
+    addEventListener() {},
+  };
+  global.document = {
+    getElementById(id) {
+      if (!elements[id]) elements[id] = makeStub(id);
+      return elements[id];
+    },
+    addEventListener(type, fn) {
+      if (!docListeners.has(type)) docListeners.set(type, []);
+      docListeners.get(type).push(fn);
+    },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+  };
+
+  const calls = [];
+  global.fetch = async (url, options) => {
+    calls.push({ url, options });
+    if (url.startsWith("/api/session/attachments?name=huge.png")) {
+      return {
+        ok: false,
+        status: 413,
+        async text() { return "huge.png is larger than the 10 MiB limit for one file"; },
+      };
+    }
+    if (url.startsWith("/api/session/attachments?name=shot.png")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { id: "a1", name: "shot.png", mime_type: "image/png", size: 2048, image: true };
+        },
+      };
+    }
+    if (url.startsWith("/api/session/attachments?name=notes.txt")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { id: "a2", name: "notes.txt", mime_type: "application/octet-stream", size: 512, image: false };
+        },
+      };
+    }
+    if (url === "/api/session/messages") {
+      return {
+        ok: true,
+        status: 200,
+        async json() { return { seq: 11 }; },
+      };
+    }
+    throw new Error("unexpected url: " + url);
+  };
+
+  surfaceToken = "secret-token";
+  bindEvents();
+
+  const conv = document.getElementById("conversation");
+  const dragEnterHandlers = docListeners.get("dragenter") || [];
+  assert.ok(dragEnterHandlers.length > 0);
+  let dragPrevented = false;
+  dragEnterHandlers[0]({
+    dataTransfer: { types: ["Files"] },
+    preventDefault() { dragPrevented = true; },
+  });
+  assert.strictEqual(dragPrevented, true);
+  assert.strictEqual(conv.classList.contains("drop-active"), true);
+
+  const dropHandlers = docListeners.get("drop") || [];
+  assert.ok(dropHandlers.length > 0);
+  let dropPrevented = false;
+  dropHandlers[0]({
+    dataTransfer: {
+      files: [
+        { name: "shot.png", type: "image/png" },
+        { name: "huge.png", type: "image/png" },
+        { name: "notes.txt", type: "text/plain" },
+      ],
+    },
+    preventDefault() { dropPrevented = true; },
+  });
+  assert.strictEqual(dropPrevented, true);
+  assert.strictEqual(conv.classList.contains("drop-active"), false);
+  await new Promise(resolve => setTimeout(resolve, 20));
+
+  assert.strictEqual(calls[0].options.headers["X-Blyte-Token"], "secret-token");
+  const chipsEl = document.getElementById("attached-reports");
+  assert.strictEqual(chipsEl.hidden, false);
+  assert.ok(chipsEl.innerHTML.includes("[Image #1]"), chipsEl.innerHTML);
+  assert.ok(chipsEl.innerHTML.includes("[File notes.txt]"), chipsEl.innerHTML);
+  assert.ok(!chipsEl.innerHTML.includes("huge.png"), chipsEl.innerHTML);
+
+  const errEl = document.getElementById("composer-error");
+  assert.strictEqual(errEl.hidden, false);
+  assert.ok(errEl.textContent.includes("10 MiB limit"), errEl.textContent);
+
+  const input = document.getElementById("conversation-input");
+  input.value = "";
+  await submitMessage();
+
+  const msgCall1 = calls.find(c => c.url === "/api/session/messages");
+  assert.ok(msgCall1, "empty text with attachments must send");
+  const body1 = JSON.parse(msgCall1.options.body);
+  assert.strictEqual(body1.text, "[Image #1]\n[File notes.txt]");
+  assert.deepStrictEqual(body1.attachments, ["a1", "a2"]);
+  assert.deepStrictEqual(body1.pastes, []);
+  assert.strictEqual(pendingAttachments.length, 0);
+  assert.strictEqual(chipsEl.hidden, true);
+
+  const pasteHandlers = listeners.get("conversation-input:paste") || [];
+  assert.ok(pasteHandlers.length > 0);
+
+  let shortPrevented = false;
+  pasteHandlers[0]({
+    clipboardData: {
+      files: [],
+      items: [],
+      getData() { return "short text"; },
+    },
+    preventDefault() { shortPrevented = true; },
+  });
+  assert.strictEqual(shortPrevented, false);
+  assert.strictEqual(pendingPastes.size, 0);
+
+  input.value = "Check ";
+  input.selectionStart = 6;
+  input.selectionEnd = 6;
+  const fiveLines = "a\nb\nc\nd\ne";
+  let longPrevented = false;
+  pasteHandlers[0]({
+    clipboardData: {
+      files: [],
+      items: [],
+      getData() { return fiveLines; },
+    },
+    preventDefault() { longPrevented = true; },
+  });
+  assert.strictEqual(longPrevented, true);
+  assert.strictEqual(input.value, "Check [Pasted text #1 +5 lines]");
+  assert.strictEqual(pendingPastes.size, 1);
+
+  input.value = "Check ";
+  const inputHandlers = listeners.get("conversation-input:input") || [];
+  assert.ok(inputHandlers.length > 0);
+  inputHandlers[0]();
+  assert.strictEqual(pendingPastes.size, 0);
+
+  input.selectionStart = 6;
+  input.selectionEnd = 6;
+  pasteHandlers[0]({
+    clipboardData: {
+      files: [],
+      items: [],
+      getData() { return fiveLines; },
+    },
+    preventDefault() {},
+  });
+  assert.strictEqual(input.value, "Check [Pasted text #2 +5 lines]");
+
+  await uploadAttachmentFiles([{ name: "shot.png", type: "image/png" }]);
+  input.value = "See [Image #1] and [Pasted text #2 +5 lines]";
+  calls.length = 0;
+  await submitMessage();
+
+  const msgCall2 = calls.find(c => c.url === "/api/session/messages");
+  assert.ok(msgCall2);
+  const body2 = JSON.parse(msgCall2.options.body);
+  assert.strictEqual(body2.text, "See [Image #1] and [Pasted text #2 +5 lines]");
+  assert.deepStrictEqual(body2.attachments, ["a1"]);
+  assert.deepStrictEqual(body2.pastes, [{ n: 2, text: fiveLines }]);
+  assert.strictEqual(pendingPastes.size, 0);
+  assert.strictEqual(pendingAttachments.length, 0);
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn conversation_renders_and_toggles_user_message_markers() {
+    let harness = r#"
+const assert = require("node:assert");
+
+(async () => {
+  const oldHtml = renderEntry({
+    seq: 1,
+    ts: 1000,
+    kind: "user_message",
+    text: "plain hello",
+    reports: [],
+    queued: false,
+  });
+  assert.ok(oldHtml.includes("plain hello"), oldHtml);
+  assert.ok(!oldHtml.includes("msg-marker-btn"), oldHtml);
+  assert.ok(!oldHtml.includes("msg-attachment-preview"), oldHtml);
+
+  const badAttHtml = renderEntry({
+    seq: 2,
+    ts: 1000,
+    kind: "user_message",
+    text: "bad",
+    reports: [],
+    queued: false,
+    attachments: [{ id: 123 }],
+  });
+  assert.ok(badAttHtml.includes("invalid field attachments"), badAttHtml);
+
+  const badPasteHtml = renderEntry({
+    seq: 3,
+    ts: 1000,
+    kind: "user_message",
+    text: "bad",
+    reports: [],
+    queued: false,
+    pastes: [{ n: 0, text: "nope" }],
+  });
+  assert.ok(badPasteHtml.includes("invalid field pastes"), badPasteHtml);
+
+  const fullPasteText = "line1\nline2\nline3\nline4\nline5";
+  const newHtml = renderEntry({
+    seq: 10,
+    ts: 1000,
+    kind: "user_message",
+    text: "Look [Pasted text #1 +5 lines]\n[Image #1]\n[Image #2]\n[File notes.txt]",
+    reports: [],
+    queued: false,
+    attachments: [
+      { id: "a1", name: "one.png", mime_type: "image/png", size: 1024, image: true },
+      { id: "a2", name: "two.png", mime_type: "image/png", size: 2048, image: true },
+      { id: "a3", name: "notes.txt", mime_type: "application/octet-stream", size: 512, image: false },
+    ],
+    pastes: [{ n: 1, text: fullPasteText }],
+  });
+  assert.ok(newHtml.includes('data-marker-kind="paste"'), newHtml);
+  assert.ok(newHtml.includes('data-marker-kind="image"'), newHtml);
+  assert.ok(newHtml.includes('data-attachment-id="a1"'), newHtml);
+  assert.ok(newHtml.includes('data-attachment-id="a2"'), newHtml);
+  assert.ok(newHtml.includes('data-marker-kind="file"'), newHtml);
+  assert.ok(newHtml.includes("[Pasted text #1 +5 lines]"), newHtml);
+  assert.ok(newHtml.includes("[Image #1]"), newHtml);
+  assert.ok(newHtml.includes("[Image #2]"), newHtml);
+  assert.ok(newHtml.includes("[File notes.txt]"), newHtml);
+
+  function makeDomEl(tag) {
+    const attrs = new Map();
+    const classes = new Set();
+    const el = {
+      tagName: tag.toUpperCase(),
+      children: [],
+      parentNode: null,
+      hidden: false,
+      src: "",
+      alt: "",
+      dataset: {},
+      _text: "",
+      get textContent() { return this._text; },
+      set textContent(v) {
+        this._text = String(v);
+        if (this._text === "") this.children = [];
+      },
+      get className() { return Array.from(classes).join(" "); },
+      set className(v) {
+        classes.clear();
+        for (const c of String(v).split(/\s+/).filter(Boolean)) classes.add(c);
+      },
+      classList: {
+        add(c) { classes.add(c); },
+        remove(c) { classes.delete(c); },
+        contains(c) { return classes.has(c); },
+      },
+      setAttribute(k, v) { attrs.set(k, String(v)); },
+      getAttribute(k) { return attrs.has(k) ? attrs.get(k) : null; },
+      appendChild(child) {
+        child.parentNode = this;
+        this.children.push(child);
+        return child;
+      },
+      remove() {
+        if (!this.parentNode) return;
+        const idx = this.parentNode.children.indexOf(this);
+        if (idx !== -1) this.parentNode.children.splice(idx, 1);
+        this.parentNode = null;
+      },
+      get nextElementSibling() {
+        if (!this.parentNode) return null;
+        const idx = this.parentNode.children.indexOf(this);
+        return idx >= 0 && idx + 1 < this.parentNode.children.length
+          ? this.parentNode.children[idx + 1]
+          : null;
+      },
+      insertAdjacentElement(pos, node) {
+        if (pos === "afterend" && this.parentNode) {
+          const idx = this.parentNode.children.indexOf(this);
+          node.parentNode = this.parentNode;
+          this.parentNode.children.splice(idx + 1, 0, node);
+        }
+      },
+    };
+    return el;
+  }
+
+  global.document = {
+    createElement(tag) { return makeDomEl(tag); },
+    getElementById() { return null; },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+  };
+
+  const createdUrls = [];
+  const revokedUrls = [];
+  const origCreate = URL.createObjectURL;
+  const origRevoke = URL.revokeObjectURL;
+  URL.createObjectURL = (blob) => {
+    const u = "blob:test-" + (createdUrls.length + 1) + "-" + blob.tag;
+    createdUrls.push(u);
+    return u;
+  };
+  URL.revokeObjectURL = (u) => {
+    revokedUrls.push(u);
+  };
+
+  const fetched = [];
+  global.fetch = async (url, opts) => {
+    fetched.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      async blob() { return { tag: url.split("/").pop() }; },
+    };
+  };
+
+  try {
+    surfaceToken = "tok-xyz";
+    const entryEl = makeDomEl("div");
+    entryEl.className = "entry msg-line user";
+    const textWrap = makeDomEl("div");
+    const pasteBtn = makeDomEl("button");
+    pasteBtn.className = "msg-marker-btn msg-marker-paste";
+    pasteBtn.dataset = { msgSeq: "10", markerKind: "paste", pasteN: "1" };
+    pasteBtn.setAttribute("aria-expanded", "false");
+    textWrap.appendChild(pasteBtn);
+
+    const imgBtn1 = makeDomEl("button");
+    imgBtn1.className = "msg-marker-btn msg-marker-image";
+    imgBtn1.dataset = { msgSeq: "10", markerKind: "image", attachmentId: "a1", imageN: "1" };
+    imgBtn1.setAttribute("aria-expanded", "false");
+    textWrap.appendChild(imgBtn1);
+
+    const imgBtn2 = makeDomEl("button");
+    imgBtn2.className = "msg-marker-btn msg-marker-image";
+    imgBtn2.dataset = { msgSeq: "10", markerKind: "image", attachmentId: "a2", imageN: "2" };
+    imgBtn2.setAttribute("aria-expanded", "false");
+    textWrap.appendChild(imgBtn2);
+
+    const fileBtn = makeDomEl("button");
+    fileBtn.className = "msg-marker-btn msg-marker-file";
+    fileBtn.dataset = { msgSeq: "10", markerKind: "file", attachmentId: "a3" };
+    fileBtn.setAttribute("aria-expanded", "false");
+    textWrap.appendChild(fileBtn);
+
+    const previewEl = makeDomEl("div");
+    previewEl.className = "msg-attachment-preview";
+    previewEl.hidden = true;
+
+    entryEl.appendChild(textWrap);
+    entryEl.appendChild(previewEl);
+    entryEl.querySelector = (sel) => sel === ".msg-attachment-preview" ? previewEl : null;
+    entryEl.querySelectorAll = () => [imgBtn1, imgBtn2, fileBtn];
+    for (const b of [pasteBtn, imgBtn1, imgBtn2, fileBtn]) {
+      b.closest = (sel) => sel === ".entry.msg-line.user" ? entryEl : null;
+    }
+
+    await handleMessageMarkerClick(pasteBtn);
+    assert.strictEqual(pasteBtn.getAttribute("aria-expanded"), "true");
+    assert.ok(pasteBtn.nextElementSibling, "expanded paste pre must follow paste button");
+    assert.strictEqual(pasteBtn.nextElementSibling.textContent, fullPasteText);
+
+    await handleMessageMarkerClick(pasteBtn);
+    assert.strictEqual(pasteBtn.getAttribute("aria-expanded"), "false");
+    assert.strictEqual(pasteBtn.nextElementSibling, imgBtn1);
+
+    await handleMessageMarkerClick(imgBtn1);
+    assert.strictEqual(fetched.length, 1);
+    assert.strictEqual(fetched[0].url, "/api/session/attachments/a1");
+    assert.strictEqual(fetched[0].opts.headers["X-Blyte-Token"], "tok-xyz");
+    assert.strictEqual(previewEl.hidden, false);
+    assert.strictEqual(previewEl.children[0].tagName, "IMG");
+    assert.strictEqual(previewEl.children[0].src, "blob:test-1-a1");
+    assert.deepStrictEqual(revokedUrls, []);
+
+    await handleMessageMarkerClick(imgBtn2);
+    assert.strictEqual(fetched.length, 2);
+    assert.strictEqual(fetched[1].url, "/api/session/attachments/a2");
+    assert.deepStrictEqual(revokedUrls, ["blob:test-1-a1"]);
+    assert.strictEqual(previewEl.children[0].src, "blob:test-2-a2");
+
+    await handleMessageMarkerClick(fileBtn);
+    assert.deepStrictEqual(revokedUrls, ["blob:test-1-a1", "blob:test-2-a2"]);
+    assert.strictEqual(previewEl.hidden, false);
+    assert.strictEqual(previewEl.children[0].textContent, "notes.txt (512 B)");
+  } finally {
+    URL.createObjectURL = origCreate;
+    URL.revokeObjectURL = origRevoke;
+  }
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn surface_switcher_renders_list_escapes_values_and_formats_title() {
+    let html = load_surface_html();
+    assert!(
+        html.contains(
+            r#"<button id="surface-switcher" class="repo-name" type="button" aria-haspopup="listbox" aria-expanded="false">"#
+        ),
+        "surface page must render #surface-switcher button with listbox aria attributes"
+    );
+
+    let harness = r#"
+const assert = require("node:assert");
+
+assert.strictEqual(formatSurfaceTitle("x", true), "x: working - blyte");
+assert.strictEqual(formatSurfaceTitle("x", false), "x - blyte");
+
+const multiHtml = renderSurfaceList([
+  {
+    id: "s1",
+    name: "alpha",
+    root: "/tmp/alpha",
+    branch: "main",
+    doing: "idle",
+    current: true,
+    url: "http://127.0.0.1:4100/#token=t1",
+    error: null,
+  },
+  {
+    id: "s2",
+    name: "beta<script>alert(1)</script>",
+    root: "/tmp/beta",
+    branch: null,
+    doing: "fixing tests",
+    current: false,
+    url: "http://127.0.0.1:4101/#token=t2",
+    error: null,
+  },
+  {
+    id: "s3",
+    name: "gamma",
+    root: "/tmp/gamma",
+    branch: "feat/x",
+    doing: "working",
+    current: false,
+    url: null,
+    error: "surface gamma has no usable token at /tmp/tok",
+  },
+]);
+
+assert.ok(multiHtml.includes("surface-switcher-current"), multiHtml);
+assert.ok(multiHtml.includes('aria-current="true"'), multiHtml);
+assert.ok(!multiHtml.includes('data-surface-url="http://127.0.0.1:4100/#token=t1"'), multiHtml);
+assert.ok(multiHtml.includes('data-surface-url="http://127.0.0.1:4101/#token=t2"'), multiHtml);
+assert.ok(!multiHtml.includes("<script>"), multiHtml);
+assert.ok(multiHtml.includes("beta&lt;script&gt;alert(1)&lt;/script&gt;"), multiHtml);
+assert.ok(multiHtml.includes("surface-switcher-disabled"), multiHtml);
+assert.ok(multiHtml.includes(" disabled "), multiHtml);
+assert.ok(multiHtml.includes("surface gamma has no usable token at /tmp/tok"), multiHtml);
+assert.ok(!multiHtml.includes("No other surfaces are running."), multiHtml);
+
+const singleHtml = renderSurfaceList([
+  {
+    id: "s1",
+    name: "solo",
+    root: "/tmp/solo",
+    branch: "main",
+    doing: "idle",
+    current: true,
+    url: "http://127.0.0.1:4100/#token=t1",
+    error: null,
+  },
+]);
+assert.ok(
+  singleHtml.includes("No other surfaces are running. Start one by running blyte in another folder."),
+  singleHtml
+);
+assert.ok(singleHtml.includes("surface-switcher-current"), singleHtml);
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn surface_switcher_fetch_errors_navigation_and_working_title_updates() {
+    let harness = format!(
+        "{}\n{}",
+        review_queue_test_prelude(),
+        r#"
+(async () => {
+  applySessionState({
+    session_id: "sess-1",
+    surface_name: "demo",
+    repo: "demo",
+    repository: true,
+    started_at: 1700000000,
+    model: "gemini-4-neon",
+    effort: null,
+    effort_supported: false,
+    busy: false,
+    queued: 0,
+    last_seq: 0,
+  }, true);
+  assert.strictEqual(document.title, "demo - blyte");
+  assert.strictEqual(elements["surface-switcher"].textContent, "demo");
+
+  sessionBusy = true;
+  updateWorkingState();
+  assert.strictEqual(document.title, "demo: working - blyte");
+
+  sessionBusy = false;
+  updateWorkingState();
+  assert.strictEqual(document.title, "demo - blyte");
+
+  surfaceToken = "tok-current";
+  const calls = [];
+  global.fetch = async (url, opts) => {
+    calls.push({ url, opts });
+    return {
+      ok: false,
+      status: 500,
+      async json() { return { error: "registry unreadable" }; },
+      async text() { return '{"error":"registry unreadable"}'; },
+    };
+  };
+
+  await openSurfaceSwitcher();
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(calls[0].url, "/api/surfaces");
+  assert.strictEqual(calls[0].opts.headers["X-Blyte-Token"], "tok-current");
+  assert.strictEqual(elements["surface-switcher"].getAttribute("aria-expanded"), "true");
+  assert.strictEqual(elements["surface-switcher-list"].hidden, false);
+  assert.ok(
+    elements["surface-switcher-list"].innerHTML.includes("registry unreadable"),
+    elements["surface-switcher-list"].innerHTML
+  );
+
+  let reloaded = 0;
+  global.window = {
+    location: {
+      origin: "http://127.0.0.1:4100",
+      href: "http://127.0.0.1:4100/",
+      reload() { reloaded += 1; },
+    },
+  };
+  navigateToSurface("http://127.0.0.1:4101/#token=other");
+  assert.strictEqual(window.location.href, "http://127.0.0.1:4101/#token=other");
+  assert.strictEqual(reloaded, 0);
+  assert.strictEqual(elements["surface-switcher"].getAttribute("aria-expanded"), "false");
+  assert.strictEqual(elements["surface-switcher-list"].hidden, true);
+
+  window.location.href = "http://127.0.0.1:4100/";
+  navigateToSurface("http://127.0.0.1:4100/#token=same-origin");
+  assert.strictEqual(window.location.href, "http://127.0.0.1:4100/#token=same-origin");
+  assert.strictEqual(reloaded, 1);
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"#
     );
     run_surface_script(&harness);
 }

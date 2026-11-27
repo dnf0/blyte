@@ -1,4 +1,5 @@
 pub mod approval_file;
+pub mod attachments;
 pub mod clean;
 pub mod cli;
 pub mod combine;

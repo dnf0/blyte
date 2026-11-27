@@ -181,7 +181,8 @@ fn entries_are_numbered_without_gaps() {
         EntryBody::UserMessage {
             ref text,
             ref reports,
-            queued: false
+            queued: false,
+            ..
         } if text == "hello" && reports.is_empty()
     ));
     assert!(matches!(entries[1].body, EntryBody::Turn { n: 1, .. }));
@@ -345,7 +346,7 @@ fn attachments_are_appended_to_the_prompt() {
     let entries = wait_for_entries(&session, 2);
     assert!(matches!(
         &entries[0].body,
-        EntryBody::UserMessage { text, reports, queued: false }
+        EntryBody::UserMessage { text, reports, queued: false, .. }
             if text == "Compare these" && reports == &vec!["run-01".to_string(), "run-02".to_string()]
     ));
 
@@ -738,7 +739,7 @@ fn decision_with_a_message_submits_it() {
     );
     assert!(matches!(
         &all[2].body,
-        EntryBody::UserMessage { text, reports, queued: false }
+        EntryBody::UserMessage { text, reports, queued: false, .. }
             if text == "Please address missing edge case in run-2" && reports.is_empty()
     ));
     assert!(matches!(all[3].body, EntryBody::Idle { .. }));
@@ -1381,6 +1382,8 @@ fn a_cut_off_last_line_is_dropped_and_reported() {
             text: "hello".into(),
             reports: Vec::new(),
             queued: false,
+            attachments: Vec::new(),
+            pastes: Vec::new(),
         },
     };
     let e2 = Entry {
@@ -1462,6 +1465,8 @@ fn a_bad_line_in_the_middle_stops_the_start_naming_the_line() {
             text: "first".into(),
             reports: Vec::new(),
             queued: false,
+            attachments: Vec::new(),
+            pastes: Vec::new(),
         },
     };
     let e3 = Entry {
@@ -1515,6 +1520,8 @@ fn a_loaded_approval_request_is_not_live() {
             text: "do something risky".into(),
             reports: Vec::new(),
             queued: false,
+            attachments: Vec::new(),
+            pastes: Vec::new(),
         },
     };
     let e2 = Entry {
@@ -1704,6 +1711,8 @@ fn a_gap_in_the_saved_entries_is_shown_at_load() {
             text: "one".into(),
             reports: Vec::new(),
             queued: false,
+            attachments: Vec::new(),
+            pastes: Vec::new(),
         },
     };
     let e2 = Entry {
@@ -1797,6 +1806,8 @@ fn a_missing_first_entry_is_shown_at_load() {
             text: "second".into(),
             reports: Vec::new(),
             queued: false,
+            attachments: Vec::new(),
+            pastes: Vec::new(),
         },
     };
     let e3 = Entry {

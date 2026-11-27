@@ -273,6 +273,167 @@
       background: var(--color-page);
     }
 
+    .surface-switcher-wrap {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    button.repo-name {
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      line-height: 1.3;
+    }
+
+    button.repo-name::after {
+      content: "▾";
+      font-size: 10px;
+      color: var(--color-muted);
+    }
+
+    button.repo-name:hover,
+    button.repo-name[aria-expanded="true"] {
+      color: var(--color-strong);
+      border-color: var(--brand-rust);
+    }
+
+    .surface-switcher-list {
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 0;
+      z-index: 20;
+      min-width: 320px;
+      max-width: min(460px, calc(100vw - 32px));
+      max-height: 70vh;
+      overflow-y: auto;
+      background: var(--color-card);
+      border: 1px solid var(--color-line-dark);
+      border-radius: 4px;
+      padding: 4px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .surface-switcher-list[hidden] {
+      display: none;
+    }
+
+    .surface-switcher-row {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      width: 100%;
+      text-align: left;
+      padding: 7px 9px;
+      border-radius: 4px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--color-text);
+    }
+
+    button.surface-switcher-item {
+      cursor: pointer;
+    }
+
+    button.surface-switcher-item:hover,
+    button.surface-switcher-item:focus-visible {
+      background: var(--color-page);
+      border-color: var(--brand-rust);
+    }
+
+    .surface-switcher-current {
+      background: var(--color-page);
+      border-color: var(--color-line);
+    }
+
+    button.surface-switcher-disabled {
+      opacity: 0.65;
+      cursor: default;
+    }
+
+    .surface-switcher-head {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .surface-switcher-name {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--color-strong);
+    }
+
+    .surface-switcher-branch {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-muted);
+      padding: 1px 5px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line);
+      background: var(--color-page);
+    }
+
+    .surface-switcher-badge {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 1px 5px;
+      border-radius: 4px;
+      background: var(--brand-rust-soft);
+      border: 1px solid var(--brand-rust);
+      color: var(--brand-rust);
+    }
+
+    .surface-switcher-root {
+      font-size: 11px;
+      color: var(--color-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      direction: rtl;
+      text-align: left;
+    }
+
+    .surface-switcher-doing {
+      font-size: 12px;
+      color: var(--color-text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .surface-switcher-row-error {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--status-red);
+      word-break: break-word;
+    }
+
+    .surface-switcher-empty,
+    .surface-switcher-loading {
+      padding: 8px 9px;
+      font-size: 12px;
+      color: var(--color-muted);
+    }
+
+    .surface-switcher-error {
+      padding: 8px 9px;
+      border-radius: 4px;
+      background: var(--fail-soft);
+      border: 1px solid var(--fail);
+      color: var(--color-strong);
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      word-break: break-word;
+    }
+
     .no-repo-badge {
       font-family: var(--font-mono);
       font-size: 11px;
@@ -444,6 +605,12 @@
       flex-direction: column;
     }
 
+    #conversation.drop-active {
+      outline: 2px dashed var(--brand-rust);
+      outline-offset: -4px;
+      background: var(--brand-rust-soft);
+    }
+
     #activity {
       flex: 1;
       min-height: 0;
@@ -551,6 +718,82 @@
       align-self: flex-end;
       max-width: 85%;
       white-space: pre-wrap;
+    }
+
+    .msg-marker-btn {
+      display: inline-flex;
+      align-items: center;
+      padding: 1px 6px;
+      margin: 1px 2px;
+      border-radius: 4px;
+      border: 1px solid var(--brand-rust);
+      background: var(--color-card);
+      color: var(--color-strong);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1.4;
+      cursor: pointer;
+      vertical-align: baseline;
+    }
+
+    .msg-marker-btn:hover,
+    .msg-marker-btn.expanded {
+      background: var(--brand-rust);
+      color: #fff;
+    }
+
+    .msg-paste-body {
+      margin: 6px 0;
+      padding: 8px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-card);
+      color: var(--color-text);
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 320px;
+      overflow: auto;
+    }
+
+    .msg-attachment-preview {
+      margin-top: 8px;
+      padding: 8px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line);
+      background: var(--color-card);
+      white-space: normal;
+    }
+
+    .msg-attachment-preview[hidden] {
+      display: none;
+    }
+
+    .msg-preview-img {
+      display: block;
+      max-width: 100%;
+      max-height: 360px;
+      border-radius: 3px;
+    }
+
+    .msg-preview-meta,
+    .msg-preview-file {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      color: var(--color-text);
+    }
+
+    .msg-preview-meta {
+      margin-top: 6px;
+      color: var(--color-muted);
+    }
+
+    .msg-preview-error {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      color: var(--status-red);
     }
 
     .msg-line.assistant {
@@ -970,6 +1213,28 @@
     }
 
     .attached-report-chip button {
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      padding: 0 2px;
+      color: var(--color-strong);
+      font-weight: 700;
+    }
+
+    .attached-file-chip {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 4px;
+      background: var(--brand-rust-soft);
+      border: 1px solid var(--brand-rust);
+      color: var(--color-strong);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .attached-file-chip button {
       border: none;
       background: transparent;
       cursor: pointer;
@@ -2598,7 +2863,10 @@
             </svg>
             <span class="brand-word">blyte</span>
           </span>
-          <span id="repo-name" class="repo-name"></span>
+          <div id="surface-switcher-wrap" class="surface-switcher-wrap">
+            <button id="surface-switcher" class="repo-name" type="button" aria-haspopup="listbox" aria-expanded="false"></button>
+            <div id="surface-switcher-list" class="surface-switcher-list" role="listbox" aria-label="Running surfaces" hidden></div>
+          </div>
           <span id="no-repo-badge" class="no-repo-badge" hidden></span>
           <span id="working-indicator" class="working-pill" hidden>working</span>
         </div>
@@ -2695,6 +2963,8 @@
     let sessionBusy = false;
     let lastSeqSeen = 0;
     let initialEventsLoaded = false;
+    let surfaceSwitcherOpen = false;
+    let surfaceSwitcherReqId = 0;
 
     const seenSeqs = new Set();
     const logEntries = [];
@@ -2759,6 +3029,83 @@
     let lastReportReaderKey = null;
     let reportReaderError = "";
     const attachedReports = [];
+    const pendingAttachments = [];
+    const pendingPastes = new Map();
+    let nextPasteNumber = 0;
+    let uploadsInFlight = 0;
+    let dragDepth = 0;
+    const userMessageDataBySeq = new Map();
+    const activeObjectUrlsBySeq = new Map();
+    const imageLoadSeqByMsgSeq = new Map();
+
+    function pasteLineCount(text) {
+      if (typeof text !== "string" || text.length === 0) return 0;
+      return text.split(/\r\n|\r|\n/).length;
+    }
+
+    function needsPasteMarker(text) {
+      if (typeof text !== "string" || text.length === 0) return false;
+      return text.length > 800 || pasteLineCount(text) >= 5;
+    }
+
+    function pasteMarker(n, text) {
+      return "[Pasted text #" + n + " +" + pasteLineCount(text) + " lines]";
+    }
+
+    function imageMarker(n) {
+      return "[Image #" + n + "]";
+    }
+
+    function fileMarker(name) {
+      return "[File " + name + "]";
+    }
+
+    function formatAttachmentSize(bytes) {
+      if (bytes < 1024) return bytes + " B";
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KiB";
+      return (bytes / (1024 * 1024)).toFixed(1) + " MiB";
+    }
+
+    function isValidAttachmentMeta(item) {
+      return (
+        isPlainObject(item) &&
+        typeof item.id === "string" && item.id.length > 0 &&
+        typeof item.name === "string" && item.name.length > 0 &&
+        typeof item.mime_type === "string" && item.mime_type.length > 0 &&
+        typeof item.size === "number" && Number.isFinite(item.size) && item.size >= 0 &&
+        typeof item.image === "boolean"
+      );
+    }
+
+    function isValidPasteEntry(item) {
+      return (
+        isPlainObject(item) &&
+        typeof item.n === "number" && Number.isInteger(item.n) && item.n >= 1 &&
+        typeof item.text === "string"
+      );
+    }
+
+    function isValidOptionalAttachments(entry) {
+      if (!hasOwn(entry, "attachments") || entry.attachments === undefined) return true;
+      return Array.isArray(entry.attachments) && entry.attachments.every(isValidAttachmentMeta);
+    }
+
+    function isValidOptionalPastes(entry) {
+      if (!hasOwn(entry, "pastes") || entry.pastes === undefined) return true;
+      return Array.isArray(entry.pastes) && entry.pastes.every(isValidPasteEntry);
+    }
+
+    function buildOutgoingMessageText(rawText, attachments) {
+      let text = rawText;
+      let imgIndex = 0;
+      for (const att of attachments) {
+        const marker = att.image ? imageMarker(++imgIndex) : fileMarker(att.name);
+        if (!text.includes(marker)) {
+          text = text.length > 0 ? text + "\n" + marker : marker;
+        }
+      }
+      return text;
+    }
 
     function escapeHtml(str) {
       return String(str)
@@ -2845,7 +3192,7 @@
           : "Message the conversation model...";
       }
       const sendBtn = document.getElementById("conversation-send");
-      if (sendBtn) sendBtn.disabled = missing;
+      if (sendBtn) sendBtn.disabled = missing || uploadsInFlight > 0;
       const modelEl = document.getElementById("model-select");
       if (modelEl) modelEl.disabled = missing;
       const effortEl = document.getElementById("effort-select");
@@ -3205,12 +3552,179 @@
       updateReviewTabCounter(state.undecidedArrived.length);
     }
 
+    function formatSurfaceTitle(surfaceName, busy) {
+      return busy ? surfaceName + ": working - blyte" : surfaceName + " - blyte";
+    }
+
+    function updateDocumentTitle(surfaceName) {
+      if (typeof document === "undefined") return;
+      const name = typeof surfaceName === "string" && surfaceName
+        ? surfaceName
+        : (sessionState && typeof sessionState.surface_name === "string" ? sessionState.surface_name : "");
+      if (name) {
+        document.title = formatSurfaceTitle(name, sessionBusy);
+      }
+    }
+
     function updateWorkingState() {
       if (typeof document === "undefined") return;
       const workingEl = document.getElementById("working-indicator");
       if (workingEl) workingEl.hidden = !sessionBusy;
       const sendBtn = document.getElementById("conversation-send");
       if (sendBtn) sendBtn.textContent = sessionBusy ? "Queue" : "Send";
+      updateDocumentTitle();
+    }
+
+    function validateSurfaces(data) {
+      if (!isPlainObject(data) || !Array.isArray(data.surfaces)) {
+        return "/api/surfaces: missing surfaces array";
+      }
+      for (let i = 0; i < data.surfaces.length; i++) {
+        const s = data.surfaces[i];
+        if (!isPlainObject(s)) {
+          return "/api/surfaces: surfaces[" + i + "] must be an object";
+        }
+        for (const f of ["id", "name", "root", "doing"]) {
+          if (typeof s[f] !== "string") {
+            return "/api/surfaces: surfaces[" + i + "] missing or invalid field " + f;
+          }
+        }
+        if (typeof s.current !== "boolean") {
+          return "/api/surfaces: surfaces[" + i + "] missing or invalid field current";
+        }
+        for (const f of ["branch", "url", "error"]) {
+          if (!hasOwn(s, f) || (s[f] !== null && typeof s[f] !== "string")) {
+            return "/api/surfaces: surfaces[" + i + "] missing or invalid field " + f;
+          }
+        }
+      }
+      return null;
+    }
+
+    function renderSurfaceList(surfaces) {
+      const list = Array.isArray(surfaces) ? surfaces : [];
+      const rows = list.map(s => {
+        const isCurrent = Boolean(s && s.current);
+        const hasUrl = Boolean(s && typeof s.url === "string" && s.url.length > 0);
+        const idAttr = escapeHtml(s && s.id != null ? String(s.id) : "");
+        const nameHtml = '<span class="surface-switcher-name">' + escapeHtml(s && s.name != null ? String(s.name) : "") + '</span>';
+        const branchHtml = s && s.branch !== null && s.branch !== undefined
+          ? '<span class="surface-switcher-branch">' + escapeHtml(String(s.branch)) + '</span>'
+          : '';
+        const badgeHtml = isCurrent ? '<span class="surface-switcher-badge">current</span>' : '';
+        const rootHtml = '<div class="surface-switcher-root mono" title="' + escapeHtml(s && s.root != null ? String(s.root) : "") + '">&lrm;' + escapeHtml(s && s.root != null ? String(s.root) : "") + '</div>';
+        const doingHtml = '<div class="surface-switcher-doing">' + escapeHtml(s && s.doing != null ? String(s.doing) : "") + '</div>';
+        const errorHtml = !hasUrl
+          ? '<div class="surface-switcher-row-error">' + escapeHtml(s && s.error != null ? String(s.error) : "surface unavailable") + '</div>'
+          : '';
+        const inner =
+          '<div class="surface-switcher-head">' + nameHtml + branchHtml + badgeHtml + '</div>' +
+          rootHtml +
+          doingHtml +
+          errorHtml;
+        if (isCurrent) {
+          return '<div class="surface-switcher-row surface-switcher-current" role="option" aria-selected="true" aria-current="true" data-surface-id="' + idAttr + '">' +
+            inner +
+            '</div>';
+        }
+        if (!hasUrl) {
+          return '<button type="button" class="surface-switcher-row surface-switcher-disabled" role="option" aria-selected="false" aria-disabled="true" disabled data-surface-id="' + idAttr + '">' +
+            inner +
+            '</button>';
+        }
+        return '<button type="button" class="surface-switcher-row surface-switcher-item" role="option" aria-selected="false" data-surface-id="' + idAttr + '" data-surface-url="' + escapeHtml(s.url) + '">' +
+          inner +
+          '</button>';
+      });
+      if (!list.some(s => !s || !s.current)) {
+        rows.push('<div class="surface-switcher-empty">No other surfaces are running. Start one by running blyte in another folder.</div>');
+      }
+      return rows.join("");
+    }
+
+    function renderSurfaceListError(message) {
+      return '<div class="surface-switcher-error" role="alert">' + escapeHtml(message) + '</div>';
+    }
+
+    function closeSurfaceSwitcher() {
+      surfaceSwitcherOpen = false;
+      surfaceSwitcherReqId += 1;
+      if (typeof document === "undefined") return;
+      const btn = document.getElementById("surface-switcher");
+      if (btn) btn.setAttribute("aria-expanded", "false");
+      const list = document.getElementById("surface-switcher-list");
+      if (list) list.hidden = true;
+    }
+
+    function navigateToSurface(url) {
+      closeSurfaceSwitcher();
+      if (typeof window === "undefined" || !window.location) return;
+      let sameOrigin = false;
+      try {
+        const currentOrigin = window.location.origin;
+        const nextOrigin = new URL(url, window.location.href).origin;
+        sameOrigin = Boolean(currentOrigin) && nextOrigin === currentOrigin;
+      } catch (_) {
+        sameOrigin = false;
+      }
+      window.location.href = url;
+      if (sameOrigin && typeof window.location.reload === "function") {
+        window.location.reload();
+      }
+    }
+
+    async function openSurfaceSwitcher() {
+      if (typeof document === "undefined") return;
+      const btn = document.getElementById("surface-switcher");
+      const list = document.getElementById("surface-switcher-list");
+      if (!btn || !list) return;
+      surfaceSwitcherOpen = true;
+      const reqId = ++surfaceSwitcherReqId;
+      btn.setAttribute("aria-expanded", "true");
+      list.innerHTML = '<div class="surface-switcher-loading">Loading surfaces...</div>';
+      list.hidden = false;
+      const headers = {};
+      if (surfaceToken) {
+        headers[TOKEN_HEADER] = surfaceToken;
+      }
+      let res;
+      try {
+        res = await fetch("/api/surfaces", { headers });
+      } catch (err) {
+        if (!surfaceSwitcherOpen || reqId !== surfaceSwitcherReqId) return;
+        list.innerHTML = renderSurfaceListError(
+          "/api/surfaces failed: " + (err && err.message ? err.message : String(err))
+        );
+        return;
+      }
+      if (!surfaceSwitcherOpen || reqId !== surfaceSwitcherReqId) return;
+      if (res.status === 403) {
+        stopAllPolling();
+        clearSurfaceToken();
+      }
+      if (!res.ok) {
+        const errMsg = await parseErrorPayload(res, "/api/surfaces");
+        if (!surfaceSwitcherOpen || reqId !== surfaceSwitcherReqId) return;
+        list.innerHTML = renderSurfaceListError(errMsg);
+        return;
+      }
+      let data;
+      try {
+        data = await res.json();
+      } catch (err) {
+        if (!surfaceSwitcherOpen || reqId !== surfaceSwitcherReqId) return;
+        list.innerHTML = renderSurfaceListError(
+          "/api/surfaces returned invalid JSON: " + (err && err.message ? err.message : String(err))
+        );
+        return;
+      }
+      if (!surfaceSwitcherOpen || reqId !== surfaceSwitcherReqId) return;
+      const err = validateSurfaces(data);
+      if (err) {
+        list.innerHTML = renderSurfaceListError(err);
+        return;
+      }
+      list.innerHTML = renderSurfaceList(data.surfaces);
     }
 
     function renderModelsSelect() {
@@ -3242,6 +3756,8 @@
         sessionBusy = data.busy;
       }
       if (typeof document === "undefined") return;
+      const switcherEl = document.getElementById("surface-switcher");
+      if (switcherEl) switcherEl.textContent = data.repo;
       const repoEl = document.getElementById("repo-name");
       if (repoEl) repoEl.textContent = data.repo;
       const noRepoEl = document.getElementById("no-repo-badge");
@@ -3251,7 +3767,7 @@
         noRepoEl.hidden = !notice;
       }
       if (typeof data.surface_name === "string" && data.surface_name) {
-        document.title = data.surface_name + " - blyte";
+        updateDocumentTitle(data.surface_name);
       }
       renderModelsSelect();
       const effortEl = document.getElementById("effort-select");
@@ -3383,6 +3899,109 @@
       return JSON.stringify(input, null, 2);
     }
 
+    function buildUserMessageLookup(attachments, pastes) {
+      const pastesByN = new Map();
+      for (const p of pastes) {
+        pastesByN.set(p.n, p);
+      }
+      const imagesByN = new Map();
+      const filesByName = new Map();
+      const attachmentsById = new Map();
+      let imgIdx = 0;
+      for (const att of attachments) {
+        attachmentsById.set(att.id, att);
+        if (att.image) {
+          imgIdx += 1;
+          imagesByN.set(imgIdx, att);
+        } else {
+          if (!filesByName.has(att.name)) filesByName.set(att.name, []);
+          filesByName.get(att.name).push(att);
+        }
+      }
+      return { attachments, pastes, pastesByN, imagesByN, filesByName, attachmentsById };
+    }
+
+    function renderUserMessageBody(seq, text, lookup) {
+      const seqAttr = escapeHtml(String(seq));
+      const usedFileCounts = new Map();
+      const renderedAttachmentIds = new Set();
+      let out = "";
+      let pos = 0;
+      while (pos < text.length) {
+        const bracket = text.indexOf("[", pos);
+        if (bracket === -1) {
+          out += escapeHtml(text.slice(pos));
+          break;
+        }
+        if (bracket > pos) {
+          out += escapeHtml(text.slice(pos, bracket));
+        }
+        const rest = text.slice(bracket);
+        const pasteMatch = /^\[Pasted text #(\d+) \+(\d+) lines\]/.exec(rest);
+        if (pasteMatch) {
+          const n = Number(pasteMatch[1]);
+          if (lookup.pastesByN.has(n)) {
+            out += '<button type="button" class="msg-marker-btn msg-marker-paste" data-msg-seq="' + seqAttr +
+              '" data-marker-kind="paste" data-paste-n="' + escapeHtml(String(n)) +
+              '" aria-expanded="false">' + escapeHtml(pasteMatch[0]) + '</button>';
+            pos = bracket + pasteMatch[0].length;
+            continue;
+          }
+        }
+        const imgMatch = /^\[Image #(\d+)\]/.exec(rest);
+        if (imgMatch) {
+          const n = Number(imgMatch[1]);
+          const att = lookup.imagesByN.get(n);
+          if (att) {
+            renderedAttachmentIds.add(att.id);
+            out += '<button type="button" class="msg-marker-btn msg-marker-image" data-msg-seq="' + seqAttr +
+              '" data-marker-kind="image" data-attachment-id="' + escapeHtml(att.id) +
+              '" data-image-n="' + escapeHtml(String(n)) +
+              '" aria-expanded="false">' + escapeHtml(imgMatch[0]) + '</button>';
+            pos = bracket + imgMatch[0].length;
+            continue;
+          }
+        }
+        const fileMatch = /^\[File ([^\]]+)\]/.exec(rest);
+        if (fileMatch) {
+          const name = fileMatch[1];
+          const list = lookup.filesByName.get(name);
+          if (list && list.length > 0) {
+            const idx = usedFileCounts.get(name) || 0;
+            const att = list[Math.min(idx, list.length - 1)];
+            usedFileCounts.set(name, idx + 1);
+            renderedAttachmentIds.add(att.id);
+            out += '<button type="button" class="msg-marker-btn msg-marker-file" data-msg-seq="' + seqAttr +
+              '" data-marker-kind="file" data-attachment-id="' + escapeHtml(att.id) +
+              '" aria-expanded="false">' + escapeHtml(fileMatch[0]) + '</button>';
+            pos = bracket + fileMatch[0].length;
+            continue;
+          }
+        }
+        out += escapeHtml("[");
+        pos = bracket + 1;
+      }
+
+      let extraMarkers = "";
+      let imgIdx = 0;
+      for (const att of lookup.attachments) {
+        if (att.image) imgIdx += 1;
+        if (renderedAttachmentIds.has(att.id)) continue;
+        if (att.image) {
+          extraMarkers += '<button type="button" class="msg-marker-btn msg-marker-image" data-msg-seq="' + seqAttr +
+            '" data-marker-kind="image" data-attachment-id="' + escapeHtml(att.id) +
+            '" data-image-n="' + escapeHtml(String(imgIdx)) +
+            '" aria-expanded="false">' + escapeHtml(imageMarker(imgIdx)) + '</button>';
+        } else {
+          extraMarkers += '<button type="button" class="msg-marker-btn msg-marker-file" data-msg-seq="' + seqAttr +
+            '" data-marker-kind="file" data-attachment-id="' + escapeHtml(att.id) +
+            '" aria-expanded="false">' + escapeHtml(fileMarker(att.name)) + '</button>';
+        }
+      }
+      const extraHtml = extraMarkers ? '<div>' + extraMarkers + '</div>' : "";
+      return '<div>' + out + '</div>' + extraHtml + '<div class="msg-attachment-preview" hidden></div>';
+    }
+
     function renderEntry(entry, opts) {
       if (!isPlainObject(entry)) {
         return renderEntryError("", "invalid entry: expected object");
@@ -3408,14 +4027,30 @@
           if (typeof entry.queued !== "boolean") {
             return renderEntryError(entry.seq, "user_message entry missing or invalid field queued");
           }
+          if (!isValidOptionalAttachments(entry)) {
+            return renderEntryError(entry.seq, "user_message entry has invalid field attachments");
+          }
+          if (!isValidOptionalPastes(entry)) {
+            return renderEntryError(entry.seq, "user_message entry has invalid field pastes");
+          }
           const stillQueued = (opts && typeof opts.stillQueued === "boolean") ? opts.stillQueued : entry.queued;
           const queuedBadge = stillQueued ? '<span class="msg-queued-badge">queued</span>' : "";
           const reportsHtml = entry.reports.length > 0
             ? '<div>' + entry.reports.map(id => '<span class="msg-report-tag">with report ' + escapeHtml(id) + '</span>').join("") + '</div>'
             : "";
+          const entryAttachments = Array.isArray(entry.attachments) ? entry.attachments : [];
+          const entryPastes = Array.isArray(entry.pastes) ? entry.pastes : [];
+          let bodyHtml;
+          if (entryAttachments.length > 0 || entryPastes.length > 0) {
+            const lookup = buildUserMessageLookup(entryAttachments, entryPastes);
+            userMessageDataBySeq.set(entry.seq, lookup);
+            bodyHtml = renderUserMessageBody(entry.seq, entry.text, lookup);
+          } else {
+            bodyHtml = '<div>' + escapeHtml(entry.text) + '</div>';
+          }
           return '<div class="entry msg-line user" data-seq="' + seqAttr + '">' +
             '<div class="msg-meta">you' + queuedBadge + '</div>' +
-            '<div>' + escapeHtml(entry.text) + '</div>' +
+            bodyHtml +
             reportsHtml +
             '</div>';
         }
@@ -4099,6 +4734,8 @@
           typeof entry.text === "string" &&
           Array.isArray(entry.reports) && entry.reports.every(r => typeof r === "string") &&
           typeof entry.queued === "boolean" &&
+          isValidOptionalAttachments(entry) &&
+          isValidOptionalPastes(entry) &&
           isTimestamp(entry.ts)
         ) {
           const nextReply = createReply(entry.text, entry.ts, hasValidSeq ? entry.seq : null);
@@ -4489,17 +5126,327 @@
     function renderAttachedReports() {
       const el = document.getElementById("attached-reports");
       if (!el) return;
-      if (attachedReports.length === 0) {
+      if (attachedReports.length === 0 && pendingAttachments.length === 0) {
         el.hidden = true;
         el.innerHTML = "";
         return;
       }
       el.hidden = false;
-      el.innerHTML = attachedReports.map(item =>
+      const reportChips = attachedReports.map(item =>
         '<span class="attached-report-chip">report ' + escapeHtml(item.id) +
           ' <button type="button" data-report-detach="' + escapeHtml(item.key) + '" aria-label="Remove report ' + escapeHtml(item.id) + '">×</button>' +
         '</span>'
-      ).join("");
+      );
+      let imgIndex = 0;
+      const fileChips = pendingAttachments.map(att => {
+        const label = att.image ? imageMarker(++imgIndex) : fileMarker(att.name);
+        const title = att.name + " (" + formatAttachmentSize(att.size) + ")";
+        return '<span class="attached-file-chip" title="' + escapeHtml(title) + '">' + escapeHtml(label) +
+          ' <button type="button" data-attachment-detach="' + escapeHtml(att.id) + '" aria-label="Remove ' + escapeHtml(label) + '">×</button>' +
+        '</span>';
+      });
+      el.innerHTML = reportChips.concat(fileChips).join("");
+    }
+
+    function defaultAttachmentName(file) {
+      const mime = file && typeof file.type === "string" ? file.type.toLowerCase() : "";
+      if (mime === "image/png") return "pasted-image.png";
+      if (mime === "image/jpeg") return "pasted-image.jpg";
+      if (mime === "image/webp") return "pasted-image.webp";
+      if (mime === "image/gif") return "pasted-image.gif";
+      return "pasted-file";
+    }
+
+    function extractFilesFromDataTransfer(dt) {
+      if (!dt) return [];
+      const out = [];
+      if (dt.files && dt.files.length > 0) {
+        for (let i = 0; i < dt.files.length; i++) {
+          if (dt.files[i]) out.push(dt.files[i]);
+        }
+        return out;
+      }
+      if (dt.items && dt.items.length > 0) {
+        for (let i = 0; i < dt.items.length; i++) {
+          const item = dt.items[i];
+          if (item && item.kind === "file" && typeof item.getAsFile === "function") {
+            const f = item.getAsFile();
+            if (f) out.push(f);
+          }
+        }
+      }
+      return out;
+    }
+
+    function eventHasFiles(e) {
+      const dt = e && e.dataTransfer;
+      if (!dt) return false;
+      if (dt.types) {
+        for (let i = 0; i < dt.types.length; i++) {
+          if (dt.types[i] === "Files") return true;
+        }
+      }
+      return Boolean(dt.files && dt.files.length > 0);
+    }
+
+    function setConversationDropActive(active) {
+      const convEl = document.getElementById("conversation");
+      if (convEl && convEl.classList) {
+        convEl.classList.toggle("drop-active", Boolean(active));
+      }
+    }
+
+    function pruneDeletedPastes(text) {
+      const current = typeof text === "string" ? text : "";
+      for (const [n, entry] of pendingPastes.entries()) {
+        if (!current.includes(entry.marker)) {
+          pendingPastes.delete(n);
+        }
+      }
+    }
+
+    function insertAtCursor(input, snippet) {
+      const value = typeof input.value === "string" ? input.value : "";
+      const start = typeof input.selectionStart === "number" ? input.selectionStart : value.length;
+      const end = typeof input.selectionEnd === "number" ? input.selectionEnd : start;
+      input.value = value.slice(0, start) + snippet + value.slice(end);
+      const nextPos = start + snippet.length;
+      if (typeof input.setSelectionRange === "function") {
+        try {
+          input.setSelectionRange(nextPos, nextPos);
+        } catch (_) {}
+      }
+    }
+
+    async function uploadAttachmentFile(file) {
+      if (!surfaceToken) {
+        setComposerError(MISSING_TOKEN_MSG);
+        return false;
+      }
+      const rawName = file && typeof file.name === "string" && file.name.trim()
+        ? file.name.trim()
+        : defaultAttachmentName(file);
+      const url = "/api/session/attachments?name=" + encodeURIComponent(rawName);
+      const sendBtn = document.getElementById("conversation-send");
+      uploadsInFlight += 1;
+      if (sendBtn) sendBtn.disabled = true;
+      try {
+        let res;
+        try {
+          res = await fetchWithRetry(url, {
+            method: "POST",
+            body: file
+          });
+        } catch (err) {
+          setComposerError("/api/session/attachments failed: " + (err && err.message ? err.message : String(err)));
+          return false;
+        }
+        if (!res.ok) {
+          const errMsg = await parseErrorPayload(res, "/api/session/attachments");
+          setComposerError(errMsg);
+          return false;
+        }
+        let data;
+        try {
+          data = await res.json();
+        } catch (err) {
+          setComposerError("/api/session/attachments returned invalid JSON: " + (err && err.message ? err.message : String(err)));
+          return false;
+        }
+        if (!isValidAttachmentMeta(data)) {
+          setComposerError("/api/session/attachments: invalid attachment metadata");
+          return false;
+        }
+        pendingAttachments.push(data);
+        renderAttachedReports();
+        return true;
+      } finally {
+        uploadsInFlight = Math.max(0, uploadsInFlight - 1);
+        if (sendBtn) sendBtn.disabled = !surfaceToken || uploadsInFlight > 0;
+      }
+    }
+
+    async function uploadAttachmentFiles(files) {
+      if (!files || files.length === 0) return;
+      setComposerError("");
+      for (const file of files) {
+        await uploadAttachmentFile(file);
+      }
+    }
+
+    function handleComposerPaste(e) {
+      const input = document.getElementById("conversation-input");
+      const dt = e && e.clipboardData;
+      if (!dt) return;
+      const files = extractFilesFromDataTransfer(dt);
+      if (files.length > 0) {
+        e.preventDefault();
+        uploadAttachmentFiles(files);
+        return;
+      }
+      const text = typeof dt.getData === "function" ? dt.getData("text/plain") : "";
+      if (!needsPasteMarker(text)) return;
+      e.preventDefault();
+      nextPasteNumber += 1;
+      const n = nextPasteNumber;
+      const marker = pasteMarker(n, text);
+      pendingPastes.set(n, { n, text, marker });
+      if (input) {
+        insertAtCursor(input, marker);
+        pruneDeletedPastes(input.value);
+      }
+    }
+
+    function revokeMessageObjectUrl(seq) {
+      const prev = activeObjectUrlsBySeq.get(seq);
+      if (prev) {
+        if (typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") {
+          URL.revokeObjectURL(prev);
+        }
+        activeObjectUrlsBySeq.delete(seq);
+      }
+    }
+
+    function resetAttachmentMarkerButtons(entryEl, exceptBtn) {
+      if (!entryEl || typeof entryEl.querySelectorAll !== "function") return;
+      const btns = entryEl.querySelectorAll(".msg-marker-image, .msg-marker-file");
+      for (const other of btns) {
+        if (other === exceptBtn) continue;
+        other.setAttribute("aria-expanded", "false");
+        other.classList.remove("expanded");
+      }
+    }
+
+    async function handleMessageMarkerClick(btn) {
+      const seq = Number(btn.dataset.msgSeq);
+      const kind = btn.dataset.markerKind;
+      const lookup = userMessageDataBySeq.get(seq);
+      if (!lookup) return;
+
+      if (kind === "paste") {
+        const n = Number(btn.dataset.pasteN);
+        const paste = lookup.pastesByN.get(n);
+        if (!paste) return;
+        const isExpanded = btn.getAttribute("aria-expanded") === "true";
+        const next = btn.nextElementSibling;
+        if (isExpanded) {
+          btn.setAttribute("aria-expanded", "false");
+          btn.classList.remove("expanded");
+          if (next && next.classList && next.classList.contains("msg-paste-body")) {
+            next.remove();
+          }
+          return;
+        }
+        btn.setAttribute("aria-expanded", "true");
+        btn.classList.add("expanded");
+        if (next && next.classList && next.classList.contains("msg-paste-body")) {
+          next.textContent = paste.text;
+        } else {
+          const pre = document.createElement("pre");
+          pre.className = "msg-paste-body";
+          pre.textContent = paste.text;
+          if (typeof btn.insertAdjacentElement === "function") {
+            btn.insertAdjacentElement("afterend", pre);
+          } else if (btn.parentNode && typeof btn.parentNode.insertBefore === "function") {
+            btn.parentNode.insertBefore(pre, btn.nextSibling || null);
+          }
+        }
+        return;
+      }
+
+      const entryEl = typeof btn.closest === "function" ? btn.closest(".entry.msg-line.user") : null;
+      const previewEl = entryEl && typeof entryEl.querySelector === "function"
+        ? entryEl.querySelector(".msg-attachment-preview")
+        : null;
+      if (!previewEl) return;
+
+      const attId = btn.dataset.attachmentId;
+      const att = lookup.attachmentsById.get(attId);
+      if (!att) return;
+
+      const alreadyOpen = btn.getAttribute("aria-expanded") === "true";
+      const loadToken = (imageLoadSeqByMsgSeq.get(seq) || 0) + 1;
+      imageLoadSeqByMsgSeq.set(seq, loadToken);
+
+      if (alreadyOpen) {
+        btn.setAttribute("aria-expanded", "false");
+        btn.classList.remove("expanded");
+        revokeMessageObjectUrl(seq);
+        previewEl.hidden = true;
+        previewEl.textContent = "";
+        return;
+      }
+
+      resetAttachmentMarkerButtons(entryEl, btn);
+      btn.setAttribute("aria-expanded", "true");
+      btn.classList.add("expanded");
+      revokeMessageObjectUrl(seq);
+
+      if (kind === "file") {
+        previewEl.hidden = false;
+        previewEl.textContent = "";
+        const info = document.createElement("div");
+        info.className = "msg-preview-file";
+        info.textContent = att.name + " (" + formatAttachmentSize(att.size) + ")";
+        previewEl.appendChild(info);
+        return;
+      }
+
+      if (kind === "image") {
+        previewEl.hidden = false;
+        previewEl.textContent = "";
+        if (!surfaceToken) {
+          const errEl = document.createElement("div");
+          errEl.className = "msg-preview-error";
+          errEl.textContent = MISSING_TOKEN_MSG;
+          previewEl.appendChild(errEl);
+          return;
+        }
+        const loadingEl = document.createElement("div");
+        loadingEl.className = "msg-preview-meta";
+        loadingEl.textContent = "Loading " + att.name + "...";
+        previewEl.appendChild(loadingEl);
+
+        const url = "/api/session/attachments/" + encodeURIComponent(att.id);
+        let res;
+        try {
+          res = await fetchWithRetry(url);
+        } catch (err) {
+          if (imageLoadSeqByMsgSeq.get(seq) !== loadToken) return;
+          previewEl.textContent = "";
+          const errEl = document.createElement("div");
+          errEl.className = "msg-preview-error";
+          errEl.textContent = url + " failed: " + (err && err.message ? err.message : String(err));
+          previewEl.appendChild(errEl);
+          return;
+        }
+        if (imageLoadSeqByMsgSeq.get(seq) !== loadToken) return;
+        if (!res.ok) {
+          const errMsg = await parseErrorPayload(res, url);
+          if (imageLoadSeqByMsgSeq.get(seq) !== loadToken) return;
+          previewEl.textContent = "";
+          const errEl = document.createElement("div");
+          errEl.className = "msg-preview-error";
+          errEl.textContent = errMsg;
+          previewEl.appendChild(errEl);
+          return;
+        }
+        const blob = await res.blob();
+        if (imageLoadSeqByMsgSeq.get(seq) !== loadToken) return;
+        const objectUrl = URL.createObjectURL(blob);
+        revokeMessageObjectUrl(seq);
+        activeObjectUrlsBySeq.set(seq, objectUrl);
+        previewEl.textContent = "";
+        const img = document.createElement("img");
+        img.className = "msg-preview-img";
+        img.src = objectUrl;
+        img.alt = att.name;
+        previewEl.appendChild(img);
+        const caption = document.createElement("div");
+        caption.className = "msg-preview-meta";
+        caption.textContent = att.name + " (" + formatAttachmentSize(att.size) + ")";
+        previewEl.appendChild(caption);
+      }
     }
 
     async function loadRunDiff(run) {
@@ -6132,6 +7079,10 @@
       }
 
       convEl.hidden = !isDesign;
+      if (!isDesign) {
+        dragDepth = 0;
+        setConversationDropActive(false);
+      }
       reviewWrap.hidden = !isReview;
       if (activityEl) activityEl.hidden = !isActivity;
     }
@@ -6599,7 +7550,49 @@
         submitMessage();
       });
 
+      const convInput = document.getElementById("conversation-input");
+      if (convInput) {
+        convInput.addEventListener("paste", handleComposerPaste);
+        convInput.addEventListener("input", () => {
+          pruneDeletedPastes(convInput.value);
+        });
+      }
+
+      if (typeof document.addEventListener === "function") {
+        document.addEventListener("dragenter", (e) => {
+          if (mode !== "design" || !eventHasFiles(e)) return;
+          e.preventDefault();
+          dragDepth += 1;
+          setConversationDropActive(true);
+        });
+        document.addEventListener("dragover", (e) => {
+          if (mode !== "design" || !eventHasFiles(e)) return;
+          e.preventDefault();
+          if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+          setConversationDropActive(true);
+        });
+        document.addEventListener("dragleave", () => {
+          if (dragDepth <= 0) return;
+          dragDepth -= 1;
+          if (dragDepth === 0) setConversationDropActive(false);
+        });
+        document.addEventListener("drop", (e) => {
+          dragDepth = 0;
+          setConversationDropActive(false);
+          if (mode !== "design") return;
+          const files = extractFilesFromDataTransfer(e.dataTransfer);
+          if (files.length === 0) return;
+          e.preventDefault();
+          uploadAttachmentFiles(files);
+        });
+      }
+
       document.getElementById("conversation-thread").addEventListener("click", (e) => {
+        const markerBtn = e.target.closest(".msg-marker-btn[data-marker-kind]");
+        if (markerBtn) {
+          handleMessageMarkerClick(markerBtn);
+          return;
+        }
         const summaryBtn = e.target.closest(".activity-summary[data-activity-reply]");
         if (summaryBtn) {
           switchMode("activity", summaryBtn.dataset.activityReply);
@@ -6611,6 +7604,16 @@
       });
 
       document.getElementById("attached-reports").addEventListener("click", (e) => {
+        const detachAttBtn = e.target.closest("[data-attachment-detach]");
+        if (detachAttBtn) {
+          const attId = detachAttBtn.dataset.attachmentDetach;
+          const attIdx = pendingAttachments.findIndex(item => item.id === attId);
+          if (attIdx !== -1) {
+            pendingAttachments.splice(attIdx, 1);
+            renderAttachedReports();
+          }
+          return;
+        }
         const detachBtn = e.target.closest("[data-report-detach]");
         if (!detachBtn) return;
         const key = detachBtn.dataset.reportDetach;
@@ -6761,7 +7764,45 @@
         }
       });
 
+      const switcherBtn = document.getElementById("surface-switcher");
+      if (switcherBtn) {
+        switcherBtn.addEventListener("click", () => {
+          if (surfaceSwitcherOpen) {
+            closeSurfaceSwitcher();
+          } else {
+            openSurfaceSwitcher();
+          }
+        });
+      }
+
+      const switcherList = document.getElementById("surface-switcher-list");
+      if (switcherList) {
+        switcherList.addEventListener("click", (e) => {
+          const item = e.target.closest("[data-surface-url]");
+          if (item && !item.disabled && item.dataset.surfaceUrl) {
+            navigateToSurface(item.dataset.surfaceUrl);
+          }
+        });
+      }
+
+      document.addEventListener("click", (e) => {
+        if (!surfaceSwitcherOpen) return;
+        const wrap = document.getElementById("surface-switcher-wrap");
+        if (wrap && !wrap.contains(e.target)) {
+          closeSurfaceSwitcher();
+        }
+      });
+
       document.addEventListener("keydown", (e) => {
+        if (surfaceSwitcherOpen && e.key === "Escape") {
+          e.preventDefault();
+          closeSurfaceSwitcher();
+          const btn = document.getElementById("surface-switcher");
+          if (btn && typeof btn.focus === "function") {
+            btn.focus();
+          }
+          return;
+        }
         if (openReportKey !== null && e.key === "Escape") {
           e.preventDefault();
           closeReport();
@@ -6994,17 +8035,22 @@
         setComposerError(MISSING_TOKEN_MSG);
         return;
       }
+      if (uploadsInFlight > 0) return;
       const input = document.getElementById("conversation-input");
-      const text = input.value.trim();
-      if (!text) return;
+      const rawText = input.value.trim();
+      pruneDeletedPastes(rawText);
+      if (!rawText && pendingAttachments.length === 0) return;
+      const text = buildOutgoingMessageText(rawText, pendingAttachments);
       const sendBtn = document.getElementById("conversation-send");
       const reports = attachedReports.map(r => r.id);
+      const attachments = pendingAttachments.map(a => a.id);
+      const pastes = Array.from(pendingPastes.values()).map(p => ({ n: p.n, text: p.text }));
       sendBtn.disabled = true;
       try {
         const res = await fetchWithRetry("/api/session/messages", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text, reports })
+          body: JSON.stringify({ text, reports, attachments, pastes })
         });
         if (!res.ok) {
           const errMsg = await parseErrorPayload(res, "/api/session/messages");
@@ -7025,9 +8071,12 @@
         setComposerError("");
         input.value = "";
         attachedReports.length = 0;
+        pendingAttachments.length = 0;
+        pendingPastes.clear();
+        nextPasteNumber = 0;
         renderAttachedReports();
       } finally {
-        sendBtn.disabled = !surfaceToken;
+        sendBtn.disabled = !surfaceToken || uploadsInFlight > 0;
       }
     }
 

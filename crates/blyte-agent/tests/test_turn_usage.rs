@@ -34,6 +34,15 @@ impl Provider for Scripted {
 fn chars(m: &Message) -> usize {
     match m {
         Message::User(t) | Message::Assistant(t) => t.len(),
+        Message::UserParts(parts) => parts
+            .iter()
+            .map(|p| match p {
+                blyte_provider::UserPart::Text(t) => t.len(),
+                blyte_provider::UserPart::Image { .. } => {
+                    blyte_agent::context::IMAGE_TOKEN_ESTIMATE * 4
+                }
+            })
+            .sum(),
         Message::ToolCall { arguments, .. } => arguments.to_string().len(),
         Message::ToolResult { content, .. } => content.len(),
     }

@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 
 use crate::{
     Message, ModelInfo, Provider, ProviderError, Request, Response, StreamTiming, ToolCall, Usage,
+    UserPart,
 };
 
 /// High effort: every measured run (the A/B pairs and the evals, 2026-09) used `-high`.
@@ -498,6 +499,24 @@ impl Gemini {
                 Message::User(t) => contents.push(json!({
                     "role": "user", "parts": [{"text": t}]
                 })),
+                Message::UserParts(parts) => {
+                    let encoded: Vec<Value> = parts
+                        .iter()
+                        .map(|part| match part {
+                            UserPart::Text(t) => json!({"text": t}),
+                            UserPart::Image { mime_type, data } => json!({
+                                "inlineData": {
+                                    "mimeType": mime_type,
+                                    "data": data.as_ref(),
+                                }
+                            }),
+                        })
+                        .collect();
+                    contents.push(json!({
+                        "role": "user",
+                        "parts": encoded,
+                    }));
+                }
                 Message::Assistant(t) => contents.push(json!({
                     "role": "model", "parts": [{"text": t}]
                 })),

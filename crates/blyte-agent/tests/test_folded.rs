@@ -1,9 +1,9 @@
 //! `folded`: an append-only conversation, bounded by folding its oldest half into
 //! harness-written digests once it passes a token budget.
 
-use blyte_agent::context::{ContextStrategy, Conversational, Folded};
+use blyte_agent::context::{ContextStrategy, Conversational, Folded, IMAGE_TOKEN_ESTIMATE};
 use blyte_agent::state::State;
-use blyte_provider::Message;
+use blyte_provider::{Message, UserPart};
 use serde_json::json;
 
 fn call(n: usize) -> Message {
@@ -48,6 +48,13 @@ fn approx_tokens(msgs: &[Message]) -> usize {
     msgs.iter()
         .map(|m| match m {
             Message::User(t) | Message::Assistant(t) => t.len(),
+            Message::UserParts(parts) => parts
+                .iter()
+                .map(|p| match p {
+                    UserPart::Text(t) => t.len(),
+                    UserPart::Image { .. } => IMAGE_TOKEN_ESTIMATE * 4,
+                })
+                .sum(),
             Message::ToolCall { arguments, .. } => arguments.to_string().len(),
             Message::ToolResult { content, .. } => content.len(),
         })
@@ -163,4 +170,52 @@ fn recent_calls_keep_their_thought_signatures() {
         .expect("a call in the tail");
     assert_eq!(last_call, Some("sig150".into()));
     assert_eq!(Folded::default().budget_tokens, 48_000);
+}
+
+#[test]
+fn approx_tokens_counts_an_image_as_the_fixed_estimate() {
+    let data: std::sync::Arc<str> = std::sync::Arc::from("A".repeat(1024 * 1024));
+    let text = "look at this screenshot";
+    let msg = Message::UserParts(vec![
+        UserPart::Text(text.into()),
+        UserPart::Image {
+            mime_type: "image/png".into(),
+            data,
+        },
+    ]);
+    assert_eq!(
+        blyte_agent::context::approx_tokens(&msg),
+        text.len() / 4 + IMAGE_TOKEN_ESTIMATE
+    );
+}
+
+#[test]
+fn digest_names_an_image_without_its_data() {
+    let st = State::new("fix it", "");
+    let secret_b64 = "SECRETBASE64PAYLOADDATA1234567890";
+    let mut h = vec![
+        Message::User("Begin. fix it".into()),
+        Message::UserParts(vec![
+            UserPart::Text("see attached".into()),
+            UserPart::Image {
+                mime_type: "image/png".into(),
+                data: std::sync::Arc::from(secret_b64),
+            },
+        ]),
+    ];
+    for i in 1..=20 {
+        h.push(Message::Assistant(format!("checking thing{i}")));
+        h.push(call(i));
+        h.push(result(i, &"x".repeat(400)));
+    }
+    let out = Folded {
+        budget_tokens: 1_500,
+    }
+    .build(&st, &h);
+    let all_digests = digests(&out);
+    assert!(!all_digests.is_empty(), "expected at least one fold");
+    let first = &all_digests[0];
+    assert!(first.contains("see attached"), "{first}");
+    assert!(first.contains("[image image/png]"), "{first}");
+    assert!(!first.contains(secret_b64), "{first}");
 }

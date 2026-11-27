@@ -5,6 +5,8 @@ use std::time::Duration;
 
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
+const MAX_ATTACHMENT_BODY_BYTES: usize = crate::attachments::MAX_ATTACHMENT_BYTES;
+const ATTACHMENT_UPLOAD_PATH: &str = "/api/session/attachments";
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
@@ -60,6 +62,14 @@ impl Response {
         Response {
             status: 200,
             content_type: "text/html; charset=utf-8",
+            body,
+        }
+    }
+
+    pub fn bytes(status: u16, content_type: &'static str, body: Vec<u8>) -> Response {
+        Response {
+            status,
+            content_type,
             body,
         }
     }
@@ -185,6 +195,17 @@ fn read_request(stream: &mut TcpStream, port: u16) -> Result<Option<Request>, Re
         }
     }
 
+    let is_attachment_upload = method == "POST" && path == ATTACHMENT_UPLOAD_PATH;
+    let upload_name = if is_attachment_upload {
+        query
+            .iter()
+            .find(|(k, _)| k == "name")
+            .map(|(_, v)| v.trim())
+            .filter(|v| !v.is_empty())
+    } else {
+        None
+    };
+
     let content_length = match content_length_values.as_slice() {
         [] => {
             if method == "POST" {
@@ -192,7 +213,7 @@ fn read_request(stream: &mut TcpStream, port: u16) -> Result<Option<Request>, Re
             }
             0
         }
-        [raw_len] => parse_content_length(raw_len)?,
+        [raw_len] => parse_content_length(raw_len, is_attachment_upload, upload_name)?,
         _ => return Err(Response::text(400, "duplicate Content-Length header")),
     };
 
@@ -396,17 +417,40 @@ fn is_allowed_origin(raw: &str, port: u16) -> bool {
     host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost") || host == "[::1]"
 }
 
-fn parse_content_length(raw: &str) -> Result<usize, Response> {
+fn too_large_response(is_attachment_upload: bool, upload_name: Option<&str>) -> Response {
+    if is_attachment_upload {
+        match upload_name {
+            Some(name) => Response::text(
+                413,
+                &format!("{name} is larger than the 10 MiB limit for one file"),
+            ),
+            None => Response::text(413, "file is larger than the 10 MiB limit for one file"),
+        }
+    } else {
+        Response::text(413, "request body exceeds 1 MiB")
+    }
+}
+
+fn parse_content_length(
+    raw: &str,
+    is_attachment_upload: bool,
+    upload_name: Option<&str>,
+) -> Result<usize, Response> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || !trimmed.bytes().all(|b| b.is_ascii_digit()) {
         return Err(Response::text(400, "invalid Content-Length header"));
     }
+    let max_bytes = if is_attachment_upload {
+        MAX_ATTACHMENT_BODY_BYTES
+    } else {
+        MAX_BODY_BYTES
+    };
     let len = match trimmed.parse::<usize>() {
         Ok(n) => n,
-        Err(_) => return Err(Response::text(413, "request body exceeds 1 MiB")),
+        Err(_) => return Err(too_large_response(is_attachment_upload, upload_name)),
     };
-    if len > MAX_BODY_BYTES {
-        return Err(Response::text(413, "request body exceeds 1 MiB"));
+    if len > max_bytes {
+        return Err(too_large_response(is_attachment_upload, upload_name));
     }
     Ok(len)
 }
