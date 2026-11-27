@@ -1728,13 +1728,6 @@ fn append_hint_line(output: &mut String, hint: &str) {
     output.push_str(hint);
 }
 
-/// Appends the sandbox denial hint to `output` once when applicable.
-pub fn append_sandbox_denial_hint(output: &mut String) {
-    if let Some(hint) = sandbox_denial_hint(output) {
-        append_hint_line(output, hint);
-    }
-}
-
 fn attach_sandbox_denial_hint(result: &mut GateRunResult) {
     if result.passed {
         return;

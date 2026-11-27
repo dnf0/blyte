@@ -10,7 +10,7 @@ use blyte_agent::run::{Budget, Runner, CONVERSATION_FIXED};
 use blyte_agent::shell::LocalShell;
 use blyte_agent::state::State;
 use blyte_cli::conversation_text::{
-    build, build_with_sandbox, DEFAULT_PROCESS, REFERENCE, REFERENCE_DISPATCH_TOOL,
+    build_with_sandbox, DEFAULT_PROCESS, REFERENCE, REFERENCE_DISPATCH_TOOL,
 };
 use blyte_cli::repl::{render_banner_to, ReplConfig, ReplSession};
 use blyte_provider::{Provider, ProviderError, Request, Response};
@@ -64,7 +64,7 @@ fn shell_mode_gives_the_reference_and_the_default_process() {
     let xdg = tempfile::tempdir().unwrap();
     let _guard = XdgGuard::set(xdg.path());
 
-    let built = build(false, Answers::Nobody, root.path()).unwrap();
+    let built = build_with_sandbox(false, Answers::Nobody, root.path(), true, 0).unwrap();
     let ref_first = REFERENCE.lines().next().unwrap();
     let proc_first = DEFAULT_PROCESS.lines().next().unwrap();
     assert!(
@@ -87,7 +87,7 @@ fn tool_mode_gives_the_tool_reference_and_no_process() {
     let xdg = tempfile::tempdir().unwrap();
     let _guard = XdgGuard::set(xdg.path());
 
-    let built = build(true, Answers::Nobody, root.path()).unwrap();
+    let built = build_with_sandbox(true, Answers::Nobody, root.path(), true, 0).unwrap();
     let tool_first = REFERENCE_DISPATCH_TOOL.lines().next().unwrap();
     assert!(
         built.instructions.contains(tool_first),
@@ -110,7 +110,8 @@ fn instructions_do_not_contain_the_skill_or_the_old_preamble() {
     let _guard = XdgGuard::set(xdg.path());
 
     for dispatch_tool in [false, true] {
-        let built = build(dispatch_tool, Answers::Person, root.path()).unwrap();
+        let built =
+            build_with_sandbox(dispatch_tool, Answers::Person, root.path(), true, 0).unwrap();
         assert!(
             !built.instructions.contains("# blyte as your implementer"),
             "{}",
@@ -141,7 +142,9 @@ fn an_empty_user_file_stops_the_start() {
 
     let err = {
         let _guard = XdgGuard::set(xdg.path());
-        build(false, Answers::Nobody, root.path()).err().unwrap()
+        build_with_sandbox(false, Answers::Nobody, root.path(), true, 0)
+            .err()
+            .unwrap()
     };
     assert!(err.contains(&user_file.display().to_string()), "{err}");
 
@@ -169,7 +172,7 @@ fn repository_rules_for_implementers_are_not_given() {
 
     let built = {
         let _guard = XdgGuard::set(xdg.path());
-        build(false, Answers::Nobody, root.path()).unwrap()
+        build_with_sandbox(false, Answers::Nobody, root.path(), true, 0).unwrap()
     };
 
     let mut state = State::new("plan the release", "");
@@ -264,7 +267,7 @@ fn assembled_instructions_explain_working_without_a_git_repository() {
     let xdg = tempfile::tempdir().unwrap();
     let _guard = XdgGuard::set(xdg.path());
 
-    let built = build(false, Answers::Person, root.path()).unwrap();
+    let built = build_with_sandbox(false, Answers::Person, root.path(), true, 0).unwrap();
     assert!(
         built.instructions.contains("git init"),
         "{}",

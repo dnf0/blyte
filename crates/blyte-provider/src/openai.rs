@@ -136,16 +136,6 @@ impl OpenAi {
         self.api_key.as_deref()
     }
 
-    /// Returns the configured base URL.
-    pub fn base_url(&self) -> &str {
-        &self.base_url
-    }
-
-    /// Returns the stripped wire model identifier.
-    pub fn model(&self) -> &str {
-        &self.model
-    }
-
     /// Serializes a normalised [`Request`] into an OpenAI Chat Completions JSON body.
     pub fn body(&self, req: &Request) -> Value {
         let mut messages: Vec<Value> = Vec::new();

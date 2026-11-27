@@ -446,21 +446,6 @@ impl Gemini {
         self
     }
 
-    pub fn with_token_ttl(mut self, ttl: Duration) -> Self {
-        if let Auth::Vertex(ref mut v) = self.auth {
-            v.token_ttl = ttl;
-        }
-        self
-    }
-
-    pub fn auth(&self) -> &Auth {
-        &self.auth
-    }
-
-    pub fn is_vertex(&self) -> bool {
-        matches!(self.auth, Auth::Vertex(_))
-    }
-
     pub fn project(&self) -> Option<&str> {
         match &self.auth {
             Auth::Vertex(v) => Some(&v.project),

@@ -62,11 +62,6 @@ pub fn build_with_sandbox(
     })
 }
 
-pub fn build(dispatch_tool: bool, answers: Answers, root: &Path) -> Result<Built, String> {
-    let allowed = crate::approval_file::load()?.len();
-    build_with_sandbox(dispatch_tool, answers, root, true, allowed)
-}
-
 pub fn set_state_instructions(
     state: &mut State,
     dispatch_tool: bool,

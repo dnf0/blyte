@@ -6,8 +6,8 @@ use std::sync::Mutex;
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
 use blyte_agent::run::{
-    append_sandbox_denial_hint, base_check_tail, cut_gate_output, run_gate_steps,
-    sandbox_denial_hint, Budget, RunReport, Runner,
+    base_check_tail, cut_gate_output, run_gate_steps, sandbox_denial_hint, Budget, RunReport,
+    Runner,
 };
 use blyte_agent::shell::{LocalShell, Shell};
 use blyte_agent::state::State;
@@ -138,11 +138,6 @@ fn the_hint_is_added_once_to_a_failed_check_that_was_denied() {
         Some(hint)
     );
     assert_eq!(res.output.matches(hint).count(), 1);
-
-    let mut again = res.output.clone();
-    append_sandbox_denial_hint(&mut again);
-    assert_eq!(again, res.output);
-    assert_eq!(again.matches(hint).count(), 1);
 }
 
 #[test]
@@ -190,8 +185,9 @@ fn the_hint_survives_the_stored_cut() {
         raw.push_str(&format!("line {i}: some check output payload\n"));
     }
     raw.push_str("cat: /x/.env: Operation not permitted");
-    append_sandbox_denial_hint(&mut raw);
     let hint = sandbox_denial_hint(&raw).unwrap();
+    raw.push('\n');
+    raw.push_str(hint);
     let cut = cut_gate_output(&raw);
     assert_eq!(cut.lines().last(), Some(hint));
 }
@@ -203,8 +199,9 @@ fn the_hint_survives_the_base_check_tail() {
         raw.push_str(&format!("line {i}\n"));
     }
     raw.push_str("cat: /x/.env: Operation not permitted");
-    append_sandbox_denial_hint(&mut raw);
     let hint = sandbox_denial_hint(&raw).unwrap();
+    raw.push('\n');
+    raw.push_str(hint);
     let tail = base_check_tail(&raw);
     assert_eq!(tail.lines().last(), Some(hint));
 }
