@@ -6,11 +6,12 @@ is listed in `CHANGELOG.md`.
 
 ## In progress
 
-- **Follow-ups to the Linux shell read protection (2026-11-28,
-  `docs/plans/2026-11-28-follow-ups.md`):** on Linux a home folder under `/var` or `/opt` is
-  supported; the unchecked profile builders are private; `blyte plan` accepts a task heading with
-  no colon; `blyte update` updates the way blyte was installed, with no GitHub CLI. The Linux
-  parts are confirmed only by the Linux test run after the merge.
+- **Self-hosting gaps, round 2 (2026-11-28, `docs/plans/2026-11-28-self-hosting-round-2.md`):** the
+  surface is woken when its request is combined and when a passing run is flagged; `blyte dispatch
+  --plan` reads a plan that exists only on `--base`; the research quote check does not read
+  protected files; `blyte update` checks its download against a published SHA-256; known secret
+  values are removed from tool results and gate output
+  (`docs/specs/2026-11-28-redact-known-secrets.md`).
 
 ## Next
 
