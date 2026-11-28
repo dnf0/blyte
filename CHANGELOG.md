@@ -1,3 +1,9 @@
+## v0.76.0 (2026-11-28)
+
+### Feat
+
+- surface wake-ups, plan from the base branch, update checksum, and known secrets redacted (#467)
+
 ## v0.75.0 (2026-11-28)
 
 ### Feat
