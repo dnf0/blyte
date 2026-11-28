@@ -835,6 +835,29 @@ fn peer_started_turn_refuses_publish_and_logs_no_approval() {
     let surface = make_surface(root, "surf-a", publisher.clone(), session);
     assert!(maybe_combine(&surface, "req-peer").unwrap());
     surface.requests.wait_for_idle("req-peer");
+    let combine_deadline = Instant::now() + WAIT;
+    let mut after = 0;
+    loop {
+        let remaining = combine_deadline.saturating_duration_since(Instant::now());
+        let batch = surface
+            .session
+            .entries_after(after, remaining.min(Duration::from_millis(200)));
+        let mut idle = false;
+        for entry in batch {
+            after = after.max(entry.seq);
+            if matches!(entry.body, EntryBody::Idle { .. }) {
+                idle = true;
+            }
+        }
+        if idle {
+            break;
+        }
+        assert!(
+            Instant::now() < combine_deadline,
+            "timed out waiting for combine turn"
+        );
+    }
+    *outcome.lock().unwrap() = None;
     set_publish_tool(Some(Arc::new(SurfacePublishTool::new(Arc::clone(
         &surface,
     )))));
@@ -858,7 +881,6 @@ fn peer_started_turn_refuses_publish_and_logs_no_approval() {
     assert_eq!(peer_resp.status, 200);
 
     let deadline = Instant::now() + WAIT;
-    let mut after = 0;
     let mut seen = Vec::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
