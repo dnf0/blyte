@@ -1191,12 +1191,17 @@ fn confine_linux_sandbox(
         carve_dirs.push(home_path.join(".cargo"));
     }
 
+    let descend_dirs = [PathBuf::from("/var"), PathBuf::from("/opt")];
+    let descend_stop: Vec<PathBuf> = home.into_iter().collect();
+
     let rules = grants::GrantRules {
         protected: &protected,
         own_protected: &own_protected,
         temp_dirs: &temp_dirs,
         carve_dirs: &carve_dirs,
         carve_write_excluded: CARVE_WRITE_EXCLUDED,
+        descend_dirs: &descend_dirs,
+        descend_stop: &descend_stop,
         user_allow_read: allow_read,
     };
     let mut confined = grants::confine_grants(write, read, &rules)?;

@@ -82,10 +82,11 @@ writable paths, and tool directories under `$HOME` (`~/.cargo` granted by its ch
 `.local/bin`, `.local/lib`, `go`, the git and shell configuration files, and similar). The
 credential stores in the table are outside that list, so they cannot be read; `--allow-read PATH`
 adds a path. A temp folder (`/tmp`, `/var/tmp`, `$TMPDIR`) that contains a protected path is not
-granted and the run gets a private `TMPDIR`. A run whose workspace, `--allow-read` path or system
-folder contains a protected path does not start, with the error
-`on Linux the sandbox cannot protect <path>: granted path <path> contains it` (for example a
-workspace at `$HOME`, or `$HOME` under `/var` or `/opt`).
+granted and the run gets a private `TMPDIR`. When `/var` or `/opt` contains a protected path, the
+run is granted everything in them except the home folder and the protected paths. A run whose
+workspace, `--allow-read` path or another system folder contains a protected path does not start,
+with the error `on Linux the sandbox cannot protect <path>: granted path <path> contains it` (for
+example a workspace at `$HOME`).
 
 One limit remains on Linux: a `.env` file in the workspace is readable by shell commands, because
 Landlock cannot deny a file inside the granted workspace; blyte's own `read`, `glob` and `grep`

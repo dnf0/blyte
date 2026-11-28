@@ -16,6 +16,10 @@ pub struct GrantRules<'a> {
     pub carve_dirs: &'a [PathBuf],
     /// Child names of a carved folder that are not granted for writes.
     pub carve_write_excluded: &'a [&'a str],
+    /// Read grants that may be replaced by their parts when they contain a protected path.
+    pub descend_dirs: &'a [PathBuf],
+    /// Folders that are never granted and never listed while descending.
+    pub descend_stop: &'a [PathBuf],
     /// The user's `--allow-read` paths.
     pub user_allow_read: &'a [PathBuf],
 }
@@ -34,6 +38,8 @@ struct ResolvedRules<'a> {
     temp_dirs: Vec<PathBuf>,
     carve_dirs: Vec<PathBuf>,
     carve_write_excluded: &'a [&'a str],
+    descend_dirs: Vec<PathBuf>,
+    descend_stop: Vec<(&'a PathBuf, PathBuf)>,
     user_allow_read: Vec<PathBuf>,
 }
 
@@ -51,6 +57,64 @@ fn resolve_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
         out.push(super::resolve_protected_prefix(p)?);
     }
     Ok(out)
+}
+
+fn descend(
+    dir: &Path,
+    is_top: bool,
+    rules: &ResolvedRules<'_>,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if is_top && e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("cannot read {}: {e}", dir.display())),
+    };
+    let mut children = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+        children.push(entry.path());
+    }
+    children.sort();
+    for child in children {
+        let child_res = super::resolve_protected_prefix(&child)?;
+        let is_stopped_or_protected = rules
+            .descend_stop
+            .iter()
+            .any(|(_, s_res)| child_res.starts_with(s_res))
+            || rules
+                .protected
+                .iter()
+                .any(|(_, p_res)| child_res.starts_with(p_res));
+        if is_stopped_or_protected {
+            continue;
+        }
+        let strictly_contained = rules
+            .protected
+            .iter()
+            .find(|(_, p_res)| p_res.starts_with(&child_res) && *p_res != child_res)
+            .or_else(|| {
+                rules
+                    .descend_stop
+                    .iter()
+                    .find(|(_, s_res)| s_res.starts_with(&child_res) && *s_res != child_res)
+            });
+        if let Some((p_raw, _)) = strictly_contained {
+            let meta = std::fs::symlink_metadata(&child)
+                .map_err(|e| format!("cannot read {}: {e}", child.display()))?;
+            if meta.file_type().is_symlink() {
+                return Err(format!(
+                    "on Linux the sandbox cannot protect {}: {} is a link to a folder that contains it",
+                    p_raw.display(),
+                    child.display()
+                ));
+            }
+            descend(&child, false, rules, out)?;
+            continue;
+        }
+        out.push(child);
+    }
+    Ok(())
 }
 
 fn confine_list(
@@ -138,6 +202,22 @@ fn confine_list(
             continue;
         }
 
+        if !is_write
+            && enclosing.is_none()
+            && strictly_contains_protected
+            && rules.descend_dirs.contains(&g_res)
+        {
+            if rules
+                .descend_stop
+                .iter()
+                .any(|(_, s_res)| g_res.starts_with(s_res))
+            {
+                continue;
+            }
+            descend(&g, true, rules, &mut out)?;
+            continue;
+        }
+
         if let Some((p_raw, _)) = contained {
             return Err(format!(
                 "on Linux the sandbox cannot protect {}: granted path {} contains it",
@@ -168,6 +248,8 @@ pub fn confine_grants(
         temp_dirs: resolve_paths(rules.temp_dirs)?,
         carve_dirs: resolve_paths(rules.carve_dirs)?,
         carve_write_excluded: rules.carve_write_excluded,
+        descend_dirs: resolve_paths(rules.descend_dirs)?,
+        descend_stop: resolve_pairs(rules.descend_stop)?,
         user_allow_read: resolve_paths(rules.user_allow_read)?,
     };
     let mut dropped_temp = Vec::new();
@@ -251,6 +333,8 @@ mod tests {
             temp_dirs: &[],
             carve_dirs: &[],
             carve_write_excluded: &[],
+            descend_dirs: &[],
+            descend_stop: &[],
             user_allow_read: &[],
         }
     }
@@ -292,6 +376,8 @@ mod tests {
             temp_dirs: &temp_dirs,
             carve_dirs: &[],
             carve_write_excluded: &[],
+            descend_dirs: &[],
+            descend_stop: &[],
             user_allow_read: &[],
         };
 
@@ -357,6 +443,8 @@ mod tests {
             temp_dirs: &[],
             carve_dirs: &[],
             carve_write_excluded: &[],
+            descend_dirs: &[],
+            descend_stop: &[],
             user_allow_read: &allow,
         };
 
@@ -377,6 +465,8 @@ mod tests {
             temp_dirs: &[],
             carve_dirs: &[],
             carve_write_excluded: &[],
+            descend_dirs: &[],
+            descend_stop: &[],
             user_allow_read: &allow,
         };
 
@@ -398,6 +488,8 @@ mod tests {
             temp_dirs: &[],
             carve_dirs: &[],
             carve_write_excluded: &[],
+            descend_dirs: &[],
+            descend_stop: &[],
             user_allow_read: &allow,
         };
 
@@ -424,6 +516,8 @@ mod tests {
             temp_dirs: &[],
             carve_dirs: &carve_dirs,
             carve_write_excluded: &["bin", "config.toml"],
+            descend_dirs: &[],
+            descend_stop: &[],
             user_allow_read: &[],
         };
 
@@ -452,6 +546,8 @@ mod tests {
             temp_dirs: &[],
             carve_dirs: &carve_dirs,
             carve_write_excluded: &[],
+            descend_dirs: &[],
+            descend_stop: &[],
             user_allow_read: &[],
         };
 
@@ -474,6 +570,8 @@ mod tests {
             temp_dirs: &[],
             carve_dirs: &carve_dirs,
             carve_write_excluded: &[],
+            descend_dirs: &[],
+            descend_stop: &[],
             user_allow_read: &[],
         };
 
@@ -556,5 +654,166 @@ mod tests {
 
         let chosen = choose_private_tmp(&[missing, present.clone()], &[], &[]).unwrap();
         assert_eq!(chosen.parent(), Some(present.as_path()));
+    }
+
+    #[test]
+    fn descend_grants_siblings_and_skips_home() {
+        let root = tempfile::tempdir().unwrap();
+        let v = root.path().join("v");
+        let home = v.join("lib/home");
+        let aws = home.join(".aws");
+        let other = v.join("lib/other");
+        let log = v.join("log");
+        std::fs::create_dir_all(&aws).unwrap();
+        std::fs::write(home.join("notes.txt"), "private").unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::create_dir_all(&log).unwrap();
+
+        let protected = [aws];
+        let descend_dirs = [v.clone()];
+        let descend_stop = [home];
+        let rules = GrantRules {
+            protected: &protected,
+            own_protected: &[],
+            temp_dirs: &[],
+            carve_dirs: &[],
+            carve_write_excluded: &[],
+            descend_dirs: &descend_dirs,
+            descend_stop: &descend_stop,
+            user_allow_read: &[],
+        };
+
+        let got = confine_grants(vec![], vec![v], &rules).unwrap();
+        let actual: Vec<PathBuf> = got.read.iter().map(|p| p.canonicalize().unwrap()).collect();
+        let expected = vec![other.canonicalize().unwrap(), log.canonicalize().unwrap()];
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn descend_skips_a_protected_child_outside_home() {
+        let root = tempfile::tempdir().unwrap();
+        let v = root.path().join("v");
+        let tokens = v.join("tokens");
+        let a = v.join("a");
+        std::fs::create_dir_all(&tokens).unwrap();
+        std::fs::create_dir_all(&a).unwrap();
+
+        let protected = [tokens];
+        let descend_dirs = [v.clone()];
+        let rules = GrantRules {
+            protected: &protected,
+            own_protected: &[],
+            temp_dirs: &[],
+            carve_dirs: &[],
+            carve_write_excluded: &[],
+            descend_dirs: &descend_dirs,
+            descend_stop: &[],
+            user_allow_read: &[],
+        };
+
+        let got = confine_grants(vec![], vec![v], &rules).unwrap();
+        let actual: Vec<PathBuf> = got.read.iter().map(|p| p.canonicalize().unwrap()).collect();
+        assert_eq!(actual, vec![a.canonicalize().unwrap()]);
+    }
+
+    #[test]
+    fn descend_dir_without_protected_path_is_kept_whole() {
+        let root = tempfile::tempdir().unwrap();
+        let v = root.path().join("v");
+        std::fs::create_dir_all(v.join("a")).unwrap();
+
+        let protected = [root.path().join("home/.aws")];
+        let descend_dirs = [v.clone()];
+        let rules = GrantRules {
+            protected: &protected,
+            own_protected: &[],
+            temp_dirs: &[],
+            carve_dirs: &[],
+            carve_write_excluded: &[],
+            descend_dirs: &descend_dirs,
+            descend_stop: &[],
+            user_allow_read: &[],
+        };
+
+        let got = confine_grants(vec![], vec![v.clone()], &rules).unwrap();
+        assert_eq!(got.read, vec![v]);
+    }
+
+    #[test]
+    fn descend_is_not_applied_to_a_write_grant() {
+        let root = tempfile::tempdir().unwrap();
+        let v = root.path().join("v");
+        let tokens = v.join("tokens");
+        std::fs::create_dir_all(&tokens).unwrap();
+
+        let protected = [tokens];
+        let descend_dirs = [v.clone()];
+        let rules = GrantRules {
+            protected: &protected,
+            own_protected: &[],
+            temp_dirs: &[],
+            carve_dirs: &[],
+            carve_write_excluded: &[],
+            descend_dirs: &descend_dirs,
+            descend_stop: &[],
+            user_allow_read: &[],
+        };
+
+        let err = confine_grants(vec![v], vec![], &rules).unwrap_err();
+        assert!(err.contains("cannot protect"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descend_refuses_a_link_to_a_folder_holding_a_protected_path() {
+        let v = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_secret = outside.path().join("secret");
+        let v_tokens = v.path().join("tokens");
+        let v_a = v.path().join("a");
+        let v_link = v.path().join("link");
+        std::fs::create_dir_all(&outside_secret).unwrap();
+        std::fs::create_dir_all(&v_tokens).unwrap();
+        std::fs::create_dir_all(&v_a).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &v_link).unwrap();
+
+        let protected = [outside_secret, v_tokens];
+        let descend_dirs = [v.path().to_path_buf()];
+        let rules = GrantRules {
+            protected: &protected,
+            own_protected: &[],
+            temp_dirs: &[],
+            carve_dirs: &[],
+            carve_write_excluded: &[],
+            descend_dirs: &descend_dirs,
+            descend_stop: &[],
+            user_allow_read: &[],
+        };
+
+        let err = confine_grants(vec![], vec![v.path().to_path_buf()], &rules).unwrap_err();
+        assert!(err.contains("is a link to a folder"), "{err}");
+    }
+
+    #[test]
+    fn descend_missing_top_level_dir_yields_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let v = root.path().join("v");
+        let home = v.join("home");
+        let protected = [home.join(".aws")];
+        let descend_dirs = [v.clone()];
+        let descend_stop = [home];
+        let rules = GrantRules {
+            protected: &protected,
+            own_protected: &[],
+            temp_dirs: &[],
+            carve_dirs: &[],
+            carve_write_excluded: &[],
+            descend_dirs: &descend_dirs,
+            descend_stop: &descend_stop,
+            user_allow_read: &[],
+        };
+
+        let got = confine_grants(vec![], vec![v], &rules).unwrap();
+        assert!(got.read.is_empty());
     }
 }
