@@ -1832,7 +1832,7 @@ pub fn run_gate_step(
         None => Duration::from_secs(1800),
     };
     let wrapped = format!("(export {}=1\n{cmd}\n)", gate_slots::IN_GATE_ENV);
-    match shell.exec(&wrapped, dir, timeout) {
+    let (passed, output) = match shell.exec(&wrapped, dir, timeout) {
         Ok(o) => {
             let merged = o.merged();
             let raw = merged.trim_end();
@@ -1857,22 +1857,28 @@ pub fn run_gate_step(
                 }
             };
             if o.exit_code != 0 && deadline.is_some_and(|d| now() >= d) {
-                if content.is_empty() {
-                    return (false, format!("exit {}\ngate ran out of time", o.exit_code));
-                }
-                return (
-                    false,
-                    format!("exit {}\ngate ran out of time\n{content}", o.exit_code),
-                );
+                let text = if content.is_empty() {
+                    format!("exit {}\ngate ran out of time", o.exit_code)
+                } else {
+                    format!("exit {}\ngate ran out of time\n{content}", o.exit_code)
+                };
+                (false, text)
+            } else {
+                (o.exit_code == 0, format!("exit {}\n{content}", o.exit_code))
             }
-            (o.exit_code == 0, format!("exit {}\n{content}", o.exit_code))
         }
         Err(e) => {
-            if deadline.is_some_and(|d| now() >= d) {
-                return (false, format!("gate ran out of time: {e}"));
-            }
-            (false, format!("verification command could not run: {e}"))
+            let text = if deadline.is_some_and(|d| now() >= d) {
+                format!("gate ran out of time: {e}")
+            } else {
+                format!("verification command could not run: {e}")
+            };
+            (false, text)
         }
+    };
+    match crate::redact::Redactor::for_root(dir) {
+        Ok(redactor) => (passed, redactor.apply(&output)),
+        Err(e) => (false, e),
     }
 }
 

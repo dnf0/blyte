@@ -19,6 +19,7 @@ pub mod folder_lock;
 pub mod fs;
 pub mod gate_slots;
 pub mod quote_expand;
+pub mod redact;
 pub mod research_check;
 pub mod rules;
 pub mod run;
