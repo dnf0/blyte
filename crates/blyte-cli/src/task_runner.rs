@@ -145,30 +145,29 @@ impl Drop for TempDirGuard {
 }
 
 pub fn build_sandbox_profile(config: &TaskConfig) -> Result<blyte_agent::sandbox::Profile, String> {
-    Ok(build_sandbox_for_root(config, &config.root)?.0)
+    let (profile, tmpdir) = build_sandbox_for_root(config, &config.root)?;
+    if !config.converse && config.in_place.is_none() {
+        if let Some(path) = tmpdir {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+    Ok(profile)
 }
 
 fn build_sandbox_for_root(
     config: &TaskConfig,
     root: &Path,
 ) -> Result<(blyte_agent::sandbox::Profile, Option<PathBuf>), String> {
-    if config.converse || config.in_place.is_some() {
-        let sandbox = blyte_agent::sandbox::conversation_sandbox_net(
+    let sandbox = if config.converse || config.in_place.is_some() {
+        blyte_agent::sandbox::conversation_sandbox_net(
             root,
             &config.allow_read,
             config.network == "on",
-        )?;
-        Ok((sandbox.profile, sandbox.tmpdir))
+        )?
     } else {
-        Ok((
-            blyte_agent::sandbox::default_profile_net(
-                root,
-                &config.allow_read,
-                config.network == "on",
-            ),
-            None,
-        ))
-    }
+        blyte_agent::sandbox::default_sandbox_net(root, &config.allow_read, config.network == "on")?
+    };
+    Ok((sandbox.profile, sandbox.tmpdir))
 }
 
 pub struct ConversePolicy {
@@ -289,27 +288,39 @@ impl BackgroundBaseCheck {
     ) -> Result<Self, String> {
         let cancel = Arc::new(blyte_agent::shell::CancelHandle::new());
         check_in_place_sandbox(config)?;
-        let shell: Box<dyn blyte_agent::shell::Shell + Send> = match &config.container {
-            Some(cid) => Box::new(blyte_agent::shell::CancellableContainerShell {
-                inner: blyte_agent::shell::ContainerShell {
-                    container_id: cid.clone(),
-                    workdir: base_dir.clone(),
-                },
-                cancel: Arc::clone(&cancel),
-            }),
-            None => {
-                let inner = if config.sandbox == "on" && blyte_agent::sandbox::available() {
-                    let (profile, tmpdir) = build_sandbox_for_root(config, &base_dir)?;
-                    blyte_agent::shell::LocalShell::sandboxed(profile).with_tmpdir(tmpdir)
-                } else {
-                    blyte_agent::shell::LocalShell::new()
-                };
-                Box::new(blyte_agent::shell::CancellableLocalShell {
-                    inner,
-                    cancel: Arc::clone(&cancel),
-                })
-            }
-        };
+        let (shell, tmp_guard): (Box<dyn blyte_agent::shell::Shell + Send>, TempDirGuard) =
+            match &config.container {
+                Some(cid) => (
+                    Box::new(blyte_agent::shell::CancellableContainerShell {
+                        inner: blyte_agent::shell::ContainerShell {
+                            container_id: cid.clone(),
+                            workdir: base_dir.clone(),
+                        },
+                        cancel: Arc::clone(&cancel),
+                    }),
+                    TempDirGuard(None),
+                ),
+                None => {
+                    let (inner, tmpdir) =
+                        if config.sandbox == "on" && blyte_agent::sandbox::available() {
+                            let (profile, tmpdir) = build_sandbox_for_root(config, &base_dir)?;
+                            (
+                                blyte_agent::shell::LocalShell::sandboxed(profile)
+                                    .with_tmpdir(tmpdir.clone()),
+                                tmpdir,
+                            )
+                        } else {
+                            (blyte_agent::shell::LocalShell::new(), None)
+                        };
+                    (
+                        Box::new(blyte_agent::shell::CancellableLocalShell {
+                            inner,
+                            cancel: Arc::clone(&cancel),
+                        }),
+                        TempDirGuard(tmpdir),
+                    )
+                }
+            };
         let shared = Arc::new((
             Mutex::new(BackgroundBaseCheckData {
                 state: blyte_agent::run::BaseCheckState::Pending,
@@ -320,6 +331,7 @@ impl BackgroundBaseCheck {
         let thread_shared = Arc::clone(&shared);
         let thread_cancel = Arc::clone(&cancel);
         let join = std::thread::spawn(move || {
+            let _tmp_guard = tmp_guard;
             let started = std::time::Instant::now();
             let mut deadline = deadline;
             let result = blyte_agent::run::run_gate_steps_cancellable(
@@ -893,7 +905,7 @@ fn run_task_with_event_callback(
     check_network_mode(config)?;
     check_in_place_sandbox(config)?;
     let started = std::time::Instant::now();
-    let _one_shot_tmp_guard = if config.converse {
+    let (conversation_owned_tmpdir, _one_shot_tmp_guard) = if config.converse {
         if std::env::var("BLYTE_SESSION")
             .map(|v| v.is_empty())
             .unwrap_or(true)
@@ -913,10 +925,10 @@ fn run_task_with_event_callback(
             approver,
             state.runtime.conversation.is_some(),
         )?;
-        let guard = if state.runtime.conversation.is_none() {
-            policy.private_tmpdir.map(|p| TempDirGuard(Some(p)))
+        let (owned_tmpdir, guard) = if state.runtime.conversation.is_none() {
+            (None, policy.private_tmpdir.map(|p| TempDirGuard(Some(p))))
         } else {
-            None
+            (policy.private_tmpdir, None)
         };
         if state.brief.instructions.is_none() {
             let lines = crate::conversation_text::set_state_instructions(
@@ -948,14 +960,14 @@ fn run_task_with_event_callback(
             blyte_agent::tools::set_blyte_run_store(Some(run_store));
             blyte_agent::tools::set_in_place_lock_path(Some(lock_path));
         }
-        guard
+        (owned_tmpdir, guard)
     } else {
         configure_converse_policy(false, false, &config.root, None, false)?;
         blyte_agent::tools::set_blyte_tool(None);
         blyte_agent::tools::set_blyte_tasks_dir(None);
         blyte_agent::tools::set_blyte_run_store(None);
         blyte_agent::tools::set_in_place_lock_path(None);
-        None
+        (None, None)
     };
     blyte_agent::tools::set_dispatch_cmd(config.dispatch_cmd.clone());
     // 1. Initialize LLM provider from environment credentials or model specification.
@@ -1007,7 +1019,7 @@ fn run_task_with_event_callback(
         )?),
         None => None,
     };
-    let mut _in_place_tmp_guard = TempDirGuard(None);
+    let mut _private_tmp_guard = TempDirGuard(None);
     let (persistent, session_fs, root) = match &config.container {
         Some(cid) => (
             blyte_agent::shell::PersistentShell::container(
@@ -1035,8 +1047,8 @@ fn run_task_with_event_callback(
                 );
             }
             let (shell, tmpdir) = build_local_shell_with_tmpdir(config)?;
-            if config.in_place.is_some() {
-                _in_place_tmp_guard.0 = tmpdir;
+            if tmpdir.is_some() && tmpdir != conversation_owned_tmpdir {
+                _private_tmp_guard.0 = tmpdir;
             }
             (shell, None, config.root.clone())
         }

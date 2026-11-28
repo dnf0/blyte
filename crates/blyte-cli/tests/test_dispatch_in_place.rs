@@ -1780,3 +1780,37 @@ fn research_run_refuses_preexisting_scratch_without_start_record() {
         "expected {expected_file:?} in stderr: {stderr_file}"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn in_place_dispatch_in_home_is_refused_on_linux() {
+    let env = TestEnv::new();
+    let out = env.blyte_with_home(
+        &["dispatch", "HOME1", env.task_file.to_str().unwrap()],
+        None,
+        &env.folder,
+    );
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit when dispatching in HOME, stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("on Linux"),
+        "expected 'on Linux' in stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(".ssh") || stderr.contains(".aws") || stderr.contains(".gnupg"),
+        "expected protected path name in stderr: {stderr}"
+    );
+    assert!(
+        !env.lock_path().exists(),
+        "refused dispatch must not create lock file"
+    );
+    assert!(
+        !env.run_store().join("HOME1.start.json").exists(),
+        "refused dispatch must not write .start.json"
+    );
+}

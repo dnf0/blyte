@@ -296,20 +296,28 @@ pub fn sandbox_kind(config: &TaskConfig) -> String {
     if config.sandbox != "on" || !blyte_agent::sandbox::available() {
         return "off".into();
     }
-    match blyte_agent::sandbox::default_profile_net(
+    match blyte_agent::sandbox::default_sandbox_net(
         &config.root,
         &config.allow_read,
         config.network == "on",
     ) {
-        Profile::Seatbelt(_) => "seatbelt".into(),
-        Profile::Landlock(_) => "landlock".into(),
-        Profile::LandlockOffline(_) => "landlock-offline".into(),
-        Profile::LandlockConfined { block_tcp, .. } => {
-            if block_tcp {
-                "landlock-offline".into()
-            } else {
-                "landlock".into()
+        Ok(sandbox) => {
+            if let Some(dir) = sandbox.tmpdir {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+            match sandbox.profile {
+                Profile::Seatbelt(_) => "seatbelt".into(),
+                Profile::Landlock(_) => "landlock".into(),
+                Profile::LandlockOffline(_) => "landlock-offline".into(),
+                Profile::LandlockConfined { block_tcp, .. } => {
+                    if block_tcp {
+                        "landlock-offline".into()
+                    } else {
+                        "landlock".into()
+                    }
+                }
             }
         }
+        Err(err) => format!("error: {err}"),
     }
 }

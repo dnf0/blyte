@@ -127,16 +127,47 @@ fn read_allowed_excludes_blyte_state_and_config_dirs() {
 #[cfg(target_os = "linux")]
 mod linux {
     use std::ffi::OsString;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     use blyte_agent::sandbox::{
         available, conversation_profile, conversation_profile_net, conversation_sandbox,
-        default_profile_net, landlock_abi, surface_token_path, Profile,
+        conversation_sandbox_net, default_profile_net, default_sandbox_net, landlock_abi,
+        surface_token_path, Profile,
     };
     use blyte_agent::shell::{LocalShell, PersistentShell, Shell};
 
     use super::ENV_LOCK;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn remove(key: &'static str) -> Self {
+            let prev = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    struct RemoveDirGuard(PathBuf);
+
+    impl Drop for RemoveDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     struct EnvGuard {
         home: Option<OsString>,
@@ -457,5 +488,151 @@ mod linux {
                 env_res.merged()
             );
         }
+    }
+
+    #[test]
+    fn landlock_default_and_conversation_sandboxes_cannot_read_cargo_credentials() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if !landlock_or_skip() {
+            return;
+        }
+        let real_home = std::env::var("HOME").unwrap();
+        let fake_home = tempfile::tempdir_in(&real_home).unwrap();
+        let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        std::fs::create_dir_all(tmp_base).unwrap();
+        let repo = tempfile::tempdir_in(tmp_base).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        let _guard = EnvGuard::set(Some(fake_home.path()), None);
+        let _blyte_state = EnvVarGuard::remove("BLYTE_STATE_DIR");
+
+        let cargo_dir = fake_home.path().join(".cargo");
+        let registry_file = cargo_dir.join("registry/x");
+        std::fs::create_dir_all(registry_file.parent().unwrap()).unwrap();
+        std::fs::write(&registry_file, "cargo-registry-ok\n").unwrap();
+
+        let cred_toml = cargo_dir.join("credentials.toml");
+        std::fs::write(&cred_toml, "token = \"cargo-toml-secret\"\n").unwrap();
+
+        let cred_plain = cargo_dir.join("credentials");
+        std::fs::write(&cred_plain, "token = \"cargo-plain-secret\"\n").unwrap();
+
+        let conv_network = landlock_abi() < 4;
+        for sb in [
+            default_sandbox_net(repo.path(), &[], true).unwrap(),
+            conversation_sandbox_net(repo.path(), &[], conv_network).unwrap(),
+        ] {
+            let sh = LocalShell::sandboxed(sb.profile).with_tmpdir(sb.tmpdir);
+
+            let ok = sh
+                .exec(
+                    &format!("cat '{}'", registry_file.display()),
+                    repo.path(),
+                    Duration::from_secs(30),
+                )
+                .unwrap();
+            assert_eq!(ok.exit_code, 0, "{}", ok.merged());
+            assert!(ok.merged().contains("cargo-registry-ok"), "{}", ok.merged());
+
+            for (path, secret) in [
+                (&cred_toml, "cargo-toml-secret"),
+                (&cred_plain, "cargo-plain-secret"),
+            ] {
+                let res = sh
+                    .exec(
+                        &format!("cat '{}'", path.display()),
+                        repo.path(),
+                        Duration::from_secs(30),
+                    )
+                    .unwrap();
+                assert_ne!(res.exit_code, 0, "{}", res.merged());
+                assert!(!res.merged().contains(secret), "{}", res.merged());
+            }
+        }
+    }
+
+    #[test]
+    fn landlock_default_sandbox_with_home_under_tmp_gets_private_tmp() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if !landlock_or_skip() {
+            return;
+        }
+        let fake_home = tempfile::tempdir_in("/tmp").unwrap();
+        let tmp_base = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        std::fs::create_dir_all(tmp_base).unwrap();
+        let repo = tempfile::tempdir_in(tmp_base).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        let _guard = EnvGuard::set(Some(fake_home.path()), None);
+        let _tmpdir = EnvVarGuard::remove("TMPDIR");
+        let _blyte_state = EnvVarGuard::remove("BLYTE_STATE_DIR");
+
+        let aws_cred = fake_home.path().join(".aws/credentials");
+        std::fs::create_dir_all(aws_cred.parent().unwrap()).unwrap();
+        std::fs::write(&aws_cred, "aws-tmp-secret\n").unwrap();
+
+        let sb = default_sandbox_net(repo.path(), &[], true).unwrap();
+        let private_tmp = sb
+            .tmpdir
+            .clone()
+            .expect("HOME under /tmp must get a private TMPDIR");
+        let _cleanup = RemoveDirGuard(private_tmp.clone());
+
+        assert!(
+            !private_tmp.starts_with("/tmp"),
+            "private tmpdir {} must be outside /tmp",
+            private_tmp.display()
+        );
+        let canon_tmp = Path::new("/tmp").canonicalize().unwrap();
+        let canon_private = private_tmp.canonicalize().unwrap();
+        assert!(
+            !canon_private.starts_with(&canon_tmp),
+            "private tmpdir {} must be outside {}",
+            canon_private.display(),
+            canon_tmp.display()
+        );
+
+        let sh = LocalShell::sandboxed(sb.profile).with_tmpdir(sb.tmpdir);
+        let mk = sh
+            .exec("mktemp -d", repo.path(), Duration::from_secs(30))
+            .unwrap();
+        assert_eq!(mk.exit_code, 0, "{}", mk.merged());
+
+        let cred = sh
+            .exec(
+                r#"cat "$HOME/.aws/credentials""#,
+                repo.path(),
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        assert_ne!(cred.exit_code, 0, "{}", cred.merged());
+        assert!(
+            !cred.merged().contains("aws-tmp-secret"),
+            "{}",
+            cred.merged()
+        );
+    }
+
+    #[test]
+    fn default_and_conversation_sandboxes_refuse_root_containing_protected_path() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let real_home = std::env::var("HOME").unwrap();
+        let fake_home = tempfile::tempdir_in(&real_home).unwrap();
+        let _guard = EnvGuard::set(Some(fake_home.path()), None);
+        let _blyte_state = EnvVarGuard::remove("BLYTE_STATE_DIR");
+
+        let default_err = default_sandbox_net(fake_home.path(), &[], true).unwrap_err();
+        assert!(default_err.contains("cannot protect"), "{default_err}");
+
+        let conv_err = conversation_sandbox_net(fake_home.path(), &[], true).unwrap_err();
+        assert!(conv_err.contains("cannot protect"), "{conv_err}");
     }
 }
