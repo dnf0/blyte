@@ -11,7 +11,7 @@ documentation.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-blyte-provider = { path = "../blyte-provider", version = "0.74.0" }
+blyte-provider = { path = "../blyte-provider", version = "0.74.1" }
 grep-searcher.workspace = true
 grep-regex.workspace = true
 ignore.workspace = true
