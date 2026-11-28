@@ -19,20 +19,14 @@ The goal is a surface that does a whole change alone, on Gemini: plan, dispatch,
 and land. A check of the code on 2026-11-28 found every task of the two 2026-11-26 plans merged,
 and these gaps, in the order they block that goal:
 
-- **A surface is not told when its request is combined,** and cannot look up a request's state,
-  so it never asks to publish on its own.
-- **A verified run with review flags stalls silently:** combining waits for a person's verdict and
-  the surface is not woken to see the flag.
-- **`reference.md` still says `--gate` overrides the gate;** the surface's tool refuses it.
-- **A plan written by direct edit is not on `HEAD`,** so dispatching from it needs `--base wip/<id>`,
-  which the instructions do not say.
 - **Landing:** a surface cannot check a pull request, merge it, or bring `main` up to date, and so
   cannot finish a release either. What a surface may merge without the user is a decision to take
   first.
 - **Publishing needs a click on the page every time,** and fails for a surface in a terminal. The
   click is deliberate; whether to allow it to be waived is the same decision.
-- **Shell output is not checked for credential content** before it reaches the model. On Linux a
-  workspace `.env` is readable by the shell (`docs/security.md`). A design is being researched.
+- **Secret values blyte does not know are still shown to the model:** only exact known values are
+  removed from tool results and gate output; direct edits, setup steps and the second-model review
+  are not covered (`docs/security.md`).
 
 ## Done
 
