@@ -80,6 +80,67 @@ fn test_load_allow_read() {
     assert!(cfg_empty.dispatch.allow_read.is_empty());
 }
 
+#[test]
+fn test_load_surface_publish() {
+    use blyte_cli::config::PublishApproval;
+
+    let tmp_default = tempfile::tempdir().unwrap();
+    std::fs::write(tmp_default.path().join("blyte.toml"), "[dispatch]\n").unwrap();
+    let cfg_default = load(tmp_default.path())
+        .unwrap()
+        .expect("should load config");
+    assert_eq!(cfg_default.surface.publish, PublishApproval::Auto);
+
+    let tmp_empty_surface = tempfile::tempdir().unwrap();
+    std::fs::write(tmp_empty_surface.path().join("blyte.toml"), "[surface]\n").unwrap();
+    let cfg_empty_surface = load(tmp_empty_surface.path())
+        .unwrap()
+        .expect("should load config");
+    assert_eq!(cfg_empty_surface.surface.publish, PublishApproval::Auto);
+
+    let tmp_ask = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp_ask.path().join("blyte.toml"),
+        "[surface]\npublish = \"ask\"\n",
+    )
+    .unwrap();
+    let cfg_ask = load(tmp_ask.path()).unwrap().expect("should load config");
+    assert_eq!(cfg_ask.surface.publish, PublishApproval::Ask);
+
+    let tmp_auto = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp_auto.path().join("blyte.toml"),
+        "[surface]\npublish = \"auto\"\n",
+    )
+    .unwrap();
+    let cfg_auto = load(tmp_auto.path()).unwrap().expect("should load config");
+    assert_eq!(cfg_auto.surface.publish, PublishApproval::Auto);
+
+    let tmp_never = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp_never.path().join("blyte.toml"),
+        "[surface]\npublish = \"never\"\n",
+    )
+    .unwrap();
+    let err_never = load(tmp_never.path()).unwrap_err();
+    assert!(
+        err_never.contains("never"),
+        "expected error to contain `never`, got: {err_never}"
+    );
+
+    let tmp_other = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp_other.path().join("blyte.toml"),
+        "[surface]\nother = 1\n",
+    )
+    .unwrap();
+    let err_other = load(tmp_other.path()).unwrap_err();
+    assert!(
+        err_other.contains("other"),
+        "expected error to contain `other`, got: {err_other}"
+    );
+}
+
 fn git(dir: &Path, args: &[&str]) {
     let ok = Command::new("git")
         .args(["-c", "user.name=t", "-c", "user.email=t@t"])

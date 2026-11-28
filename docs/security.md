@@ -155,6 +155,14 @@ To allow specific command prefixes without prompting, list them one per line in
 `$XDG_CONFIG_HOME/blyte/allow-unsandboxed` (or `~/.config/blyte/allow-unsandboxed`). Blank lines are
 ignored. By default no file exists and nothing is allowed in advance.
 
+By default (`[surface] publish = "auto"` in `blyte.toml`), the surface's `publish` tool pushes a
+combined request's branch and opens a pull request without asking the user first, recording a notice
+with the branch and pull request URL in the surface's log. That means untrusted text the model read
+can lead to a branch being pushed and a pull request opened with no person in between. The branch is
+one blyte combined from this surface's own verified runs, turns started by another surface are
+refused, and nothing reaches the default branch without a person merging it. Set
+`[surface] publish = "ask"` in `blyte.toml` to require explicit user approval before every publish.
+
 ## Containers
 
 With `--container`, commands run inside that container and the host sandbox does not apply.

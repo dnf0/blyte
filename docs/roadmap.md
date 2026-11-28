@@ -22,8 +22,9 @@ and these gaps, in the order they block that goal:
 - **Landing:** a surface cannot check a pull request, merge it, or bring `main` up to date, and so
   cannot finish a release either. What a surface may merge without the user is a decision to take
   first.
-- **Publishing needs a click on the page every time,** and fails for a surface in a terminal. The
-  click is deliberate; whether to allow it to be waived is the same decision.
+- **A terminal surface cannot publish:** it builds no surface state for requests. A page surface
+  publishes without asking by default since 2026-11-28 (`[surface] publish`), and merging stays
+  with the user (`docs/specs/2026-11-28-publish-and-land-approval.md`).
 - **Secret values blyte does not know are still shown to the model:** only exact known values are
   removed from tool results and gate output; direct edits, setup steps and the second-model review
   are not covered (`docs/security.md`).

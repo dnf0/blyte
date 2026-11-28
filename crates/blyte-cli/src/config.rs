@@ -77,6 +77,21 @@ pub struct ReviewConfig {
     pub risky: Vec<String>,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PublishApproval {
+    #[default]
+    Auto,
+    Ask,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceConfig {
+    #[serde(default)]
+    pub publish: PublishApproval,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepoConfig {
@@ -84,6 +99,8 @@ pub struct RepoConfig {
     pub dispatch: DispatchConfig,
     #[serde(default)]
     pub review: ReviewConfig,
+    #[serde(default)]
+    pub surface: SurfaceConfig,
 }
 
 pub fn match_risky_paths(
