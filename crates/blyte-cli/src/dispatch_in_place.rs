@@ -267,6 +267,17 @@ pub fn run(args: &DispatchArgs) -> i32 {
         return 2;
     }
 
+    #[cfg(target_os = "linux")]
+    if !args.research {
+        if let Err(e) = crate::serve::check_linux_non_repo_root_for_env(
+            &root,
+            std::env::var_os("HOME").as_deref(),
+        ) {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    }
+
     let state_dir = match crate::surface_registry::state_dir() {
         Ok(d) => d,
         Err(e) => {

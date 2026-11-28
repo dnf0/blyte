@@ -55,9 +55,10 @@ existing toolchains continue to work because the caches (`~/.cargo/registry`, `~
 `~/.m2/repository`) stay writable and the protected directories remain readable.
 
 On Linux, Landlock can only *allow* paths and cannot carve deny rules out of an allowed directory.
-`~/.rustup`, `~/go/bin` (only `~/go/pkg` is granted), `~/.local/bin`, `~/.local/lib`, and
-`~/.local/state/blyte` are still read-only because they are omitted from the allow-list. However,
-subpaths inside granted trees — `~/.cargo/bin`, `~/.cargo/config*`, `~/.cargo/credentials*`, `~/.cargo/env*`,
+`~/.rustup`, `~/go/bin` (only `~/go/pkg` is granted), `~/.local/bin`, `~/.local/lib`,
+`~/.local/state/blyte`, `~/.cargo/bin`, `~/.cargo/config*`, `~/.cargo/credentials*`, and
+`~/.cargo/env*` are not writable there because they are omitted from the allow-list (only the
+non-protected `~/.cargo` cache children are granted). However, subpaths inside granted trees —
 `~/.local/share/uv/tools`, `~/.local/share/mise`, `~/.local/share/pipx`,
 `~/.local/share/keyrings`, `~/.gradle/init.d`, `~/.m2/settings.xml`, and
 `<git common dir>/hooks` and `<git common dir>/config` — remain writable on Linux.
@@ -76,10 +77,19 @@ legitimately needs, say, a kubeconfig.
 Linux's Landlock can only *allow* paths, not carve holes in an allowed tree, so on Linux reads are
 confined to an allow-list instead: the system directories (`/usr`, `/lib`, `/bin`, `/etc`, `/opt`,
 `/proc`, `/sys`, `/dev`, `/run`, `/var`, `/tmp`, `/snap`, `/nix`), the workspace and the other
-writable paths, and tool directories under `$HOME` (`.cargo`, `.rustup`, `.cache`, `.npm`, `.nvm`,
-`.pyenv`, `.local/bin`, `.local/lib`, `go`, the git and shell configuration files, and similar). The
+writable paths, and tool directories under `$HOME` (`~/.cargo` granted by its children, without
+`credentials` and `credentials.toml`, plus `.rustup`, `.cache`, `.npm`, `.nvm`, `.pyenv`,
+`.local/bin`, `.local/lib`, `go`, the git and shell configuration files, and similar). The
 credential stores in the table are outside that list, so they cannot be read; `--allow-read PATH`
-adds a path. The environment filter and the write sandbox apply on both.
+adds a path. A temp folder (`/tmp`, `/var/tmp`, `$TMPDIR`) that contains a protected path is not
+granted and the run gets a private `TMPDIR`. A run whose workspace, `--allow-read` path or system
+folder contains a protected path does not start, with the error
+`on Linux the sandbox cannot protect <path>: granted path <path> contains it` (for example a
+workspace at `$HOME`, or `$HOME` under `/var` or `/opt`).
+
+One limit remains on Linux: a `.env` file in the workspace is readable by shell commands, because
+Landlock cannot deny a file inside the granted workspace; blyte's own `read`, `glob` and `grep`
+tools refuse it on both platforms. The environment filter and the write sandbox apply on both.
 
 ## The environment filter
 

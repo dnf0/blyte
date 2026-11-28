@@ -1563,7 +1563,7 @@ fn verify_steps(
     sandbox_on: bool,
     timeout: Duration,
     setup: Option<&str>,
-) -> (Vec<InitStep>, bool) {
+) -> Result<(Vec<InitStep>, bool), String> {
     let common_dir_raw = Command::new("git")
         .args(["rev-parse", "--git-common-dir"])
         .current_dir(root)
@@ -1610,11 +1610,11 @@ fn verify_steps(
                 "warning: git worktree add failed: {}; skipping verification",
                 String::from_utf8_lossy(&o.stderr)
             );
-            return (steps, false);
+            return Ok((steps, false));
         }
     } else {
         eprintln!("warning: failed to run git worktree add; skipping verification");
-        return (steps, false);
+        return Ok((steps, false));
     }
 
     struct Guard<'a> {
@@ -1662,12 +1662,25 @@ fn verify_steps(
         }
     }
 
+    struct TmpDirGuard(Option<PathBuf>);
+    impl Drop for TmpDirGuard {
+        fn drop(&mut self) {
+            if let Some(ref path) = self.0 {
+                let _ = std::fs::remove_dir_all(path);
+            }
+        }
+    }
+
     use blyte_agent::shell::Shell;
-    let shell = if sandbox_on {
-        let profile = blyte_agent::sandbox::default_profile_net(&wt_dir, &[], true);
-        blyte_agent::shell::LocalShell::sandboxed(profile)
+    let (shell, _tmp_guard) = if sandbox_on {
+        let sandbox = blyte_agent::sandbox::default_sandbox_net(&wt_dir, &[], true)?;
+        (
+            blyte_agent::shell::LocalShell::sandboxed(sandbox.profile)
+                .with_tmpdir(sandbox.tmpdir.clone()),
+            TmpDirGuard(sandbox.tmpdir),
+        )
     } else {
-        blyte_agent::shell::LocalShell::new()
+        (blyte_agent::shell::LocalShell::new(), TmpDirGuard(None))
     };
 
     for step in &mut steps {
@@ -1696,7 +1709,7 @@ fn verify_steps(
         step.verdict = Some(verdict);
     }
 
-    (steps, setup_passed)
+    Ok((steps, setup_passed))
 }
 
 pub fn run(args: &InitArgs) -> i32 {
@@ -1788,14 +1801,20 @@ pub fn run(args: &InitArgs) -> i32 {
     };
 
     let (mut verified_steps, mut setup_passed) = if !args.no_verify && !steps.is_empty() {
-        verify_steps(
+        match verify_steps(
             &root,
             steps,
             &env,
             args.sandbox == "on",
             Duration::from_secs(args.step_timeout),
             setup.as_deref(),
-        )
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
+            }
+        }
     } else {
         (steps, setup.is_some())
     };
@@ -1822,14 +1841,20 @@ pub fn run(args: &InitArgs) -> i32 {
                         verdict: None,
                     })
                     .collect();
-                let (verified_detected, detected_setup_passed) = verify_steps(
+                let (verified_detected, detected_setup_passed) = match verify_steps(
                     &root,
                     detected_steps,
                     &env,
                     args.sandbox == "on",
                     Duration::from_secs(args.step_timeout),
                     setup.as_deref(),
-                );
+                ) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        return 2;
+                    }
+                };
                 if verified_detected
                     .iter()
                     .any(|s| matches!(s.verdict, Some(Verdict::Passed)))
