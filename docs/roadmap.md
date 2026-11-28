@@ -73,5 +73,7 @@ Kept for about the last four weeks; older items are in `CHANGELOG.md` and the gi
   workflow on merge to `main`. Still open: a custom domain (about USD 10-50 a year), which would keep
   links stable if the repository moves.
 - **Still open now that the repository is public:**
-  - Contributions: a DCO sign-off or a CLA, decided before accepting outside
-    pull requests.
+  - Contributions: a DCO sign-off or a CLA. Put off on 2026-11-28: no outside contributions are
+    expected, and Apache-2.0 section 5 already puts a submitted contribution under the project's
+    licence. Decide when the first outside pull request arrives; a CLA is needed only to keep the
+    option of relicensing.
