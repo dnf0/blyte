@@ -257,7 +257,12 @@ fn push_home_local_grants(home_path: &Path, allowed: &mut Vec<PathBuf>) {
         if let Ok(entries) = std::fs::read_dir(&local_dir) {
             let mut paths: Vec<PathBuf> = entries
                 .flatten()
-                .filter(|entry| entry.file_name() != std::ffi::OsStr::new("state"))
+                .filter(|entry| {
+                    let name = entry.file_name();
+                    name != std::ffi::OsStr::new("state")
+                        && name != std::ffi::OsStr::new("bin")
+                        && name != std::ffi::OsStr::new("lib")
+                })
                 .map(|entry| entry.path())
                 .collect();
             paths.sort();
@@ -273,6 +278,25 @@ fn push_home_local_grants(home_path: &Path, allowed: &mut Vec<PathBuf>) {
             paths.sort();
             allowed.extend(paths);
         }
+    }
+}
+
+fn push_home_grants(allowed: &mut Vec<PathBuf>) {
+    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        let home_path = PathBuf::from(home);
+        for sub in [
+            ".cargo",
+            ".cache",
+            ".npm",
+            "Library/Caches",
+            ".gradle",
+            ".m2",
+            "go/pkg",
+            ".docker/buildx",
+        ] {
+            allowed.push(home_path.join(sub));
+        }
+        push_home_local_grants(&home_path, allowed);
     }
 }
 
@@ -630,6 +654,39 @@ fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
 }
 
 #[cfg(target_os = "macos")]
+const PROTECTED_HOME_PATHS: &[&str] = &[
+    ".cargo/bin",
+    ".cargo/config",
+    ".cargo/config.toml",
+    ".cargo/credentials",
+    ".cargo/credentials.toml",
+    ".cargo/env",
+    ".cargo/env.fish",
+    ".cargo/env.nu",
+    ".local/bin",
+    ".local/lib",
+    ".local/state/blyte",
+    ".local/share/uv/tools",
+    ".local/share/mise",
+    ".local/share/pipx",
+    ".local/share/keyrings",
+    ".gradle/init.d",
+    ".m2/settings.xml",
+];
+
+#[cfg(target_os = "macos")]
+fn deny_protected_home_writes(mut profile: String) -> String {
+    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        let home_path = PathBuf::from(home);
+        for sub in PROTECTED_HOME_PATHS {
+            let escaped = escape_path(&canonicalize_existing_prefix(&home_path.join(sub)));
+            profile.push_str(&format!(r#"(deny file-write* (subpath "{escaped}"))"#));
+        }
+    }
+    profile
+}
+
+#[cfg(target_os = "macos")]
 /// Seatbelt lets an earlier `allow file-read-data` override a later `deny file-read*`, so each read
 /// deny here is written for `file-read-data` as well.
 fn deny_state_blyte_write(mut profile: String) -> String {
@@ -667,59 +724,25 @@ fn deny_state_blyte_write(mut profile: String) -> String {
 /// A vector of paths that should be allowed for file writes under the sandbox.
 pub fn default_allowed(root: &Path) -> Vec<PathBuf> {
     let mut allowed = Vec::new();
-    // Allow the workspace root where changes are made.
     allowed.push(root.to_path_buf());
 
-    // Resolve git common directory so git commits in a worktree land in the shared repo.
-    if let Ok(output) = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(root)
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .output()
-    {
-        if output.status.success() {
-            let s = String::from_utf8_lossy(&output.stdout);
-            let path_str = s.trim();
-            if !path_str.is_empty() {
-                allowed.push(PathBuf::from(path_str));
-            }
-        }
+    if let Some(common_dir) = git_common_dir(root) {
+        allowed.push(common_dir);
     }
 
-    // Allow system temporary directories used by compilers and scripts.
     allowed.push(PathBuf::from("/private/tmp"));
     allowed.push(PathBuf::from("/private/var/folders"));
     allowed.push(PathBuf::from("/tmp"));
     allowed.push(PathBuf::from("/var/tmp"));
     allowed.push(PathBuf::from("/dev"));
 
-    // Allow user-specified temporary directory if configured in the environment.
     if let Some(tmp) = std::env::var_os("TMPDIR") {
         if !tmp.is_empty() {
             allowed.push(PathBuf::from(tmp));
         }
     }
 
-    // Allow common developer tool caches under $HOME so cargo, npm, etc. can function.
-    if let Some(home) = std::env::var_os("HOME") {
-        if !home.is_empty() {
-            let home_path = PathBuf::from(home);
-            for sub in [
-                ".cargo",
-                ".rustup",
-                ".cache",
-                ".npm",
-                "Library/Caches",
-                ".gradle",
-                ".m2",
-                "go",
-                ".docker/buildx",
-            ] {
-                allowed.push(home_path.join(sub));
-            }
-            push_home_local_grants(&home_path, &mut allowed);
-        }
-    }
+    push_home_grants(&mut allowed);
 
     // Allow tool caches in enclosing node_modules above the worktree (vitest's .vite-temp, etc.).
     let home = std::env::var_os("HOME")
@@ -935,25 +958,7 @@ pub fn conversation_paths(root: &Path) -> Result<ConversationPaths, String> {
         }
     }
 
-    if let Some(home) = std::env::var_os("HOME") {
-        if !home.is_empty() {
-            let home_path = PathBuf::from(home);
-            for sub in [
-                ".cargo",
-                ".rustup",
-                ".cache",
-                ".npm",
-                "Library/Caches",
-                ".gradle",
-                ".m2",
-                "go",
-                ".docker/buildx",
-            ] {
-                raw.push(home_path.join(sub));
-            }
-            push_home_local_grants(&home_path, &mut raw);
-        }
-    }
+    push_home_grants(&mut raw);
 
     let mut allowed = Vec::with_capacity(raw.len() + 2);
     if is_repo {
@@ -1134,10 +1139,10 @@ pub fn conversation_sandbox_with_edits(
                 Some(home) if !home.is_empty() => read_denied(Path::new(&home)),
                 _ => Vec::new(),
             };
-            let base = deny_state_blyte_write(allow_edit_worktrees(
+            let base = deny_protected_home_writes(deny_state_blyte_write(allow_edit_worktrees(
                 profile_with(root, &paths.allowed, &deny_read, allow_read),
                 edit_worktrees,
-            ));
+            )));
             let profiled = if network {
                 base
             } else {
@@ -1297,23 +1302,61 @@ pub fn offline(mut profile: String, docker_sockets: &[PathBuf]) -> String {
 }
 
 #[cfg(target_os = "macos")]
+fn is_in_non_state_protected_home(real_path: &Path) -> bool {
+    let in_blyte_state = state_blyte_dir().is_some_and(|state_dir| {
+        let real_state = canonicalize_existing_prefix(&state_dir);
+        real_path.starts_with(&real_state)
+    }) || std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .is_some_and(|home| {
+            let real_default_state =
+                canonicalize_existing_prefix(&PathBuf::from(home).join(".local/state/blyte"));
+            real_path.starts_with(&real_default_state)
+        });
+    !in_blyte_state
+        && std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .is_some_and(|home| {
+                let home_path = PathBuf::from(home);
+                PROTECTED_HOME_PATHS.iter().any(|sub| {
+                    let protected = canonicalize_existing_prefix(&home_path.join(sub));
+                    real_path.starts_with(&protected)
+                })
+            })
+}
+
+#[cfg(target_os = "macos")]
 fn default_profile_base(root: &Path, allow_read: &[PathBuf]) -> String {
     let deny_read = match std::env::var_os("HOME") {
         Some(home) if !home.is_empty() => read_denied(Path::new(&home)),
         _ => Vec::new(),
     };
-    let mut profile = deny_state_blyte_write(profile_with(
+    let mut profile = deny_protected_home_writes(deny_state_blyte_write(profile_with(
         root,
         &default_allowed(root),
         &deny_read,
         allow_read,
-    ));
-    if let Some(state_dir) = state_blyte_dir() {
-        let real_root = canonicalize_existing_prefix(root);
+    )));
+    let real_root = canonicalize_existing_prefix(root);
+    let is_scratch = state_blyte_dir().is_some_and(|state_dir| {
         let real_state = canonicalize_existing_prefix(&state_dir);
-        if is_run_scratch_workspace(&real_root, &real_state) {
-            let escaped = escape_subpath(&real_root);
+        is_run_scratch_workspace(&real_root, &real_state)
+    });
+    let reallow_root = is_scratch || is_in_non_state_protected_home(&real_root);
+    if reallow_root {
+        let escaped = escape_path(&real_root);
+        profile.push_str(&format!(r#"(allow file-write* (subpath "{escaped}"))"#));
+    }
+    if let Some(common_dir) = git_common_dir(root) {
+        let real_common = canonicalize_existing_prefix(&common_dir);
+        let covered_by_root = reallow_root && real_common.starts_with(&real_root);
+        if !covered_by_root && is_in_non_state_protected_home(&real_common) {
+            let escaped = escape_path(&real_common);
             profile.push_str(&format!(r#"(allow file-write* (subpath "{escaped}"))"#));
+        }
+        for sub in ["hooks", "config"] {
+            let escaped = escape_path(&canonicalize_existing_prefix(&real_common.join(sub)));
+            profile.push_str(&format!(r#"(deny file-write* (subpath "{escaped}"))"#));
         }
     }
     profile
