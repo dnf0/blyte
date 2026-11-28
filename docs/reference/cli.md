@@ -283,7 +283,9 @@ Options:
 
 It checks the latest GitHub release over HTTPS and updates the way blyte was installed: if blyte
 was installed from crates.io with cargo it runs `cargo install blyte --locked`, otherwise it
-downloads this machine's release binary over HTTPS and checks that it runs. In either case it keeps
+downloads this machine's release binary over HTTPS and checks that it runs. Before running or
+installing the downloaded binary, its SHA-256 is compared with the release's published checksum
+and the download is refused if they differ or no checksum is published. In either case it keeps
 the old binary beside it as `blyte.prev`, and refreshes every unedited copy of the skill it
 installed (for Claude Code and Codex). Like `blyte skill install`, it also checks for a superseded
 `blyte-research` skill directory and warns on stderr to remove it.
