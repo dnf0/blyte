@@ -1,3 +1,9 @@
+## v0.74.0 (2026-11-28)
+
+### Feat
+
+- **surface**: waiting on you, start in another folder, and an app window (#458)
+
 ## v0.73.2 (2026-11-28)
 
 ### Fix
