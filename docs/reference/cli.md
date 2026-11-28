@@ -281,11 +281,12 @@ Options:
   -h, --help      Print help
 ```
 
-It downloads this machine's binary from the latest GitHub release through the GitHub CLI (`gh`,
-signed in with access to the repository), checks that it runs, keeps the old binary beside it as
-`blyte.prev`, and refreshes every unedited copy of the skill it installed (for Claude Code and Codex).
-Like `blyte skill install`, it also checks for a superseded `blyte-research` skill directory and
-warns on stderr to remove it.
+It checks the latest GitHub release over HTTPS and updates the way blyte was installed: if blyte
+was installed from crates.io with cargo it runs `cargo install blyte --locked`, otherwise it
+downloads this machine's release binary over HTTPS and checks that it runs. In either case it keeps
+the old binary beside it as `blyte.prev`, and refreshes every unedited copy of the skill it
+installed (for Claude Code and Codex). Like `blyte skill install`, it also checks for a superseded
+`blyte-research` skill directory and warns on stderr to remove it.
 
 ## blyte status
 
