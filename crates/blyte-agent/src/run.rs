@@ -473,6 +473,22 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+pub fn read_unless_protected(fs: &dyn Fs, path: &Path) -> Result<String, String> {
+    if fs.is_local() {
+        match crate::sandbox::is_protected_read(path) {
+            Ok(true) => {
+                return Err(format!(
+                    "{} is a protected path and is not read",
+                    path.display()
+                ));
+            }
+            Ok(false) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    fs.read(path)
+}
+
 impl<'a> Runner<'a> {
     fn emit(&self, e: Event<'_>) {
         if let Some(f) = self.on_event {
@@ -683,7 +699,7 @@ impl<'a> Runner<'a> {
         // roots. Anything else would paste a file the run is not allowed to see into the report.
         let expand_read = |p: &Path| {
             let allowed = tools::resolve_for_read(self.fs, &self.root, &p.to_string_lossy())?;
-            self.fs.read(&allowed)
+            read_unless_protected(self.fs, &allowed)
         };
         let (report, mut problems) = quote_expand::expand(&raw, &expand_read);
         if report != raw {
@@ -708,7 +724,7 @@ impl<'a> Runner<'a> {
                 }
             }
         }
-        let read = |p: &Path| self.fs.read(p);
+        let read = |p: &Path| read_unless_protected(self.fs, p);
         let sources = research_check::Sources {
             workspace: &self.root,
             read_roots: &read_roots,
@@ -746,7 +762,7 @@ impl<'a> Runner<'a> {
                 }
             }
         }
-        let read = |p: &Path| self.fs.read(p);
+        let read = |p: &Path| read_unless_protected(self.fs, p);
         let claims = research_check::claims(
             &report,
             &research_check::Sources {
