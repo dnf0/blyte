@@ -1760,6 +1760,18 @@ fn request_action_error_message(err: RequestActionError) -> String {
     }
 }
 
+pub fn verify_auto_publish_branch(
+    root: &Path,
+    request: &str,
+    branch: &str,
+) -> Result<String, String> {
+    let record = load_combine_record(root, request)?
+        .ok_or_else(|| format!("combine record for request {request} is missing"))?;
+    let expected = combine_record_tip(&record).to_string();
+    crate::publish::verify_branch_commit(root, branch, &expected)?;
+    Ok(expected)
+}
+
 pub fn publish_request_with_approval(
     surface: &Surface,
     approver: &dyn blyte_agent::approval::Approver,
@@ -1879,12 +1891,8 @@ pub fn publish_request_with_approval(
             (Some(publish_guard), commit)
         }
         crate::config::PublishApproval::Auto => {
-            let current = crate::publish::branch_commit(&surface.root, &branch)?;
-            let expected = load_combine_record(&surface.root, request)?
-                .map(|rec| combine_record_tip(&rec).to_string())
-                .unwrap_or_else(|| current.clone());
-            crate::publish::verify_branch_commit(&surface.root, &branch, &expected)?;
-            (None, current)
+            let commit = verify_auto_publish_branch(&surface.root, request, &branch)?;
+            (None, commit)
         }
     };
 

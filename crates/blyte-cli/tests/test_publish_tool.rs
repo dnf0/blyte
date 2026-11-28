@@ -11,7 +11,8 @@ use blyte_agent::tools::{execute, set_approval, set_publish_tool, PublishTool};
 use blyte_cli::combine::{CombineCheck, CombineRecord, CombineState};
 use blyte_cli::http::{Request, Response};
 use blyte_cli::requests::{
-    load_published_record, maybe_combine, Publisher, RequestsState, SurfacePublishTool,
+    load_published_record, maybe_combine, verify_auto_publish_branch, Publisher, RequestsState,
+    SurfacePublishTool,
 };
 use blyte_cli::serve::{route, Surface, MESSAGE_HEADER, TOKEN_HEADER};
 use blyte_cli::session::{Entry, EntryBody, PromptRunner, Session};
@@ -1133,4 +1134,23 @@ fn publish_ask_records_notice_without_not_asked_and_invalid_config_errors() {
         )),
         "expected publish notice without `not asked`, got: {entries:?}"
     );
+}
+
+#[test]
+fn auto_publish_branch_check_errors_when_combine_record_is_missing() {
+    let (dir, base_sha, _) = init_repo_with_origin_toml("[dispatch]\ngate = \"true\"\n");
+    let root = dir.path();
+
+    let branch_sha = fast_import_commit(
+        root,
+        "blyte/req-no-record",
+        Some(&base_sha),
+        &[("only.txt", "only\n")],
+        "Unrecorded branch commit",
+    );
+    assert_ne!(branch_sha, base_sha);
+
+    let err = verify_auto_publish_branch(root, "req-no-record", "blyte/req-no-record").unwrap_err();
+    assert!(err.contains("combine record"), "{err}");
+    assert!(err.contains("req-no-record"), "{err}");
 }
