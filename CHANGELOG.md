@@ -1,3 +1,9 @@
+## v0.75.0 (2026-11-28)
+
+### Feat
+
+- a Linux home under /var or /opt, blyte update without the GitHub CLI, and a plan heading fix (#464)
+
 ## v0.74.1 (2026-11-28)
 
 ### Fix
