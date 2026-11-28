@@ -19,6 +19,8 @@
 //! - On Linux, Landlock (ABI >= 4, Linux 6.7+) handles TCP connection restriction (`AccessNet::ConnectTcp`),
 //!   denying all outbound TCP connections (including localhost). UDP and Unix sockets are not restricted by Landlock.
 
+pub mod grants;
+
 use std::path::{Path, PathBuf};
 
 /// Sandbox profile restricting command execution.
@@ -1123,6 +1125,107 @@ pub fn conversation_sandbox_net(
     conversation_sandbox_with_edits(root, allow_read, network, &[])
 }
 
+#[cfg(not(target_os = "macos"))]
+const CARVE_WRITE_EXCLUDED: &[&str] = &[
+    "credentials",
+    "credentials.toml",
+    "bin",
+    "config",
+    "config.toml",
+    "env",
+    "env.fish",
+    "env.nu",
+];
+
+#[cfg(not(target_os = "macos"))]
+fn confine_linux_sandbox(
+    write: Vec<PathBuf>,
+    read: Vec<PathBuf>,
+    allow_read: &[PathBuf],
+    network: bool,
+    existing_tmpdir: Option<PathBuf>,
+) -> Result<ConversationSandbox, String> {
+    let home = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from);
+    if let Some(home_path) = home.as_deref() {
+        let cargo_dir = home_path.join(".cargo");
+        if cargo_dir.is_dir() {
+            for sub in ["registry", "git"] {
+                let dir = cargo_dir.join(sub);
+                std::fs::create_dir_all(&dir)
+                    .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+            }
+        }
+    }
+
+    let protected = protected_read_paths()?;
+    let mut own_protected = Vec::new();
+    if let Some(home_path) = home.as_deref() {
+        own_protected.push(resolve_protected_prefix(
+            &home_path.join(".config/blyte/env"),
+        )?);
+    }
+    if let Some(dir) = surface_token_dir() {
+        let resolved = resolve_protected_prefix(&dir)?;
+        if !own_protected.contains(&resolved) {
+            own_protected.push(resolved);
+        }
+    }
+
+    let mut temp_dirs = vec![
+        PathBuf::from("/tmp"),
+        PathBuf::from("/var/tmp"),
+        PathBuf::from("/private/tmp"),
+        PathBuf::from("/private/var/folders"),
+    ];
+    let env_tmpdir = std::env::var_os("TMPDIR")
+        .filter(|t| !t.is_empty())
+        .map(PathBuf::from);
+    if let Some(tmp) = env_tmpdir.as_ref() {
+        temp_dirs.push(tmp.clone());
+    }
+
+    let mut carve_dirs = Vec::new();
+    if let Some(home_path) = home.as_deref() {
+        carve_dirs.push(home_path.join(".cargo"));
+    }
+
+    let rules = grants::GrantRules {
+        protected: &protected,
+        own_protected: &own_protected,
+        temp_dirs: &temp_dirs,
+        carve_dirs: &carve_dirs,
+        carve_write_excluded: CARVE_WRITE_EXCLUDED,
+        user_allow_read: allow_read,
+    };
+    let mut confined = grants::confine_grants(write, read, &rules)?;
+
+    let tmpdir = if !confined.dropped_temp.is_empty() && existing_tmpdir.is_none() {
+        let mut candidates = Vec::new();
+        if let Some(tmp) = env_tmpdir {
+            candidates.push(tmp);
+        }
+        candidates.push(PathBuf::from("/tmp"));
+        candidates.push(PathBuf::from("/var/tmp"));
+        let chosen = grants::choose_private_tmp(&candidates, &confined.dropped_temp, &protected)?;
+        create_private_temp_dir(&chosen)?;
+        confined.write.push(chosen.clone());
+        Some(chosen)
+    } else {
+        existing_tmpdir
+    };
+
+    Ok(ConversationSandbox {
+        profile: Profile::LandlockConfined {
+            write: confined.write,
+            read: confined.read,
+            block_tcp: !network,
+        },
+        tmpdir,
+    })
+}
+
 /// Returns the `--converse` sandbox profile and optional private `TMPDIR` allowing writes in the
 /// given open edit worktrees.
 pub fn conversation_sandbox_with_edits(
@@ -1132,54 +1235,48 @@ pub fn conversation_sandbox_with_edits(
     edit_worktrees: &[PathBuf],
 ) -> Result<ConversationSandbox, String> {
     let paths = conversation_paths(root)?;
-    let profile = {
-        #[cfg(target_os = "macos")]
-        {
-            let deny_read = match std::env::var_os("HOME") {
-                Some(home) if !home.is_empty() => read_denied(Path::new(&home)),
+    #[cfg(target_os = "macos")]
+    {
+        let deny_read = match std::env::var_os("HOME") {
+            Some(home) if !home.is_empty() => read_denied(Path::new(&home)),
+            _ => Vec::new(),
+        };
+        let base = deny_protected_home_writes(deny_state_blyte_write(allow_edit_worktrees(
+            profile_with(root, &paths.allowed, &deny_read, allow_read),
+            edit_worktrees,
+        )));
+        let profiled = if network {
+            base
+        } else {
+            let socks = match std::env::var_os("HOME") {
+                Some(home) if !home.is_empty() => docker_sockets(Path::new(&home)),
                 _ => Vec::new(),
             };
-            let base = deny_protected_home_writes(deny_state_blyte_write(allow_edit_worktrees(
-                profile_with(root, &paths.allowed, &deny_read, allow_read),
-                edit_worktrees,
-            )));
-            let profiled = if network {
-                base
-            } else {
-                let socks = match std::env::var_os("HOME") {
-                    Some(home) if !home.is_empty() => docker_sockets(Path::new(&home)),
-                    _ => Vec::new(),
-                };
-                offline(base, &socks)
-            };
-            Profile::Seatbelt(deny_unix_sockets(profiled, &current_agent_sockets()))
+            offline(base, &socks)
+        };
+        Ok(ConversationSandbox {
+            profile: Profile::Seatbelt(deny_unix_sockets(profiled, &current_agent_sockets())),
+            tmpdir: paths.tmpdir,
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let home = std::env::var_os("HOME");
+        let home_path = home.as_ref().filter(|h| !h.is_empty()).map(Path::new);
+        let mut extra_read = vec![root.to_path_buf()];
+        if let Some(common_dir) = git_common_dir(root) {
+            extra_read.push(common_dir);
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let home = std::env::var_os("HOME");
-            let home_path = home.as_ref().filter(|h| !h.is_empty()).map(Path::new);
-            let mut extra_read = vec![root.to_path_buf()];
-            if let Some(common_dir) = git_common_dir(root) {
-                extra_read.push(common_dir);
-            }
-            let main_wt = main_checkout_root_checked(root)?.join(".wt");
-            if main_wt.exists() {
-                extra_read.push(main_wt);
-            }
-            extra_read.extend_from_slice(allow_read);
-            let mut write = paths.allowed;
-            write.extend(edit_worktrees.iter().cloned());
-            Profile::LandlockConfined {
-                write,
-                read: read_allowed(home_path, &extra_read),
-                block_tcp: !network,
-            }
+        let main_wt = main_checkout_root_checked(root)?.join(".wt");
+        if main_wt.exists() {
+            extra_read.push(main_wt);
         }
-    };
-    Ok(ConversationSandbox {
-        profile,
-        tmpdir: paths.tmpdir,
-    })
+        extra_read.extend_from_slice(allow_read);
+        let mut write = paths.allowed;
+        write.extend(edit_worktrees.iter().cloned());
+        let read = read_allowed(home_path, &extra_read);
+        confine_linux_sandbox(write, read, allow_read, network, paths.tmpdir)
+    }
 }
 
 /// Builds the `--converse` sandbox including all currently open edit worktrees.
@@ -1366,6 +1463,7 @@ fn default_profile_base(root: &Path, allow_read: &[PathBuf]) -> String {
 ///
 /// On macOS, returns an SBPL profile denying writes outside `default_allowed` and reads under credential stores.
 /// On other platforms, returns a confined Landlock profile with `default_allowed` and `read_allowed`.
+/// On Linux this does not check its grants against the protected paths; use [`default_sandbox_net`].
 pub fn default_profile(root: &Path, allow_read: &[PathBuf]) -> Profile {
     #[cfg(target_os = "macos")]
     {
@@ -1390,6 +1488,7 @@ pub fn default_profile(root: &Path, allow_read: &[PathBuf]) -> Profile {
 ///
 /// When `network` is true, returns the same profile as [`default_profile`].
 /// When `network` is false, returns an offline profile denying outbound network connections.
+/// On Linux this does not check its grants against the protected paths; use [`default_sandbox_net`].
 pub fn default_profile_net(root: &Path, allow_read: &[PathBuf], network: bool) -> Profile {
     if network {
         return default_profile(root, allow_read);
@@ -1415,6 +1514,29 @@ pub fn default_profile_net(root: &Path, allow_read: &[PathBuf], network: bool) -
             read: read_allowed(home_path, allow_read),
             block_tcp: true,
         }
+    }
+}
+
+/// Returns the default sandbox profile and optional private `TMPDIR`.
+pub fn default_sandbox_net(
+    root: &Path,
+    allow_read: &[PathBuf],
+    network: bool,
+) -> Result<ConversationSandbox, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(ConversationSandbox {
+            profile: default_profile_net(root, allow_read, network),
+            tmpdir: None,
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let home = std::env::var_os("HOME");
+        let home_path = home.as_ref().filter(|h| !h.is_empty()).map(Path::new);
+        let write = default_allowed(root);
+        let read = read_allowed(home_path, allow_read);
+        confine_linux_sandbox(write, read, allow_read, network, None)
     }
 }
 
