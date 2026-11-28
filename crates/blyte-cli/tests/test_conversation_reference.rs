@@ -227,7 +227,10 @@ fn reference_describes_unsandboxed_and_no_dev_null_redirect() {
         !blyte_cli::conversation_text::SANDBOX_ON_PARAGRAPH.contains("(for example `git push`)")
     );
     assert!(blyte_cli::conversation_text::SANDBOX_ON_PARAGRAPH
-        .contains("To publish a request, use the `publish` tool; it runs only when the user approves it on the page."));
+        .contains("To publish a request, use the `publish` tool;"));
+    assert!(blyte_cli::conversation_text::SANDBOX_ON_PARAGRAPH.contains("publish = \"ask\""));
+    assert!(REFERENCE.contains("publish = \"ask\""));
+    assert!(DEFAULT_PROCESS.contains("publish = \"ask\""));
     assert!(!REFERENCE.contains("> /dev/null"));
     assert!(DEFAULT_PROCESS.contains(".wt/tasks/<name>.md"));
     assert!(DEFAULT_PROCESS.contains("approval"));

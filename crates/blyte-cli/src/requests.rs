@@ -1825,51 +1825,68 @@ pub fn publish_request_with_approval(
             ));
         }
     }
-    if surface.session.has_pending_publish(request) {
-        return Err(format!(
-            "a publish approval for request {request} is already waiting"
-        ));
-    }
-    let _publish_guard = surface
-        .requests
-        .try_begin_publish(request)
-        .ok_or_else(|| format!("a publish approval for request {request} is already waiting"))?;
-    if surface.session.has_pending_publish(request) {
-        return Err(format!(
-            "a publish approval for request {request} is already waiting"
-        ));
-    }
+    let publish_approval = crate::config::load_with_fallback(&surface.root)?
+        .map(|(cfg, _)| cfg.surface.publish)
+        .unwrap_or_default();
 
     let branch = status
         .branch
         .ok_or_else(|| format!("request {request} has no combined branch"))?;
-    let remote_url = crate::publish::origin_remote_url(&surface.root)?;
-    let base = crate::publish::default_branch(&surface.root)?;
-    let commit = crate::publish::branch_commit(&surface.root, &branch)?;
-    let commits = crate::publish::branch_commit_subjects(&surface.root, &branch, &base)?;
 
-    let details = blyte_agent::approval::PublishDetails {
-        request: request.to_string(),
-        remote_url,
-        branch: branch.clone(),
-        base,
-        commit: commit.clone(),
-        commits,
-        title: trimmed_title.to_string(),
-        body: body.to_string(),
+    let (_publish_guard, commit) = match publish_approval {
+        crate::config::PublishApproval::Ask => {
+            if surface.session.has_pending_publish(request) {
+                return Err(format!(
+                    "a publish approval for request {request} is already waiting"
+                ));
+            }
+            let publish_guard = surface.requests.try_begin_publish(request).ok_or_else(|| {
+                format!("a publish approval for request {request} is already waiting")
+            })?;
+            if surface.session.has_pending_publish(request) {
+                return Err(format!(
+                    "a publish approval for request {request} is already waiting"
+                ));
+            }
+
+            let remote_url = crate::publish::origin_remote_url(&surface.root)?;
+            let base = crate::publish::default_branch(&surface.root)?;
+            let commit = crate::publish::branch_commit(&surface.root, &branch)?;
+            let commits = crate::publish::branch_commit_subjects(&surface.root, &branch, &base)?;
+
+            let details = blyte_agent::approval::PublishDetails {
+                request: request.to_string(),
+                remote_url,
+                branch: branch.clone(),
+                base,
+                commit: commit.clone(),
+                commits,
+                title: trimmed_title.to_string(),
+                body: body.to_string(),
+            };
+
+            match approver.ask_publish(&details) {
+                blyte_agent::approval::Approval::Approved => {}
+                blyte_agent::approval::Approval::Denied => {
+                    return Err("the user declined".to_string());
+                }
+                blyte_agent::approval::Approval::Unavailable => {
+                    return Err("publish approval is not available here".to_string());
+                }
+            }
+
+            crate::publish::verify_branch_commit(&surface.root, &branch, &commit)?;
+            (Some(publish_guard), commit)
+        }
+        crate::config::PublishApproval::Auto => {
+            let current = crate::publish::branch_commit(&surface.root, &branch)?;
+            let expected = load_combine_record(&surface.root, request)?
+                .map(|rec| combine_record_tip(&rec).to_string())
+                .unwrap_or_else(|| current.clone());
+            crate::publish::verify_branch_commit(&surface.root, &branch, &expected)?;
+            (None, current)
+        }
     };
-
-    match approver.ask_publish(&details) {
-        blyte_agent::approval::Approval::Approved => {}
-        blyte_agent::approval::Approval::Denied => {
-            return Err("the user declined".to_string());
-        }
-        blyte_agent::approval::Approval::Unavailable => {
-            return Err("publish approval is not available here".to_string());
-        }
-    }
-
-    crate::publish::verify_branch_commit(&surface.root, &branch, &commit)?;
 
     let published = load_published_record(&surface.root, request)?;
     let already_pushed = published.pushed_commit.as_deref() == Some(commit.as_str());
@@ -1878,7 +1895,21 @@ pub fn publish_request_with_approval(
     }
 
     match open_request_pull_request(surface, request, trimmed_title, body) {
-        Ok(url) => Ok(url),
+        Ok(url) => {
+            let mut notice = format!("Published {request}: branch {branch}, {url}");
+            if publish_approval == crate::config::PublishApproval::Auto {
+                notice.push_str(" (not asked: [surface] publish = \"auto\")");
+            }
+            if let Err(e) = surface
+                .session
+                .record_decision(request, "publish", Some(&notice), None)
+            {
+                surface.session.record_error(&format!(
+                    "failed to record publish notice for {request}: {e}"
+                ));
+            }
+            Ok(url)
+        }
         Err(err) => {
             let detail = request_action_error_message(err);
             if already_pushed {

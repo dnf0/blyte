@@ -98,6 +98,7 @@ max_turns = 300
 | `base_check` | boolean | default `true`: the gate is run once on the untouched worktree before the implementer starts, and a failure ends the run as `blocked` with no model call; set `false` (or pass `--no-base-check`) for a task meant to fix a check that already fails |
 | `comments` | string | default `"gate"`: the gate starts with `blyte comments --base <sha>`, which fails on any comment the run added, and `blyte review` flags them; `"review"` flags them in review only; `"off"` does neither. Any other value is an error |
 | `fix_round` | boolean | default `true`: when a verified run's fresh model review confirms fallbacks or raises concerns, run the implementer once more in the same worktree to address them and review again before writing the summary |
+| `[surface] publish` | string | default `"auto"`: the surface's `publish` tool pushes a combined request's branch and opens a pull request without asking, and records a notice in the surface log; set `"ask"` to require the user's approval before pushing and opening the pull request. Any other value is an error |
 | `allow_read` | array of strings | extra paths the sandbox may read, for every dispatch; `~/` and `$BLYTE_MAIN_CHECKOUT/` are expanded, otherwise absolute |
 | `model` | string | model identifier or provider selection |
 | `max_seconds` | integer | wall-clock budget in seconds (default 3600) |

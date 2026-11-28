@@ -218,7 +218,7 @@ fn fast_import_commit(
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-fn init_repo_with_origin(gate: &str) -> (tempfile::TempDir, String, String) {
+fn init_repo_with_origin_toml(toml: &str) -> (tempfile::TempDir, String, String) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     git(root, &["init", "-q", "-b", "main"]);
@@ -226,12 +226,11 @@ fn init_repo_with_origin(gate: &str) -> (tempfile::TempDir, String, String) {
     let mut cfg = std::fs::read_to_string(&cfg_path).unwrap();
     cfg.push_str("\n[user]\n\temail = test@example.com\n\tname = Test User\n");
     std::fs::write(&cfg_path, cfg).unwrap();
-    let toml = format!("[dispatch]\ngate = {gate:?}\n");
     let base_sha = fast_import_commit(
         root,
         "main",
         None,
-        &[("README.md", "hello\n"), ("blyte.toml", &toml)],
+        &[("README.md", "hello\n"), ("blyte.toml", toml)],
         "initial commit",
     );
     git(root, &["reset", "--hard", "main"]);
@@ -249,6 +248,11 @@ fn init_repo_with_origin(gate: &str) -> (tempfile::TempDir, String, String) {
         ],
     );
     (dir, base_sha, remote_url)
+}
+
+fn init_repo_with_origin(gate: &str) -> (tempfile::TempDir, String, String) {
+    let toml = format!("[dispatch]\ngate = {gate:?}\n\n[surface]\npublish = \"ask\"\n");
+    init_repo_with_origin_toml(&toml)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -525,7 +529,7 @@ fn publish_tool_refuses_unknown_other_surface_unready_combining_and_duplicate_pe
         shell_quote(&started_file),
         shell_quote(&release_file)
     );
-    let toml = format!("[dispatch]\ngate = {gate_cmd:?}\n");
+    let toml = format!("[dispatch]\ngate = {gate_cmd:?}\n\n[surface]\npublish = \"ask\"\n");
     std::fs::write(root.join("blyte.toml"), &toml).unwrap();
     write_completed_run(
         root,
@@ -921,4 +925,212 @@ fn peer_started_turn_refuses_publish_and_logs_no_approval() {
             e.body,
             EntryBody::ApprovalRequested { .. } | EntryBody::PublishApprovalRequested { .. }
         )));
+}
+
+#[test]
+fn publish_defaults_to_auto_without_surface_table_and_records_notice() {
+    let _guard = ToolLockGuard::acquire();
+    let (dir, base_sha, _) = init_repo_with_origin_toml("[dispatch]\ngate = \"true\"\n");
+    let root = dir.path();
+
+    write_completed_run(
+        root,
+        "R1",
+        "req-auto",
+        Some("surf-a"),
+        &base_sha,
+        "auto.txt",
+        "auto\n",
+        "Auto publish commit",
+    );
+
+    let pr_url = "https://github.com/example/blyte-test/pull/77";
+    let publisher = FakePublisher::ok(pr_url);
+    let session = Session::start(Box::new(NoopRunner), "test-model".to_string());
+    let surface = make_surface(root, "surf-a", publisher.clone(), session);
+    assert!(maybe_combine(&surface, "req-auto").unwrap());
+    surface.requests.wait_for_idle("req-auto");
+
+    let tool = SurfacePublishTool::new(Arc::clone(&surface));
+    let url = tool
+        .publish("req-auto", "feat: auto publish", "Auto body")
+        .unwrap();
+    assert_eq!(url, pr_url);
+    assert_eq!(
+        publisher.push_calls(),
+        vec![PushCall {
+            branch: "blyte/req-auto".to_string(),
+        }]
+    );
+    assert_eq!(
+        publisher.pr_calls(),
+        vec![PrCall {
+            branch: "blyte/req-auto".to_string(),
+            title: "feat: auto publish".to_string(),
+            body: "Auto body".to_string(),
+        }]
+    );
+
+    let entries = surface.session.entries_after(0, Duration::ZERO);
+    assert!(!entries.iter().any(|e| matches!(
+        e.body,
+        EntryBody::ApprovalRequested { .. }
+            | EntryBody::PublishApprovalRequested { .. }
+            | EntryBody::ApprovalAnswered { .. }
+    )));
+    assert!(
+        entries.iter().any(|e| matches!(
+            &e.body,
+            EntryBody::Decision { run, action, note }
+                if run == "req-auto"
+                    && action == "publish"
+                    && note.as_deref()
+                        == Some(
+                            "Published req-auto: branch blyte/req-auto, https://github.com/example/blyte-test/pull/77 (not asked: [surface] publish = \"auto\")"
+                        )
+        )),
+        "expected publish notice containing `not asked`, got: {entries:?}"
+    );
+}
+
+#[test]
+fn publish_auto_still_refuses_other_surface_uncombined_peer_turn_and_moved_branch() {
+    let _guard = ToolLockGuard::acquire();
+    let (dir, base_sha, _) = init_repo_with_origin_toml("[dispatch]\ngate = \"true\"\n");
+    let root = dir.path();
+
+    let publisher = FakePublisher::ok("https://github.com/example/blyte-test/pull/88");
+    let session = Session::start(Box::new(NoopRunner), "test-model".to_string());
+    let surface = make_surface(root, "surf-a", publisher.clone(), session);
+    let tool = SurfacePublishTool::new(Arc::clone(&surface));
+
+    write_completed_run(
+        root,
+        "R-other",
+        "req-other",
+        Some("surf-b"),
+        &base_sha,
+        "other.txt",
+        "other\n",
+        "Other surface commit",
+    );
+    let err_other = tool.publish("req-other", "Title", "Body").unwrap_err();
+    assert!(err_other.contains("another surface"), "{err_other}");
+
+    write_completed_run(
+        root,
+        "R-wait",
+        "req-wait",
+        Some("surf-a"),
+        &base_sha,
+        "wait.txt",
+        "wait\n",
+        "Waiting commit",
+    );
+    let err_uncombined = tool.publish("req-wait", "Title", "Body").unwrap_err();
+    assert!(
+        err_uncombined.contains("not ready to publish"),
+        "{err_uncombined}"
+    );
+
+    write_completed_run(
+        root,
+        "R-comb",
+        "req-comb",
+        Some("surf-a"),
+        &base_sha,
+        "comb.txt",
+        "comb\n",
+        "Combined commit",
+    );
+    assert!(maybe_combine(&surface, "req-comb").unwrap());
+    surface.requests.wait_for_idle("req-comb");
+
+    blyte_agent::tools::set_blyte_started_by(Some("other-surface".to_string()));
+    let err_peer = tool.publish("req-comb", "Title", "Body").unwrap_err();
+    blyte_agent::tools::set_blyte_started_by(None);
+    assert!(err_peer.contains("other-surface"), "{err_peer}");
+
+    let combined_sha = git(root, &["rev-parse", "refs/heads/blyte/req-comb"]);
+    let moved_sha = fast_import_commit(
+        root,
+        "blyte/req-comb",
+        Some(&combined_sha),
+        &[("extra.txt", "moved\n")],
+        "Unexpected commit",
+    );
+    assert_ne!(moved_sha, combined_sha);
+    let err_moved = tool.publish("req-comb", "Title", "Body").unwrap_err();
+    assert!(
+        err_moved.contains("not ready to publish") || err_moved.contains("moved"),
+        "{err_moved}"
+    );
+
+    assert!(publisher.push_calls().is_empty());
+    assert!(publisher.pr_calls().is_empty());
+}
+
+#[test]
+fn publish_ask_records_notice_without_not_asked_and_invalid_config_errors() {
+    let _guard = ToolLockGuard::acquire();
+    let (dir, base_sha, _) = init_repo_with_origin("true");
+    let root = dir.path();
+
+    write_completed_run(
+        root,
+        "R1",
+        "req-ask-notice",
+        Some("surf-a"),
+        &base_sha,
+        "ask.txt",
+        "ask\n",
+        "Ask notice commit",
+    );
+
+    let pr_url = "https://github.com/example/blyte-test/pull/101";
+    let publisher = FakePublisher::ok(pr_url);
+    let session = Session::start(Box::new(NoopRunner), "test-model".to_string());
+    let surface = make_surface(root, "surf-a", publisher.clone(), session);
+    assert!(maybe_combine(&surface, "req-ask-notice").unwrap());
+    surface.requests.wait_for_idle("req-ask-notice");
+
+    std::fs::write(
+        root.join("blyte.toml"),
+        "[dispatch]\ngate = \"true\"\n\n[surface]\npublish = \"never\"\n",
+    )
+    .unwrap();
+    let tool = SurfacePublishTool::new(Arc::clone(&surface));
+    let err_cfg = tool.publish("req-ask-notice", "Title", "Body").unwrap_err();
+    assert!(err_cfg.contains("never"), "{err_cfg}");
+    assert!(publisher.push_calls().is_empty());
+
+    std::fs::write(
+        root.join("blyte.toml"),
+        "[dispatch]\ngate = \"true\"\n\n[surface]\npublish = \"ask\"\n",
+    )
+    .unwrap();
+    let surface_for_thread = Arc::clone(&surface);
+    let handle = std::thread::spawn(move || {
+        let t = SurfacePublishTool::new(surface_for_thread);
+        t.publish("req-ask-notice", "feat: ask notice", "Body")
+    });
+    let (id, _) = wait_for_publish_approval(&surface.session);
+    let resp = post_approval(&surface, &id, "yes", (TOKEN_HEADER, &surface.token));
+    assert_eq!(resp.status, 200);
+    assert_eq!(handle.join().unwrap().unwrap(), pr_url);
+
+    let entries = surface.session.entries_after(0, Duration::ZERO);
+    assert!(
+        entries.iter().any(|e| matches!(
+            &e.body,
+            EntryBody::Decision { run, action, note }
+                if run == "req-ask-notice"
+                    && action == "publish"
+                    && note.as_deref()
+                        == Some(
+                            "Published req-ask-notice: branch blyte/req-ask-notice, https://github.com/example/blyte-test/pull/101"
+                        )
+        )),
+        "expected publish notice without `not asked`, got: {entries:?}"
+    );
 }

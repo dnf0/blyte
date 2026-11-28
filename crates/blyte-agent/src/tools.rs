@@ -1209,7 +1209,7 @@ pub fn specs() -> Vec<ToolSpec> {
     if publish_tool().is_some() {
         tools.push(ToolSpec {
             name: "publish".into(),
-            description: "Ask the user to approve pushing a combined request's branch to origin and opening a pull request against the default branch. Runs only when the user approves it on the page.".into(),
+            description: "Push a combined request's branch to origin and open a pull request against the default branch. Asks the user first only when blyte.toml has [surface] publish = \"ask\". Merging is never done by the surface.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
