@@ -1,3 +1,9 @@
+## v0.77.0 (2026-11-28)
+
+### Feat
+
+- **surface**: publish opens the pull request without asking unless blyte.toml says ask (#469)
+
 ## v0.76.0 (2026-11-28)
 
 ### Feat
