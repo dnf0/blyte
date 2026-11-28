@@ -126,7 +126,7 @@ mod macos {
     use std::path::Path;
     use std::time::Duration;
 
-    use blyte_agent::sandbox::{conversation_profile_net, default_profile_net, Profile};
+    use blyte_agent::sandbox::{conversation_profile_net, default_sandbox_net, Profile};
     use blyte_agent::shell::{LocalShell, Shell};
 
     use super::{EnvGuard, ENV_LOCK};
@@ -159,12 +159,13 @@ mod macos {
 
     fn assert_agent_socket_blocked(
         profile: Profile,
+        tmpdir: Option<std::path::PathBuf>,
         ws: &Path,
         benign: &Path,
         agent: &Path,
         other: &Path,
     ) {
-        let sh = LocalShell::sandboxed(profile);
+        let sh = LocalShell::sandboxed(profile).with_tmpdir(tmpdir);
         if !assert_benign_read(&sh, benign, ws) {
             return;
         }
@@ -191,8 +192,12 @@ mod macos {
         {
             let _guard = EnvGuard::set(Some(home.path()), Some(&agent_sock), None);
             for profile in [
-                default_profile_net(ws.path(), &[], true),
-                default_profile_net(ws.path(), &[], false),
+                default_sandbox_net(ws.path(), &[], true)
+                    .expect("sandbox")
+                    .profile,
+                default_sandbox_net(ws.path(), &[], false)
+                    .expect("sandbox")
+                    .profile,
                 conversation_profile_net(ws.path(), &[], true).unwrap(),
                 conversation_profile_net(ws.path(), &[], false).unwrap(),
             ] {
@@ -233,7 +238,10 @@ mod macos {
 
         {
             let _guard = EnvGuard::set(None, None, None);
-            let Profile::Seatbelt(sbpl) = default_profile_net(ws.path(), &[], true) else {
+            let Profile::Seatbelt(sbpl) = default_sandbox_net(ws.path(), &[], true)
+                .expect("sandbox")
+                .profile
+            else {
                 panic!("expected Seatbelt profile");
             };
             assert!(
@@ -260,8 +268,10 @@ mod macos {
 
         let _guard = EnvGuard::set(Some(home.path()), Some(&agent_sock), Some("9999"));
 
+        let default_on = default_sandbox_net(ws.path(), &[], true).expect("sandbox");
         assert_agent_socket_blocked(
-            default_profile_net(ws.path(), &[], true),
+            default_on.profile,
+            default_on.tmpdir,
             ws.path(),
             &benign,
             &agent_sock,
@@ -269,13 +279,16 @@ mod macos {
         );
         assert_agent_socket_blocked(
             conversation_profile_net(ws.path(), &[], true).unwrap(),
+            None,
             ws.path(),
             &benign,
             &agent_sock,
             &other_sock,
         );
+        let default_off = default_sandbox_net(ws.path(), &[], false).expect("sandbox");
         assert_agent_socket_blocked(
-            default_profile_net(ws.path(), &[], false),
+            default_off.profile,
+            default_off.tmpdir,
             ws.path(),
             &benign,
             &agent_sock,
@@ -283,6 +296,7 @@ mod macos {
         );
         assert_agent_socket_blocked(
             conversation_profile_net(ws.path(), &[], false).unwrap(),
+            None,
             ws.path(),
             &benign,
             &agent_sock,

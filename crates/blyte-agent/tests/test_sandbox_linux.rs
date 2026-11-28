@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use blyte_agent::sandbox::{conversation_profile, default_profile, read_allowed, Profile};
+use blyte_agent::sandbox::{conversation_profile, default_sandbox, read_allowed, Profile};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -19,7 +19,7 @@ fn a_string_profile_is_a_seatbelt_profile() {
 fn the_default_profile_matches_the_platform() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let d = tempfile::tempdir().unwrap();
-    let p = default_profile(d.path(), &[]);
+    let p = default_sandbox(d.path(), &[]).expect("sandbox").profile;
     if cfg!(target_os = "macos") {
         assert!(
             matches!(p, Profile::Seatbelt(ref s) if s.starts_with("(version 1)")),
@@ -132,8 +132,7 @@ mod linux {
 
     use blyte_agent::sandbox::{
         available, conversation_profile, conversation_profile_net, conversation_sandbox,
-        conversation_sandbox_net, default_profile_net, default_sandbox_net, landlock_abi,
-        surface_token_path, Profile,
+        conversation_sandbox_net, default_sandbox_net, landlock_abi, surface_token_path, Profile,
     };
     use blyte_agent::shell::{LocalShell, PersistentShell, Shell};
 
@@ -441,11 +440,15 @@ mod linux {
         std::fs::write(&env_path, "ANTHROPIC_API_KEY=blyte-env-linux-secret\n").unwrap();
 
         let conv_network = landlock_abi() < 4;
-        for profile in [
-            conversation_profile_net(repo.path(), &[], conv_network).unwrap(),
-            default_profile_net(repo.path(), &[], true),
+        let default_sb = default_sandbox_net(repo.path(), &[], true).expect("sandbox");
+        for (profile, tmpdir) in [
+            (
+                conversation_profile_net(repo.path(), &[], conv_network).unwrap(),
+                None,
+            ),
+            (default_sb.profile, default_sb.tmpdir),
         ] {
-            let sh = LocalShell::sandboxed(profile);
+            let sh = LocalShell::sandboxed(profile).with_tmpdir(tmpdir);
             let benign_res = sh
                 .exec(
                     &format!("cat '{}'", benign.display()),

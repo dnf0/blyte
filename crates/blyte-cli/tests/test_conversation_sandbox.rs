@@ -696,11 +696,15 @@ fn sandboxed_shell_cannot_write_the_usage_ledger_directory() {
     let _xdg_state = XdgStateGuard(std::env::var_os("XDG_STATE_HOME"));
     std::env::remove_var("XDG_STATE_HOME");
 
-    for profile in [
-        sandbox::conversation_profile(repo.path(), &[]).unwrap(),
-        sandbox::default_profile(repo.path(), &[]),
+    let default_sb = sandbox::default_sandbox(repo.path(), &[]).expect("sandbox");
+    for (profile, tmpdir) in [
+        (
+            sandbox::conversation_profile(repo.path(), &[]).unwrap(),
+            None,
+        ),
+        (default_sb.profile, default_sb.tmpdir),
     ] {
-        let sh = blyte_agent::shell::LocalShell::sandboxed(profile);
+        let sh = blyte_agent::shell::LocalShell::sandboxed(profile).with_tmpdir(tmpdir);
 
         let cache_target = cache_dir.join("x");
         let _ = std::fs::remove_file(&cache_target);

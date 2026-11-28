@@ -4,15 +4,17 @@
 use std::path::{Path, PathBuf};
 
 use blyte_agent::sandbox::{
-    default_profile, default_profile_net, docker_sockets, offline, Profile,
+    default_sandbox, default_sandbox_net, docker_sockets, offline, Profile,
 };
 
 #[test]
 fn network_on_is_exactly_todays_profile() {
     let d = tempfile::tempdir().unwrap();
     assert_eq!(
-        default_profile_net(d.path(), &[], true),
-        default_profile(d.path(), &[])
+        default_sandbox_net(d.path(), &[], true)
+            .expect("sandbox")
+            .profile,
+        default_sandbox(d.path(), &[]).expect("sandbox").profile
     );
 }
 
@@ -54,7 +56,10 @@ fn the_docker_socket_list_covers_the_usual_runtimes() {
 #[allow(clippy::assertions_on_constants)]
 fn the_offline_default_profile_matches_the_platform() {
     let d = tempfile::tempdir().unwrap();
-    match default_profile_net(d.path(), &[], false) {
+    match default_sandbox_net(d.path(), &[], false)
+        .expect("sandbox")
+        .profile
+    {
         Profile::Seatbelt(s) => {
             assert!(cfg!(target_os = "macos"));
             assert!(s.contains("(deny network-outbound)"), "{s}");

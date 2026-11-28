@@ -1464,62 +1464,40 @@ fn default_profile_base(root: &Path, allow_read: &[PathBuf]) -> String {
     profile
 }
 
-/// Returns the default sandbox profile for the current platform.
+/// Returns the default macOS sandbox profile.
 ///
-/// On macOS, returns an SBPL profile denying writes outside `default_allowed` and reads under credential stores.
-/// On other platforms, returns a confined Landlock profile with `default_allowed` and `read_allowed`.
-/// On Linux this does not check its grants against the protected paths; use [`default_sandbox_net`].
-pub fn default_profile(root: &Path, allow_read: &[PathBuf]) -> Profile {
-    #[cfg(target_os = "macos")]
-    {
-        Profile::Seatbelt(deny_unix_sockets(
-            default_profile_base(root, allow_read),
-            &current_agent_sockets(),
-        ))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let home = std::env::var_os("HOME");
-        let home_path = home.as_ref().filter(|h| !h.is_empty()).map(Path::new);
-        Profile::LandlockConfined {
-            write: default_allowed(root),
-            read: read_allowed(home_path, allow_read),
-            block_tcp: false,
-        }
-    }
+/// Denies writes outside `default_allowed` and reads under credential stores.
+#[cfg(target_os = "macos")]
+fn default_profile(root: &Path, allow_read: &[PathBuf]) -> Profile {
+    Profile::Seatbelt(deny_unix_sockets(
+        default_profile_base(root, allow_read),
+        &current_agent_sockets(),
+    ))
 }
 
-/// Returns the default sandbox profile with network configuration.
+/// Returns the default macOS sandbox profile with network configuration.
 ///
 /// When `network` is true, returns the same profile as [`default_profile`].
 /// When `network` is false, returns an offline profile denying outbound network connections.
-/// On Linux this does not check its grants against the protected paths; use [`default_sandbox_net`].
-pub fn default_profile_net(root: &Path, allow_read: &[PathBuf], network: bool) -> Profile {
+#[cfg(target_os = "macos")]
+fn default_profile_net(root: &Path, allow_read: &[PathBuf], network: bool) -> Profile {
     if network {
         return default_profile(root, allow_read);
     }
-    #[cfg(target_os = "macos")]
-    {
-        let base = default_profile_base(root, allow_read);
-        let socks = match std::env::var_os("HOME") {
-            Some(home) if !home.is_empty() => docker_sockets(Path::new(&home)),
-            _ => Vec::new(),
-        };
-        Profile::Seatbelt(deny_unix_sockets(
-            offline(base, &socks),
-            &current_agent_sockets(),
-        ))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let home = std::env::var_os("HOME");
-        let home_path = home.as_ref().filter(|h| !h.is_empty()).map(Path::new);
-        Profile::LandlockConfined {
-            write: default_allowed(root),
-            read: read_allowed(home_path, allow_read),
-            block_tcp: true,
-        }
-    }
+    let base = default_profile_base(root, allow_read);
+    let socks = match std::env::var_os("HOME") {
+        Some(home) if !home.is_empty() => docker_sockets(Path::new(&home)),
+        _ => Vec::new(),
+    };
+    Profile::Seatbelt(deny_unix_sockets(
+        offline(base, &socks),
+        &current_agent_sockets(),
+    ))
+}
+
+/// Returns the default sandbox profile and optional private `TMPDIR` with network enabled.
+pub fn default_sandbox(root: &Path, allow_read: &[PathBuf]) -> Result<ConversationSandbox, String> {
+    default_sandbox_net(root, allow_read, true)
 }
 
 /// Returns the default sandbox profile and optional private `TMPDIR`.
