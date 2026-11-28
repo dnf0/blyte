@@ -65,6 +65,10 @@ config test file, and `cargo test -p blyte-agent --test test_publish_tool`):
 
 ### Task PT1: a terminal surface can publish
 
+**Not built (2026-11-28).** The run stopped as told: `blyte --terminal` builds only a
+`ReplSession` and no `serve::Surface`, so it has no requests state for `SurfacePublishTool` to use.
+Publishing from a terminal needs a design for that first. The text below is kept as written.
+
 **Goal.** `blyte --terminal` registers no `publish` tool, and `TtyApprover::ask_publish` returns
 `Approval::Unavailable`, so a terminal surface cannot publish under either setting.
 

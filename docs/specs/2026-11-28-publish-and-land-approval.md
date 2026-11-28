@@ -29,11 +29,12 @@ publish = "auto"   # or "ask"
 - `auto`, the default and the intended value: `publish` does not ask. Every other check stays:
   the request belongs to this surface, is combined, is not being combined, has no pull request
   yet, the turn was not started by another surface, and the branch has not moved.
-- `ask`: today's behaviour, a click on the page; in a terminal, a yes or no prompt.
+- `ask`: today's behaviour, a click on the page.
 - Any other value is an error when `blyte.toml` is read, naming the value.
 - Each publish is written to the surface's log as a notice with the branch and the pull request
   URL, so an unasked publish is visible afterwards.
-- A terminal surface gets the `publish` tool.
+- A terminal surface still has no `publish` tool: it builds no `Surface` (no requests state), so
+  that needs its own design. Not part of this change.
 
 What this gives up: with `auto`, text the model read can lead to a branch being pushed and a pull
 request opened with no person in between. The branch is one blyte combined from this surface's own
