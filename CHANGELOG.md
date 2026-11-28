@@ -1,3 +1,9 @@
+## v0.73.2 (2026-11-28)
+
+### Fix
+
+- **sandbox**: a run's shell cannot write to folders of programs on PATH or to tool configuration (#457)
+
 ## v0.73.1 (2026-11-28)
 
 ### Fix
