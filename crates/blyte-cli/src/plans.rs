@@ -266,7 +266,10 @@ fn parse_task_lane(lines: &[&str], files: &[String]) -> String {
 
 fn parse_task_heading_id_title(h_text: &str) -> Option<(String, String)> {
     let after_task = h_text.strip_prefix("Task ")?;
-    let (n_part, title_part) = after_task.split_once(':')?;
+    let (n_part, title_part) = match after_task.split_once(':') {
+        Some((n, t)) => (n, Some(t)),
+        None => (after_task, None),
+    };
     let n = n_part.trim();
     let (first_word, rest_of_n) = match n.split_once(char::is_whitespace) {
         Some((w, r)) => (w, r.trim()),
@@ -281,12 +284,23 @@ fn parse_task_heading_id_title(h_text: &str) -> Option<(String, String)> {
         first_word.to_string()
     };
 
-    let raw_title = if rest_of_n.is_empty() {
-        title_part.trim().to_string()
-    } else if title_part.trim().is_empty() {
-        rest_of_n.to_string()
-    } else {
-        format!("{rest_of_n} {}", title_part.trim())
+    let raw_title = match title_part {
+        Some(title_part) => {
+            if rest_of_n.is_empty() {
+                title_part.trim().to_string()
+            } else if title_part.trim().is_empty() {
+                rest_of_n.to_string()
+            } else {
+                format!("{rest_of_n} {}", title_part.trim())
+            }
+        }
+        None => {
+            if rest_of_n.is_empty() {
+                id.clone()
+            } else {
+                rest_of_n.to_string()
+            }
+        }
     };
 
     let task_title = raw_title.replace('`', "").trim().to_string();
@@ -2123,5 +2137,44 @@ Depends on: Task X9
         crate::removal_record::write(root, &rec).unwrap();
         run_git(&["branch", "wip/J1"]);
         assert!(!is_job_merged(&job));
+    }
+
+    #[test]
+    fn parse_task_heading_without_colon() {
+        assert_eq!(
+            parse_task_heading_id_title("Task LRP1"),
+            Some(("LRP1".to_string(), "LRP1".to_string()))
+        );
+        assert_eq!(
+            parse_task_heading_id_title("Task 3"),
+            Some(("T3".to_string(), "T3".to_string()))
+        );
+        assert_eq!(
+            parse_task_heading_id_title("Task LRP1 the grant rule"),
+            Some(("LRP1".to_string(), "the grant rule".to_string()))
+        );
+        assert_eq!(
+            parse_task_heading_id_title("Task A: one"),
+            Some(("A".to_string(), "one".to_string()))
+        );
+        assert_eq!(parse_task_heading_id_title("Task "), None);
+        assert_eq!(parse_task_heading_id_title("Task"), None);
+    }
+
+    #[test]
+    fn parse_plan_with_colonless_task_headings() {
+        let plan = r#"# Test Plan
+
+### Task TT1
+First task body.
+**Depends on:** none
+
+### Task TT2
+Second task body.
+**Depends on:** none
+"#;
+        let doc = parse_plan(plan);
+        let ids: Vec<&str> = doc.tasks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["TT1", "TT2"]);
     }
 }
