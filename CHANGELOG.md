@@ -1,3 +1,9 @@
+## v0.73.1 (2026-11-28)
+
+### Fix
+
+- **tests**: tests wait on conditions, not short time limits (#456)
+
 ## v0.73.0 (2026-11-27)
 
 ### Feat
