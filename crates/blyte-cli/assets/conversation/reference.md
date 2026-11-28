@@ -22,6 +22,8 @@ writes elsewhere need the user's approval.
   is given that section alone.
 - `--base <branch>` starts the worktree from that branch, for example `--base wip/T1` for a task that
   needs T1's result.
+- A plan written by a direct edit is on `wip/<id>`; dispatch its tasks with `--base wip/<id>` and the
+  plan's path, and blyte reads the plan from that branch.
 - `--research` starts a read-only research run (see below).
 - The gate is the repository's check, from `blyte.toml`: each line is a step and all must pass. It
   cannot be overridden from here. If the repository has no `blyte.toml`, `blyte init` writes one
