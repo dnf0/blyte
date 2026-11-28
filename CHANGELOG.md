@@ -1,3 +1,9 @@
+## v0.74.1 (2026-11-28)
+
+### Fix
+
+- **sandbox**: on Linux a run's shell is not granted folders that hold credentials (#462)
+
 ## v0.74.0 (2026-11-28)
 
 ### Feat
