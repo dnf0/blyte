@@ -352,9 +352,10 @@ fn bash_spec_exposes_unsandboxed_fields_only_when_approval_is_set() {
 #[test]
 fn local_shell_exec_host_runs_outside_sandbox() {
     let dir = tempfile::tempdir().unwrap();
-    let profile = sandbox::available().then(|| sandbox::default_profile(dir.path(), &[]));
-    let sh = match profile.clone() {
-        Some(p) => LocalShell::sandboxed(p),
+    let sb =
+        sandbox::available().then(|| sandbox::default_sandbox(dir.path(), &[]).expect("sandbox"));
+    let sh = match sb.clone() {
+        Some(sb) => LocalShell::sandboxed(sb.profile).with_tmpdir(sb.tmpdir),
         None => LocalShell::new(),
     };
     let out = sh
@@ -363,8 +364,9 @@ fn local_shell_exec_host_runs_outside_sandbox() {
     assert_eq!(out.exit_code, 0, "{}", out.merged());
     assert_eq!(out.stdout.trim(), "hi");
 
-    let persistent = match profile {
-        Some(p) => PersistentShell::local_sandboxed(dir.path().to_path_buf(), p),
+    let persistent = match sb {
+        Some(sb) => PersistentShell::local_sandboxed(dir.path().to_path_buf(), sb.profile)
+            .with_tmpdir(sb.tmpdir),
         None => PersistentShell::local(dir.path().to_path_buf()),
     };
     let out = persistent

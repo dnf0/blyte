@@ -197,7 +197,7 @@ mod macos {
     use std::time::Duration;
 
     use blyte_agent::sandbox::{
-        conversation_profile_net, default_profile_net, profile_with, surface_token_dir,
+        conversation_profile_net, default_sandbox_net, profile_with, surface_token_dir,
         surface_token_path,
     };
     use blyte_agent::shell::{LocalShell, Shell};
@@ -350,7 +350,8 @@ mod macos {
         std::fs::create_dir_all(env_path.parent().unwrap()).unwrap();
         std::fs::write(&env_path, "ANTHROPIC_API_KEY=blyte-env-default-secret\n").unwrap();
 
-        let sh = LocalShell::sandboxed(default_profile_net(ws.path(), &[], true));
+        let sb = default_sandbox_net(ws.path(), &[], true).expect("sandbox");
+        let sh = LocalShell::sandboxed(sb.profile).with_tmpdir(sb.tmpdir);
         if !assert_benign_read(&sh, &benign, ws.path()) {
             return;
         }
@@ -379,11 +380,17 @@ mod macos {
         std::fs::create_dir_all(&token_dir).unwrap();
         std::fs::write(&token_path, "surface-token-grant-secret\n").unwrap();
 
-        for profile in [
-            conversation_profile_net(ws.path(), std::slice::from_ref(&token_dir), false).unwrap(),
-            default_profile_net(ws.path(), std::slice::from_ref(&token_dir), true),
+        let default_sb = default_sandbox_net(ws.path(), std::slice::from_ref(&token_dir), true)
+            .expect("sandbox");
+        for (profile, tmpdir) in [
+            (
+                conversation_profile_net(ws.path(), std::slice::from_ref(&token_dir), false)
+                    .unwrap(),
+                None,
+            ),
+            (default_sb.profile, default_sb.tmpdir),
         ] {
-            let sh = LocalShell::sandboxed(profile);
+            let sh = LocalShell::sandboxed(profile).with_tmpdir(tmpdir);
             if !assert_benign_read(&sh, &benign, ws.path()) {
                 return;
             }
@@ -409,11 +416,17 @@ mod macos {
         std::fs::write(&env_path, "ANTHROPIC_API_KEY=blyte-env-grant-secret\n").unwrap();
 
         for grant in [&config_dir, &env_path] {
-            for profile in [
-                conversation_profile_net(ws.path(), std::slice::from_ref(grant), false).unwrap(),
-                default_profile_net(ws.path(), std::slice::from_ref(grant), true),
+            let default_sb =
+                default_sandbox_net(ws.path(), std::slice::from_ref(grant), true).expect("sandbox");
+            for (profile, tmpdir) in [
+                (
+                    conversation_profile_net(ws.path(), std::slice::from_ref(grant), false)
+                        .unwrap(),
+                    None,
+                ),
+                (default_sb.profile, default_sb.tmpdir),
             ] {
-                let sh = LocalShell::sandboxed(profile);
+                let sh = LocalShell::sandboxed(profile).with_tmpdir(tmpdir);
                 if !assert_benign_read(&sh, &benign, ws.path()) {
                     return;
                 }

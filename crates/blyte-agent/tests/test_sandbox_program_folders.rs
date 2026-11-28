@@ -129,17 +129,16 @@ mod macos {
 
         let _env = EnvGuard::set_home(Some(home.path()));
 
-        for (label, profile) in [
+        let default_sb = sandbox::default_sandbox(repo.path(), &[]).expect("sandbox");
+        for (label, profile, tmpdir) in [
             (
                 "conversation_profile",
                 sandbox::conversation_profile(repo.path(), &[]).unwrap(),
+                None,
             ),
-            (
-                "default_profile",
-                sandbox::default_profile(repo.path(), &[]),
-            ),
+            ("default_profile", default_sb.profile, default_sb.tmpdir),
         ] {
-            let sh = LocalShell::sandboxed(profile);
+            let sh = LocalShell::sandboxed(profile).with_tmpdir(tmpdir);
 
             for rel in &allowed_files {
                 let target = home.path().join(rel);
@@ -202,7 +201,8 @@ mod macos {
         let git_config = repo.path().join(".git/config");
         let config_before = std::fs::read_to_string(&git_config).unwrap();
 
-        let sh = LocalShell::sandboxed(sandbox::default_profile(repo.path(), &[]));
+        let sb = sandbox::default_sandbox(repo.path(), &[]).expect("sandbox");
+        let sh = LocalShell::sandboxed(sb.profile).with_tmpdir(sb.tmpdir);
 
         let commit = sh
             .exec_user(
@@ -268,7 +268,8 @@ mod macos {
         std::fs::create_dir_all(&proj).unwrap();
         let _env = EnvGuard::set_home(Some(home.path()));
 
-        let sh = LocalShell::sandboxed(sandbox::default_profile(&proj, &[]));
+        let sb = sandbox::default_sandbox(&proj, &[]).expect("sandbox");
+        let sh = LocalShell::sandboxed(sb.profile).with_tmpdir(sb.tmpdir);
 
         let inside = proj.join("inside.txt");
         let allow_out = sh
@@ -341,7 +342,8 @@ mod macos {
         let git_config = proj.join(".git/config");
         let config_before = std::fs::read_to_string(&git_config).unwrap();
 
-        let sh = LocalShell::sandboxed(sandbox::default_profile(&wt, &[]));
+        let sb = sandbox::default_sandbox(&wt, &[]).expect("sandbox");
+        let sh = LocalShell::sandboxed(sb.profile).with_tmpdir(sb.tmpdir);
 
         let commit = sh
             .exec_user(
@@ -423,7 +425,8 @@ mod macos {
         .unwrap();
         std::fs::write(proj.path().join("src/main.rs"), "fn main() {}\n").unwrap();
 
-        let sh = LocalShell::sandboxed(sandbox::default_profile(proj.path(), &[]));
+        let sb = sandbox::default_sandbox(proj.path(), &[]).expect("sandbox");
+        let sh = LocalShell::sandboxed(sb.profile).with_tmpdir(sb.tmpdir);
 
         let probe = sh
             .exec_user("echo ok > probe.txt", proj.path(), Duration::from_secs(30))
@@ -482,7 +485,10 @@ mod macos {
             (".m2", ".m2/settings.xml"),
         ];
 
-        let Profile::Seatbelt(default_sbpl) = sandbox::default_profile(repo.path(), &[]) else {
+        let Profile::Seatbelt(default_sbpl) = sandbox::default_sandbox(repo.path(), &[])
+            .expect("sandbox")
+            .profile
+        else {
             panic!("expected Seatbelt profile on macOS");
         };
         let Profile::Seatbelt(conv_sbpl) = sandbox::conversation_profile(repo.path(), &[]).unwrap()
@@ -578,7 +584,10 @@ mod macos {
         let proj_canon = proj.canonicalize().unwrap();
         let lib_deny = format!(r#"(deny file-write* (subpath "{}"))"#, lib_canon.display());
 
-        let Profile::Seatbelt(proj_sbpl) = sandbox::default_profile(&proj, &[]) else {
+        let Profile::Seatbelt(proj_sbpl) = sandbox::default_sandbox(&proj, &[])
+            .expect("sandbox")
+            .profile
+        else {
             panic!("expected Seatbelt profile on macOS");
         };
         let proj_allow = format!(
@@ -605,7 +614,10 @@ mod macos {
             );
         }
 
-        let Profile::Seatbelt(eq_sbpl) = sandbox::default_profile(&lib_dir, &[]) else {
+        let Profile::Seatbelt(eq_sbpl) = sandbox::default_sandbox(&lib_dir, &[])
+            .expect("sandbox")
+            .profile
+        else {
             panic!("expected Seatbelt profile on macOS");
         };
         let lib_allow = format!(r#"(allow file-write* (subpath "{}"))"#, lib_canon.display());
@@ -633,7 +645,9 @@ mod macos {
         let wt_canon = wt.canonicalize().unwrap();
         let common_canon = proj_canon.join(".git");
 
-        let Profile::Seatbelt(wt_sbpl) = sandbox::default_profile(&wt, &[]) else {
+        let Profile::Seatbelt(wt_sbpl) =
+            sandbox::default_sandbox(&wt, &[]).expect("sandbox").profile
+        else {
             panic!("expected Seatbelt profile on macOS");
         };
         let wt_deny_idx = wt_sbpl.rfind(&lib_deny).expect("lib deny present");
@@ -676,7 +690,10 @@ mod macos {
 
         for home_val in [None, Some(Path::new(""))] {
             let _env = EnvGuard::set_home(home_val);
-            let Profile::Seatbelt(default_sbpl) = sandbox::default_profile(repo.path(), &[]) else {
+            let Profile::Seatbelt(default_sbpl) = sandbox::default_sandbox(repo.path(), &[])
+                .expect("sandbox")
+                .profile
+            else {
                 panic!("expected Seatbelt profile on macOS");
             };
             let Profile::Seatbelt(conv_sbpl) =

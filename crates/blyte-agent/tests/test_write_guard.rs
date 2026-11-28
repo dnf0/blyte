@@ -401,7 +401,9 @@ fn run_scratch_workspace_allows_report_write_but_keeps_state_dir_and_dotenv_prot
         let scratch_canon = scratch.canonicalize().unwrap();
         let state_canon = custom_state.canonicalize().unwrap();
         let blyte_agent::sandbox::Profile::Seatbelt(profile) =
-            blyte_agent::sandbox::default_profile(&scratch, &[])
+            blyte_agent::sandbox::default_sandbox(&scratch, &[])
+                .expect("sandbox")
+                .profile
         else {
             panic!("expected Seatbelt profile on macOS");
         };
@@ -425,7 +427,9 @@ fn run_scratch_workspace_allows_report_write_but_keeps_state_dir_and_dotenv_prot
         );
 
         let blyte_agent::sandbox::Profile::Seatbelt(runs_profile) =
-            blyte_agent::sandbox::default_profile(runs_dir, &[])
+            blyte_agent::sandbox::default_sandbox(runs_dir, &[])
+                .expect("sandbox")
+                .profile
         else {
             panic!("expected Seatbelt profile on macOS");
         };

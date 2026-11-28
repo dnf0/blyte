@@ -4,11 +4,16 @@
 //! contradicting the bundled `blyte-implementer` skill. `blyte skill install` and
 //! `blyte update` warn the user to remove it, without removing it automatically.
 
-use std::os::unix::fs::PermissionsExt;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use blyte_cli::skill::{superseded_skills, superseded_warning, SKILL_MD};
+use blyte_cli::update::{asset_name, repo};
 
 fn blyte(cwd: &Path, home: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_blyte"))
@@ -169,28 +174,71 @@ fn update_warns_about_superseded_skill_after_refresh() {
     std::fs::copy(env!("CARGO_BIN_EXE_blyte"), &bin).unwrap();
 
     let log = dir.path().join("calls.log");
-    let release = dir.path().join("release-blyte");
-    std::fs::write(
-        &release,
-        format!(
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'blyte 9.9.9 (test)'; exit 0; fi\necho \"$@\" >> {}\n",
-            log.display()
-        ),
+    let release_bytes = format!(
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'blyte 9.9.9 (test)'; exit 0; fi\necho \"$@\" >> {}\n",
+        log.display()
     )
-    .unwrap();
-    std::fs::set_permissions(&release, std::fs::Permissions::from_mode(0o755)).unwrap();
+    .into_bytes();
 
-    let gh = dir.path().join("gh");
-    std::fs::write(
-        &gh,
-        format!(
-            "#!/bin/sh\ncase \"$2\" in\n  view) echo 'v9.9.9' ;;\n  download) while [ $# -gt 0 ]; do [ \"$1\" = -O ] && out=$2; shift; done; cp {} \"$out\" ;;\nesac\n",
-            release.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_flag = Arc::clone(&stop);
+    let repo_name = repo();
+    let asset = asset_name().expect("test platform has a release asset");
+    let latest_path = format!("/repos/{repo_name}/releases/latest");
+    let download_path = format!("/{repo_name}/releases/download/v9.9.9/{asset}");
+    let handle = std::thread::spawn(move || {
+        while let Ok((mut stream, _)) = listener.accept() {
+            if stop_flag.load(Ordering::SeqCst) {
+                break;
+            }
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let Ok(cloned) = stream.try_clone() else {
+                continue;
+            };
+            let mut reader = BufReader::new(cloned);
+            let mut request_line = String::new();
+            if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
+                continue;
+            }
+            loop {
+                let mut header = String::new();
+                match reader.read_line(&mut header) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) if header == "\r\n" || header == "\n" => break,
+                    Ok(_) => {}
+                }
+            }
+            let mut parts = request_line.split_whitespace();
+            let method = parts.next().unwrap_or("");
+            let path = parts.next().unwrap_or("");
+            if method == "GET" && path == latest_path {
+                let body = r#"{"tag_name":"v9.9.9"}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            } else if method == "GET" && path == download_path {
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    release_bytes.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&release_bytes);
+            } else {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+            let _ = stream.flush();
+        }
+    });
 
+    let cargo_home = dir.path().join("cargo-home");
+    std::fs::create_dir_all(&cargo_home).unwrap();
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
 
@@ -204,13 +252,21 @@ fn update_warns_about_superseded_skill_after_refresh() {
     std::fs::create_dir_all(&research_dir).unwrap();
     std::fs::write(research_dir.join("SKILL.md"), "# old research\n").unwrap();
 
+    let url = format!("http://{addr}");
     let out = Command::new(&bin)
         .arg("update")
-        .env("BLYTE_GH", &gh)
+        .env("BLYTE_UPDATE_API", &url)
+        .env("BLYTE_UPDATE_DOWNLOAD", &url)
+        .env("CARGO_HOME", &cargo_home)
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", &home)
+        .env("BLYTE_ENV_FILE", "")
         .output()
         .unwrap();
+
+    stop.store(true, Ordering::SeqCst);
+    let _ = TcpStream::connect(addr);
+    let _ = handle.join();
 
     assert_eq!(
         out.status.code(),

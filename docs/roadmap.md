@@ -1,127 +1,60 @@
 # Roadmap
 
 What is planned next for blyte, what is waiting on something, and what is parked. Dated items are
-decisions; the evidence behind them is in `docs/evidence.md` and the design plans.
+decisions; the evidence behind them is in `docs/evidence.md` and the design plans. Every release
+is listed in `CHANGELOG.md`.
 
 ## In progress
 
-Nothing at the moment; see Next.
+- **Follow-ups to the Linux shell read protection (2026-11-28,
+  `docs/plans/2026-11-28-follow-ups.md`):** on Linux a home folder under `/var` or `/opt` is
+  supported; the unchecked profile builders are private; `blyte plan` accepts a task heading with
+  no colon; `blyte update` updates the way blyte was installed, with no GitHub CLI. The Linux
+  parts are confirmed only by the Linux test run after the merge.
 
 ## Next
 
-- **The Claude usage check (about 2026-10-06):** regenerate the usage report from the dispatch
-  ledger and compare Claude usage with and without blyte across repositories and sessions.
-- **The open-source decision (about 2026-10-27):** if yes, the items under Parked come next.
+The goal is a surface that does a whole change alone, on Gemini: plan, dispatch, review, publish
+and land. A check of the code on 2026-11-28 found every task of the two 2026-11-26 plans merged,
+and these gaps, in the order they block that goal:
+
+- **A surface is not told when its request is combined,** and cannot look up a request's state,
+  so it never asks to publish on its own.
+- **A verified run with review flags stalls silently:** combining waits for a person's verdict and
+  the surface is not woken to see the flag.
+- **`reference.md` still says `--gate` overrides the gate;** the surface's tool refuses it.
+- **A plan written by direct edit is not on `HEAD`,** so dispatching from it needs `--base wip/<id>`,
+  which the instructions do not say.
+- **Landing:** a surface cannot check a pull request, merge it, or bring `main` up to date, and so
+  cannot finish a release either. What a surface may merge without the user is a decision to take
+  first.
+- **Publishing needs a click on the page every time,** and fails for a surface in a terminal. The
+  click is deliberate; whether to allow it to be waived is the same decision.
+- **Shell output is not checked for credential content** before it reaches the model. On Linux a
+  workspace `.env` is readable by the shell (`docs/security.md`). A design is being researched.
 
 ## Done
 
-Kept for about the last four weeks; older items are in the git history and the evidence page.
+Kept for about the last four weeks; older items are in `CHANGELOG.md` and the git history.
 
-- **2026-10-02**
-  - Decided: `blyte.toml` stays per user and untracked; each person runs `blyte init` in their
-    checkout. Gates differ by machine (offline uv caches, a pinned uv, local pre-commit
-    environments), and the gate-drift warning tells each person when theirs falls behind CI.
-  - Dispatch time checked after the v0.7.6 rule change: tools time stayed low, and the blyte-only
-    canary on v0.13.0 matched 27 September on tokens and cost (51.2M / $8.51 against 51.9M / $8.81),
-    with the pass rate the same or better; the extra wall time was Gemini's latency.
-  - A run's work counts as merged once it is on the branch it was dispatched from (`--base`, now
-    recorded in the start file), not only the default branch, so runs on a long-lived feature branch
-    are cleaned up when merged into it. `blyte clean` reports other worktrees (sessions' sibling
-    `repo--x` worktrees) whose work is merged and that are clean, with the `git worktree remove`
-    command; it never removes them.
-  - Plans view: a plan file dispatched as the task is the run's plan, wherever it lives (sibling
-    worktrees included), read from git history once that worktree is gone, and matched by the run id
-    when there is no `--plan-task` (v0.14.0 and after).
-  - v0.16.0: `blyte dispatch` warns when the gate is missing checks the repository's CI runs,
-    matched by tool; `blyte init` also recognises `make typecheck`/`validate`, eslint, vitest, jest,
-    tsc; `skill install`/`update` warn about a superseded `blyte-research` skill; skill guidance on
-    real-data checks, shared registration files and plan files as task files.
-  - v0.17.0: follow-up chains and squash-merged runs count as merged (cherry-pick record), and the
-    dispatch-time clean is cheap; the first `blyte clean --all` on the author's machine freed 21 GB.
-- **2026-10-01**
-  - `blyte clean` (also run quietly by every `blyte dispatch`): a run's worktree goes once its
-    work is on the default branch (local or `origin/`, including squash merges of several runs),
-    it was redone or made no changes, its research report is saved, or 14 days have passed; never
-    with uncommitted changes, and the run's record files stay. Branches go only when merged. 29
-    worktrees held 15 GB on the author's machine, 21 of them for reviewed runs.
-  - Honest outcomes: a gate that fails the same way before the change ends the run as `blocked`
-    (exit 5) instead of burning the budget; the deadline watchdog says what was running when it
-    stopped a run (v0.11.0). Gate slots default to a quarter of the cores (at least 2), time
-    waiting for one no longer counts against the run's deadline, and research skips them; a long
-    failed gate keeps the test runner's summary lines (v0.11.1).
-  - Needs attention lists only runs nobody has dealt with (no verdict, not superseded by a later
-    run, worktree still there, under three days old); the Plans view lists plans with a running
-    task, keeps each node's state colour when selected, shows a task's merged run before its
-    latest, and draws follow-up tasks dispatched with `--plan` but not written in the plan as
-    "added during the work" (v0.11.2). The two watchdog tests take a second instead of 32 s.
-  - The dashboard's **Plans view**: each plan as a swimlane flow of its tasks (lanes by area of code,
-    columns by dependency), coloured by state (merged, verified, running, failed, redone, ready,
-    waiting), with the selected task's details, the plan's activity and decisions, all from files
-    blyte already writes (`/api/plans`). `blyte dispatch --plan/--plan-task` links a dispatch to its
-    plan task; older dispatches are matched by tag, task text and their `Plan:` line.
-  - Research runs read the repository with the `read`, `grep` and `glob` tools, default to 300 turns, and
-    keep their report current; every run is warned ten turns before its turn budget ends.
-  - `blyte dispatch --research`: read-only research as a dispatch (a scratch workspace under `.wt/`,
-    gate "report.md written", the report copied beside the run), so it gets the registry, status,
-    dashboard and review like any dispatch; the skill says when to use it. Run reports record the
-    model's effort level (`effort`), which `model_id` hides.
-  - The dashboard names a dispatch after its repository, not its worktree's folder (v0.7.8).
-  - Dispatch rules tell the model not to run the full suite itself (v0.7.6): tools time had risen
-    from a median of 44 s to 198 s after the switch to plain `blyte dispatch`.
-  - The running dashboard sees repositories registered after it started; `blyte init` recognises
-    `python -m pytest`/`unittest`, `tox` and `nox` (v0.7.5), and keeps one of two pytest steps that
-    test the same files.
-  - The sandbox lets a worktree write the tool caches of an enclosing `node_modules` (vitest's
-    `.vite-temp`), never its packages.
-  - Linked worktrees use the main checkout's `blyte.toml`; `init` falls back to the repository's
-    own checks when CI is stale, and calls a cold uv cache an environment problem (v0.7.4).
-  - The repository registry writes one whole line per dispatch and skips temp directories (v0.7.3).
-  - The default Gemini model runs at high effort, as the docs said (v0.7.2); a run never outlives
-    `--max-seconds` by more than 30 s and always leaves a report (v0.7.1).
-  - The operator's local dispatch scripts and their sampled A/B against agy are retired (74 paired
-    tasks: 0.55x agy's time, 0.64x its cost). Every repository on the operator's machine now
-    dispatches with plain `blyte dispatch`.
-- **2026-09-30**
-  - blyte owns the whole dispatch workflow, so the operator's local wrapper scripts can retire:
-    `blyte review --verdict` records the reviewer's verdict; `review` flags commands that reached
-    outside the worktree; `blyte.toml` takes `[dispatch.env]` and `fold_budget`; dispatch saves its
-    summary and names the gate's quick steps; `blyte init` takes the gate from CI, sets what the
-    environment needs and proves each step in a fresh sandboxed worktree; the dashboard watches
-    every repository blyte has dispatched in; the skill has tasks declare their dependencies.
-  - `blyte dashboard`: a local page (127.0.0.1) of running and recent jobs across repositories and
-    run directories, with time, cost, turns, the task's section of its plan, and clickable tags
-    (repo, plan, harness, A/B) that group related jobs. `blyte dispatch --tag` adds tags.
-  - A release on every merge (commitizen, semantic versioning, #157/#159/#162): a release PR, a
-    `vX.Y.Z` tag, the GitHub release with its changelog, and static binaries for macOS and Linux.
-  - `blyte update` installs the latest release in place, with `--check` and `--rollback` (#169).
-  - blyte loads the repository's rules for agents itself on every run (#160): `.blyte/rules.md`,
-    else `.claude/agy-rules.md`, else `AGENTS.md`, however it is started.
-  - Codex CLI run end to end (#164): the skill names the escalation Codex must request; the
-    "(untested)" labels are gone.
-  - Apache-2.0 only (#166), and a dependency licence check in CI (`cargo deny`, #168): every
-    dependency is permissive.
-  - Fewer, larger dispatches as the default guidance (docs, skill and the eval's tools).
-  - `blyte skill install --no-default` removes an earlier default block, so switching from on to
-    "only when asked" needs no uninstall first.
-  - Every blyte run is recorded for reporting, including ones started with `blyte dispatch`
-    directly, with a check of whether each one's work reached main (local tooling).
-- **2026-09-29**
-  - More evidence on katex: v2 repeated (Claude usage down 86%), and a parallel test that showed
-    splitting one feature does not pay (evidence page, #154; blyte-eval #88).
-  - Provider keys from `~/.config/blyte/env` when they are not exported (#151): a session started
-    without the key failed every dispatch at turn 0.
-  - `AWS_PROFILE` and `AWS_DEFAULT_PROFILE` withheld with the credentials (#150): blyte had edited a
-    repository's `conftest.py` to work around a profile the sandbox cannot read.
-  - Research mode (local dispatch scripts): `dispatch-auto.sh --research`, read-only, with a "report
-    exists" gate, the sampled A/B and ledger records.
-  - The eval's dispatch tool runs dispatches in parallel, each in its own copy of the repository
-    (blyte-eval #83), with start-then-wait tools (#85), because Claude Code runs an MCP server's
-    calls one after another. Results on scc: blyte-eval #86.
-
-## Information gathering (2026-09-29 to about 2026-10-27)
-
-- blyte is the implementer in every local repository (the A/B against agy ended 2026-09-30).
-  Check usage across repositories and sessions around 2026-10-06.
+- **2026-11-28** On Linux a run's shell is not granted folders that hold credentials: every grant
+  is compared with the protected paths before a profile is returned (#462). The surface shows
+  what is waiting on the user, starts in another folder, and opens as an app window (#458).
+- **2026-11-25 to 2026-11-27** Every `blyte` start is its own surface that owns its runs; a
+  machine-wide list of surfaces (`blyte surfaces`, `blyte open`); surfaces message each other with
+  `tell` (#425, #427, #429). A surface starts, dispatches, reviews and undoes runs in a folder that
+  is not a git repository (#435, #448). A surface can ask to publish with the user's approval, and
+  the gaps from the self-hosting trial are closed. Images, files and long text can be dropped into
+  the surface (#444); a resumed surface's model remembers the conversation (#454).
+- **2026-11-21 to 2026-11-24** Bare `blyte` starts a live surface (#377). The conversation model's
+  shell is sandboxed (#382). A request for work is one run by default and blyte combines a
+  request's runs (#402). Direct edits for small changes, gated and recorded as a run (#406). The
+  check tests only the crates a change affects (#407).
+- **2026-11-18 to 2026-11-20** Research reports quote code by reference, state what was read and
+  are marked when unverified (#332, #334, #344). The gate fails on comments a run adds (#364); a
+  run stops as blocked when the gate cannot run (#362). The default dispatch model is
+  `gemini-4-neon` (#365). `blyte mock` replays real runs through the surface (#371).
+- **2026-11-04** `blyte skill install` sets Claude Code's auto-compact window to 200k (#324).
 
 ## Parked
 
@@ -140,9 +73,5 @@ Kept for about the last four weeks; older items are in the git history and the e
   workflow on merge to `main`. Still open: a custom domain (about USD 10-50 a year), which would keep
   links stable if the repository moves.
 - **Still open now that the repository is public:**
-  - `blyte update` updates the way blyte was installed: `cargo install blyte --locked` (or
-    `cargo binstall blyte`) for a cargo install, detected from `~/.cargo/.crates2.json`, and the
-    release binary over plain HTTPS otherwise, with no GitHub CLI needed. Today it always downloads
-    the release binary through `gh`.
   - Contributions: a DCO sign-off or a CLA, decided before accepting outside
     pull requests.

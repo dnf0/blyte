@@ -94,7 +94,7 @@ fn pass_env_ssh_auth_sock_keeps_var_and_lifts_deny_for_that_path_only() {
         use std::os::unix::net::UnixListener;
 
         use blyte_agent::sandbox::{
-            agent_sockets, conversation_profile_net, default_profile_net, Profile,
+            agent_sockets, conversation_profile_net, default_sandbox_net, Profile,
         };
 
         let _agent_listener = UnixListener::bind(&agent_sock).unwrap();
@@ -111,8 +111,12 @@ fn pass_env_ssh_auth_sock_keeps_var_and_lifts_deny_for_that_path_only() {
             .into_owned();
 
         let profiles = [
-            default_profile_net(ws.path(), &[], true),
-            default_profile_net(ws.path(), &[], false),
+            default_sandbox_net(ws.path(), &[], true)
+                .expect("sandbox")
+                .profile,
+            default_sandbox_net(ws.path(), &[], false)
+                .expect("sandbox")
+                .profile,
             conversation_profile_net(ws.path(), &[], true).unwrap(),
             conversation_profile_net(ws.path(), &[], false).unwrap(),
         ];
@@ -138,7 +142,8 @@ fn pass_env_ssh_auth_sock_keeps_var_and_lifts_deny_for_that_path_only() {
         let benign = ws.path().join("benign.txt");
         std::fs::write(&benign, "benign-ok\n").unwrap();
 
-        let sh = LocalShell::sandboxed(default_profile_net(ws.path(), &[], true));
+        let sb = default_sandbox_net(ws.path(), &[], true).expect("sandbox");
+        let sh = LocalShell::sandboxed(sb.profile).with_tmpdir(sb.tmpdir);
         let probe = sh
             .exec(
                 &format!("cat '{}'", benign.display()),
