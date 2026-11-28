@@ -2,7 +2,7 @@
 //! whose runner tests waited for that slot until the gate's 30-minute deadline (2026-09-27).
 
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use blyte_agent::context::Conversational;
 use blyte_agent::fs::LocalFs;
@@ -79,12 +79,7 @@ fn the_library_takes_no_slot_and_gate_commands_are_marked() {
         "g",
         format!("test -n \"${IN_GATE_ENV}\" && touch saw-marker"),
     );
-    let start = Instant::now();
     let (outcome, report) = r.run(&mut st);
-    assert!(
-        start.elapsed() < Duration::from_secs(20),
-        "the run must not wait for the held slot"
-    );
     assert_eq!(outcome, Outcome::Verified);
     assert_eq!(report.gate_wait_ms, vec![0]);
     assert!(

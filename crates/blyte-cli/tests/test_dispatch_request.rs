@@ -265,7 +265,7 @@ fn get(path: &str) -> Request {
 }
 
 fn wait_for_idle_count(session: &Session, expected_idles: usize) {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let entries = session.entries_after(0, Duration::from_millis(5));
         let idles = entries

@@ -37,7 +37,7 @@ impl MockHealthServer {
             while !stop_flag.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
                         let mut buf = [0u8; 512];
                         let _ = stream.read(&mut buf);
                         let response = format!(

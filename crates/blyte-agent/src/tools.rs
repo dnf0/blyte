@@ -37,6 +37,8 @@ pub const PUBLISH_BODY_MAX_BYTES: usize = 20_000;
 static READ_ROOTS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::new());
 static DISPATCH_CMD: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 static BLYTE_TOOL: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+static BACKGROUND_STARTUP_WAIT_OVERRIDE: std::sync::RwLock<Option<Duration>> =
+    std::sync::RwLock::new(None);
 static BLYTE_TASKS_DIR: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
 static BLYTE_RUN_STORE: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
 static IN_PLACE_LOCK_PATH: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
@@ -185,6 +187,25 @@ pub fn set_blyte_tool(exe: Option<std::path::PathBuf>) {
         Ok(mut lock) => *lock = exe,
         Err(poisoned) => *poisoned.into_inner() = exe,
     }
+}
+
+pub fn set_background_startup_wait(wait: Option<Duration>) {
+    match BACKGROUND_STARTUP_WAIT_OVERRIDE.write() {
+        Ok(mut lock) => *lock = wait,
+        Err(poisoned) => *poisoned.into_inner() = wait,
+    }
+}
+
+fn read_background_startup_wait(
+    lock: &std::sync::RwLock<Option<Duration>>,
+) -> Result<Duration, String> {
+    lock.read()
+        .map(|r| r.unwrap_or(BACKGROUND_STARTUP_WAIT))
+        .map_err(|e| format!("background startup wait lock is poisoned: {e}"))
+}
+
+fn background_startup_wait() -> Result<Duration, String> {
+    read_background_startup_wait(&BACKGROUND_STARTUP_WAIT_OVERRIDE)
 }
 
 pub fn blyte_tool() -> Option<PathBuf> {
@@ -2168,6 +2189,10 @@ fn run_background_dispatch(
     out_dir: &Path,
     id: &str,
 ) -> ToolOutcome {
+    let startup_wait = match background_startup_wait() {
+        Ok(d) => d,
+        Err(e) => return ToolOutcome::err(e),
+    };
     let out_path = out_dir.join(format!("{id}.dispatch.out"));
     if let Err(e) = std::fs::create_dir_all(out_dir) {
         return ToolOutcome::err(format!(
@@ -2206,7 +2231,7 @@ fn run_background_dispatch(
     };
     drop(cmd_builder);
 
-    let deadline = std::time::Instant::now() + BACKGROUND_STARTUP_WAIT;
+    let deadline = std::time::Instant::now() + startup_wait;
     let exited = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
@@ -2475,5 +2500,30 @@ mod tests {
             held_err,
             "run R9 is editing this folder; wait for it to finish"
         );
+    }
+
+    #[test]
+    fn read_background_startup_wait_returns_error_when_lock_is_poisoned() {
+        let lock = std::sync::RwLock::new(None);
+        assert_eq!(
+            read_background_startup_wait(&lock).unwrap(),
+            BACKGROUND_STARTUP_WAIT
+        );
+
+        let override_wait = Duration::from_millis(50);
+        *lock.write().unwrap() = Some(override_wait);
+        assert_eq!(read_background_startup_wait(&lock).unwrap(), override_wait);
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = lock.write().unwrap();
+            panic!("poison background startup wait lock");
+        }));
+
+        let err = read_background_startup_wait(&lock).unwrap_err();
+        assert!(
+            err.contains("background startup wait lock"),
+            "unexpected error: {err}"
+        );
+        assert!(err.contains("poisoned"), "unexpected error: {err}");
     }
 }

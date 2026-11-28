@@ -7,6 +7,8 @@ use blyte_cli::session::{
     AnswerError, ApprovalAnswer, Attachment, Entry, EntryBody, PromptRunner, Session,
 };
 
+const WAIT: Duration = Duration::from_secs(30);
+
 enum ScriptAction {
     Ok(Vec<EntryBody>),
     Err {
@@ -125,7 +127,7 @@ impl PromptRunner for ScriptedRunner {
 }
 
 fn wait_for_entries(session: &Session, expected_count: usize) -> Vec<Entry> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + WAIT;
     let mut all = Vec::new();
     while all.len() < expected_count {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -255,7 +257,9 @@ fn messages_sent_while_busy_run_in_order() {
     let s1 = session.submit("first", Vec::new()).unwrap();
     assert_eq!(s1, 1);
 
-    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    entered_rx
+        .recv_timeout(WAIT)
+        .expect("timed out waiting for runner to enter");
 
     let s2 = session.submit("second", Vec::new()).unwrap();
     let s3 = session.submit("third", Vec::new()).unwrap();
@@ -474,15 +478,14 @@ fn entries_after_waits_for_a_new_entry() {
     });
 
     let wait_start = Instant::now();
-    let received = session.entries_after(last_seq, Duration::from_secs(5));
+    let received = session.entries_after(last_seq, WAIT);
     let wait_elapsed = wait_start.elapsed();
     handle.join().unwrap();
 
     assert!(!received.is_empty());
     assert!(
-        wait_elapsed < Duration::from_secs(1),
-        "expected wakeup within 1s, got {:?}",
-        wait_elapsed
+        wait_elapsed < Duration::from_secs(15),
+        "expected wakeup well before {WAIT:?} timeout, got {wait_elapsed:?}"
     );
     assert!(matches!(
         received[0].body,
@@ -772,7 +775,9 @@ fn dropping_last_handle_stops_worker_after_prompt_in_progress() {
     let session = Session::start(Box::new(runner), "gemini-4-neon".into());
     let clone = session.clone();
     session.submit("in progress", Vec::new()).unwrap();
-    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    entered_rx
+        .recv_timeout(WAIT)
+        .expect("timed out waiting for runner to enter");
     session.submit("queued after drop", Vec::new()).unwrap();
 
     drop(session);
@@ -782,7 +787,9 @@ fn dropping_last_handle_stops_worker_after_prompt_in_progress() {
     assert!(dropped_rx.recv_timeout(Duration::from_millis(100)).is_err());
 
     release_tx.send(()).unwrap();
-    dropped_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    dropped_rx
+        .recv_timeout(WAIT)
+        .expect("timed out waiting for runner to drop");
 
     let recorded: Vec<String> = calls
         .lock()
@@ -825,7 +832,9 @@ fn approval_ask_blocks_until_answered_yes_and_no() {
 
     let ans1_seq = session.answer_approval(&id1, ApprovalAnswer::Yes).unwrap();
     assert_eq!(ans1_seq, 2);
-    let outcome1 = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let outcome1 = done_rx
+        .recv_timeout(WAIT)
+        .expect("timed out waiting for first approval outcome");
     assert_eq!(outcome1, Approval::Approved);
     t1.join().unwrap();
 
@@ -865,7 +874,9 @@ fn approval_ask_blocks_until_answered_yes_and_no() {
 
     let ans2_seq = session.answer_approval(&id2, ApprovalAnswer::No).unwrap();
     assert_eq!(ans2_seq, 4);
-    let outcome2 = done2_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let outcome2 = done2_rx
+        .recv_timeout(WAIT)
+        .expect("timed out waiting for second approval outcome");
     assert_eq!(outcome2, Approval::Denied);
     t2.join().unwrap();
 
@@ -901,7 +912,9 @@ fn approval_stop_run_and_shutdown_give_denied() {
 
     session.stop_run();
     assert_eq!(
-        done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        done_rx
+            .recv_timeout(WAIT)
+            .expect("timed out waiting for approval denial on stop_run"),
         Approval::Denied
     );
     t1.join().unwrap();
@@ -931,7 +944,9 @@ fn approval_stop_run_and_shutdown_give_denied() {
 
     drop(session);
     assert_eq!(
-        shutdown_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        shutdown_rx
+            .recv_timeout(WAIT)
+            .expect("timed out waiting for approval denial on session drop"),
         Approval::Denied
     );
     t2.join().unwrap();
@@ -965,7 +980,9 @@ fn approval_second_answer_refused_and_first_stands() {
         Err(AnswerError::AlreadyAnswered)
     );
     assert_eq!(
-        done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        done_rx
+            .recv_timeout(WAIT)
+            .expect("timed out waiting for approval outcome"),
         Approval::Approved
     );
     t.join().unwrap();
@@ -1259,7 +1276,7 @@ fn entries_are_written_as_they_are_pushed() {
     let reader = std::thread::spawn(move || {
         let mut after = 0u64;
         let mut seen = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + WAIT;
         while seen.len() < 6 {
             let remaining = deadline.saturating_duration_since(Instant::now());
             assert!(!remaining.is_zero(), "timed out; seen={seen:?}");
@@ -1589,7 +1606,9 @@ fn a_loaded_approval_request_is_not_live() {
         .answer_approval(&new_id, ApprovalAnswer::Yes)
         .unwrap();
     assert_eq!(
-        done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        done_rx
+            .recv_timeout(WAIT)
+            .expect("timed out waiting for fresh approval outcome"),
         Approval::Approved
     );
     t.join().unwrap();

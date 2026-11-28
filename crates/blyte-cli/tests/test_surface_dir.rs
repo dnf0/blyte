@@ -30,7 +30,7 @@ fn spawn_health_server(body: String) -> (u16, thread::JoinHandle<()>) {
     let handle = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(30)))
             .unwrap();
         let mut req_bytes = Vec::new();
         let mut buf = [0u8; 1024];

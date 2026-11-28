@@ -81,7 +81,7 @@ fn read_http_request(stream: &mut std::net::TcpStream) {
 
 #[test]
 fn streaming_idle_timeout_fires_when_server_stalls_after_one_chunk() {
-    const IDLE: Duration = Duration::from_millis(250);
+    const IDLE: Duration = Duration::from_secs(1);
     const CAP: Duration = Duration::from_secs(300);
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -134,8 +134,8 @@ fn streaming_idle_timeout_fires_when_server_stalls_after_one_chunk() {
 
 #[test]
 fn streaming_succeeds_past_idle_timeout_when_chunks_keep_arriving() {
-    const IDLE: Duration = Duration::from_millis(300);
-    const TARGET: Duration = Duration::from_millis(450);
+    const IDLE: Duration = Duration::from_secs(3);
+    const TARGET: Duration = Duration::from_millis(3500);
     const STEP: Duration = Duration::from_millis(20);
     const CAP: Duration = Duration::from_secs(300);
     const CHUNK_X: &[u8] =

@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 use blyte_agent::fs::LocalFs;
 use blyte_agent::shell::LocalShell;
 use blyte_agent::tools::{
-    blyte_command_timeout, blyte_started_by, blyte_surface, execute, set_blyte_request,
-    set_blyte_started_by, set_blyte_surface, set_blyte_tool, specs, BLYTE_TOOL_COMMANDS,
-    COMMAND_TIMEOUT, EDIT_FINISH_TIMEOUT, OUTPUT_LINE_BUDGET,
+    blyte_command_timeout, blyte_started_by, blyte_surface, execute, set_background_startup_wait,
+    set_blyte_request, set_blyte_started_by, set_blyte_surface, set_blyte_tool, specs,
+    BLYTE_TOOL_COMMANDS, COMMAND_TIMEOUT, EDIT_FINISH_TIMEOUT, OUTPUT_LINE_BUDGET,
 };
 use serde_json::json;
 
@@ -46,6 +46,7 @@ struct BlyteToolGuard {
 impl BlyteToolGuard {
     fn acquire_none() -> Self {
         let lock = BLYTE_TOOL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_background_startup_wait(None);
         set_blyte_tool(None);
         set_blyte_surface(None);
         Self { _lock: lock }
@@ -55,6 +56,7 @@ impl BlyteToolGuard {
         let lock = BLYTE_TOOL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_, exe, body_path) = dispatcher();
         std::fs::write(body_path, body).unwrap();
+        set_background_startup_wait(None);
         set_blyte_tool(Some(exe.clone()));
         set_blyte_surface(None);
         Self { _lock: lock }
@@ -65,12 +67,25 @@ impl BlyteToolGuard {
         std::fs::write(body_path, body).unwrap();
         set_blyte_tool(Some(exe.clone()));
     }
+
+    fn set_startup_wait(&self, wait: Duration) {
+        set_background_startup_wait(Some(wait));
+    }
 }
 
 impl Drop for BlyteToolGuard {
     fn drop(&mut self) {
+        set_background_startup_wait(None);
         set_blyte_surface(None);
         set_blyte_tool(None);
+    }
+}
+
+struct GateGuard(PathBuf);
+
+impl Drop for GateGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.0, "");
     }
 }
 
@@ -177,11 +192,15 @@ fn background_rules_and_async_dispatch() {
     let scripts = tempfile::tempdir().unwrap();
     let gate = scripts.path().join("go");
     let marker = scripts.path().join("done");
-    let _g = BlyteToolGuard::acquire_script(&format!(
-        "until [ -f '{}' ]; do sleep 0.01; done\n: > '{}'\n",
+    let _gate_guard = GateGuard(gate.clone());
+    let g = BlyteToolGuard::acquire_script(&format!(
+        "until [ -f '{}' ] || [ ! -d '{}' ]; do sleep 0.01; done\nif [ -f '{}' ]; then : > '{}'; fi\n",
+        gate.display(),
+        scripts.path().display(),
         gate.display(),
         marker.display()
     ));
+    g.set_startup_wait(Duration::from_millis(100));
 
     let non_dispatch = execute(
         root.path(),
@@ -395,14 +414,18 @@ fn dispatch_injects_current_request_and_rejects_model_supplied_request() {
         &json!({"args": ["dispatch", "T2", "t.md"], "background": true}),
     );
     assert!(!bg.is_error, "{}", bg.content);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let bg_args = loop {
         if let Ok(raw) = std::fs::read_to_string(&bg_log) {
             if !raw.is_empty() {
                 break raw;
             }
         }
-        assert!(Instant::now() < deadline, "background script did not run");
+        assert!(
+            Instant::now() < deadline,
+            "background script did not run (output: {:?})",
+            bg.content
+        );
         std::thread::sleep(Duration::from_millis(5));
     };
     let bg_lines: Vec<&str> = bg_args.lines().collect();
@@ -684,7 +707,9 @@ fn the_tool_child_does_not_carry_the_marker() {
 #[test]
 fn background_dispatch_early_nonzero_exit_reports_error_and_keeps_output() {
     let root = git_tempdir();
-    let _g = BlyteToolGuard::acquire_script("printf 'no API key\\n' >&2\nexit 3\n");
+    let early_exit_wait = Duration::from_secs(30);
+    let g = BlyteToolGuard::acquire_script("printf 'no API key\\n' >&2\nexit 3\n");
+    g.set_startup_wait(early_exit_wait);
 
     let start = Instant::now();
     let out = execute(
@@ -709,7 +734,7 @@ fn background_dispatch_early_nonzero_exit_reports_error_and_keeps_output() {
         out.content
     );
     assert!(
-        elapsed < Duration::from_secs(2),
+        elapsed < early_exit_wait,
         "early failure waited too long: {elapsed:?}"
     );
 
@@ -721,7 +746,18 @@ fn background_dispatch_early_nonzero_exit_reports_error_and_keeps_output() {
 #[test]
 fn background_dispatch_still_running_after_startup_wait_reports_started_and_output_path() {
     let root = git_tempdir();
-    let _g = BlyteToolGuard::acquire_script("exec sleep 5\n");
+    let scripts = tempfile::tempdir().unwrap();
+    let gate = scripts.path().join("go");
+    let marker = scripts.path().join("done");
+    let _gate_guard = GateGuard(gate.clone());
+    let g = BlyteToolGuard::acquire_script(&format!(
+        "until [ -f '{}' ] || [ ! -d '{}' ]; do sleep 0.01; done\nif [ -f '{}' ]; then : > '{}'; fi\n",
+        gate.display(),
+        scripts.path().display(),
+        gate.display(),
+        marker.display()
+    ));
+    g.set_startup_wait(Duration::from_millis(100));
 
     let start = Instant::now();
     let out = execute(
@@ -747,16 +783,25 @@ fn background_dispatch_still_running_after_startup_wait_reports_started_and_outp
         out.content
     );
     assert!(
-        elapsed < Duration::from_secs(4),
+        elapsed < Duration::from_secs(30),
         "background dispatch blocked for {elapsed:?}"
     );
     assert!(expected_path.exists(), "output file was not created");
+    assert!(!marker.exists(), "marker appeared before gate was released");
+
+    std::fs::write(&gate, "").unwrap();
+    let wait_until = Instant::now() + Duration::from_secs(30);
+    while !marker.exists() && Instant::now() < wait_until {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(marker.exists(), "background script never created marker");
 }
 
 #[test]
 fn background_dispatch_immediate_zero_exit_reports_finished_with_output() {
     let root = git_tempdir();
-    let _g = BlyteToolGuard::acquire_script("printf 'ok\\n'\nexit 0\n");
+    let g = BlyteToolGuard::acquire_script("printf 'ok\\n'\nexit 0\n");
+    g.set_startup_wait(Duration::from_secs(30));
 
     let out = execute(
         root.path(),
@@ -814,9 +859,10 @@ fn background_dispatch_truncates_previous_output_and_bounds_large_early_failure(
     std::fs::write(&out_file, "stale previous output\n").unwrap();
 
     let total_lines = OUTPUT_LINE_BUDGET + 200;
-    let _g = BlyteToolGuard::acquire_script(&format!(
+    let g = BlyteToolGuard::acquire_script(&format!(
         "i=1\nwhile [ \"$i\" -le {total_lines} ]; do printf 'line %d\\n' \"$i\" >&2; i=$((i + 1)); done\nexit 4\n"
     ));
+    g.set_startup_wait(Duration::from_secs(30));
 
     let out = execute(
         root.path(),

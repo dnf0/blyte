@@ -208,7 +208,7 @@ fn parse_surface_ready_line(line: &str) -> Option<(String, u16, String)> {
 fn send_http(port: u16, req: &str) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
+        .set_read_timeout(Some(Duration::from_secs(30)))
         .unwrap();
     stream.write_all(req.as_bytes()).unwrap();
     let mut resp = String::new();

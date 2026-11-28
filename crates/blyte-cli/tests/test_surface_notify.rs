@@ -94,7 +94,7 @@ fn spawn_single_response_listener(
     let recorded_clone = Arc::clone(&recorded);
     let handle = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
         let mut buf = Vec::new();
         let mut chunk = [0u8; 1024];
         while !buf.windows(4).any(|w| w == b"\r\n\r\n") {

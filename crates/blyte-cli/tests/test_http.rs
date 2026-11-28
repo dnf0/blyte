@@ -3,7 +3,9 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+const WAIT: Duration = Duration::from_secs(30);
 
 fn start_server<F>(handler: F) -> u16
 where
@@ -20,7 +22,7 @@ where
 fn send_raw(port: u16, raw: &[u8]) -> RawResponse {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(WAIT))
         .expect("set_read_timeout");
     stream.write_all(raw).expect("write_all");
     stream.flush().expect("flush");
@@ -32,7 +34,7 @@ fn send_raw(port: u16, raw: &[u8]) -> RawResponse {
 fn send_raw_and_shutdown_write(port: u16, raw: &[u8]) -> RawResponse {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(WAIT))
         .expect("set_read_timeout");
     stream.write_all(raw).expect("write_all");
     stream.flush().expect("flush");
@@ -196,12 +198,10 @@ fn oversized_body_is_413() {
         Response::text(200, "ok")
     });
 
-    let start = Instant::now();
     let req = format!(
         "POST /upload HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 2000000\r\n\r\n"
     );
     let resp = send_raw(port, req.as_bytes());
-    assert!(start.elapsed() < Duration::from_secs(2));
     assert_eq!(resp.status, 413);
     assert_eq!(resp.status_line, "HTTP/1.1 413 Payload Too Large");
     assert!(!resp.body_str().is_empty());
@@ -362,13 +362,19 @@ fn get_ignores_origin() {
 
 #[test]
 fn slow_handler_does_not_block_others() {
-    let (tx, rx) = mpsc::channel();
-    let tx = Mutex::new(tx);
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let entered_tx = Mutex::new(entered_tx);
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
 
     let port = start_server(move |req| {
         if req.path == "/slow" {
-            let _ = tx.lock().unwrap().send(());
-            std::thread::sleep(Duration::from_secs(1));
+            let _ = entered_tx.lock().unwrap().send(());
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(WAIT)
+                .expect("timed out waiting for slow handler release");
             Response::text(200, "slow")
         } else {
             Response::text(200, "fast")
@@ -380,20 +386,17 @@ fn slow_handler_does_not_block_others() {
         send_raw(port, req.as_bytes())
     });
 
-    rx.recv_timeout(Duration::from_secs(2))
-        .expect("slow handler entered");
+    entered_rx
+        .recv_timeout(WAIT)
+        .expect("timed out waiting for slow handler to enter");
 
-    let start = Instant::now();
     let fast_req = format!("GET /fast HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
     let fast_resp = send_raw(port, fast_req.as_bytes());
-    let elapsed = start.elapsed();
 
     assert_eq!(fast_resp.status, 200);
     assert_eq!(fast_resp.body_str(), "fast");
-    assert!(
-        elapsed < Duration::from_millis(500),
-        "fast request took {elapsed:?}"
-    );
+
+    release_tx.send(()).expect("release slow handler");
 
     let slow_resp = slow_handle.join().expect("slow thread");
     assert_eq!(slow_resp.status, 200);

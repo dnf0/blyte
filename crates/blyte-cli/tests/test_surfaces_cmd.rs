@@ -70,7 +70,7 @@ impl MockHealthServer {
                 let Ok(mut stream) = stream else {
                     break;
                 };
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
                 let mut req = Vec::new();
                 let mut buf = [0u8; 512];
                 while !req.windows(4).any(|w| w == b"\r\n\r\n") {

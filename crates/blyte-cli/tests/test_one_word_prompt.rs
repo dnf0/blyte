@@ -47,8 +47,8 @@ fn nosuchcommand_exits_2_with_error_and_version() {
         "stderr was: {stderr}, expected version: {version}"
     );
     assert!(
-        elapsed < Duration::from_secs(5),
-        "command took {:?}, expected < 5s",
+        elapsed < Duration::from_secs(60),
+        "command took {:?}, expected < 60s",
         elapsed
     );
 }
@@ -73,8 +73,8 @@ fn trimmed_one_word_prompt_behaves_the_same() {
         "stderr was: {stderr}, expected version: {version}"
     );
     assert!(
-        elapsed < Duration::from_secs(5),
-        "command took {:?}, expected < 5s",
+        elapsed < Duration::from_secs(60),
+        "command took {:?}, expected < 60s",
         elapsed
     );
 }

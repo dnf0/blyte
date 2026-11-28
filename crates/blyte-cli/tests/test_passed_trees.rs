@@ -178,7 +178,7 @@ fn count_lines(path: &Path) -> usize {
 }
 
 fn wait_for_marker(path: &Path, step: &str) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while !path.exists() {
         assert!(
             std::time::Instant::now() < deadline,
@@ -557,7 +557,7 @@ fn dispatch_runs_base_check_when_base_tree_not_recorded() {
     std::thread::spawn(move || {
         let mut first = true;
         for mut s in listener.incoming().flatten() {
-            let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+            let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(30)));
             let mut buf = vec![0u8; 65536];
             let mut got = Vec::new();
             loop {
@@ -618,7 +618,7 @@ fn dispatch_runs_base_check_when_base_tree_not_recorded() {
         .env("BLYTE_NO_UPDATE_CHECK", "1")
         .env("BLYTE_NO_KEEP_AWAKE", "1")
         .env("BLYTE_USAGE_LOG", "off")
-        .env("BLYTE_MODEL_TIMEOUT_SECS", "10")
+        .env("BLYTE_MODEL_TIMEOUT_SECS", "45")
         .env("BLYTE_RETRY_DELAY_MS", "10")
         .env_remove("GEMINI_API_KEY")
         .env_remove("GOOGLE_API_KEY")

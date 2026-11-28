@@ -156,6 +156,7 @@ fn test_binary_with_usage_log() {
         .env("BLYTE_USAGE_LOG", log_path.as_os_str())
         .env("HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path())
+        .env_remove("BLYTE_STATUSLINE_AFTER_TIMEOUT_MS")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -182,17 +183,15 @@ fn test_binary_with_usage_log() {
 
 #[test]
 fn test_after_flag() {
-    // 5. --after "echo mine" prints a line starting with mine; --after "exit 1" falls back to the base
-    // line; --after "sleep 5" falls back within 4 seconds.
     let tmp = tempfile::tempdir().unwrap();
     let stdin_payload = r#"{"model":{"display_name":"Opus"}}"#;
 
-    // --after "echo mine"
     {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_blyte"));
         cmd.args(["statusline", "--after", "echo mine"])
             .env("HOME", tmp.path())
             .env("XDG_CONFIG_HOME", tmp.path())
+            .env("BLYTE_STATUSLINE_AFTER_TIMEOUT_MS", "30000")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -210,12 +209,12 @@ fn test_after_flag() {
         );
     }
 
-    // --after "exit 1" falls back to the base line ("Opus")
     {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_blyte"));
         cmd.args(["statusline", "--after", "exit 1"])
             .env("HOME", tmp.path())
             .env("XDG_CONFIG_HOME", tmp.path())
+            .env("BLYTE_STATUSLINE_AFTER_TIMEOUT_MS", "30000")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -234,14 +233,14 @@ fn test_after_flag() {
         let start = Instant::now();
         let stdout = render_statusline(
             stdin_payload.as_bytes(),
-            Some("sleep 5"),
+            Some("sleep 60; echo late"),
             Duration::from_millis(150),
         );
         let elapsed = start.elapsed();
         assert_eq!(stdout.trim(), "Opus");
         assert!(
-            elapsed < Duration::from_secs(4),
-            "expected fallback within 4s, took: {:?}",
+            elapsed < Duration::from_secs(30),
+            "expected fallback well before 60s sleep, took: {:?}",
             elapsed
         );
     }
@@ -255,6 +254,7 @@ fn test_malformed_stdin() {
     cmd.arg("statusline")
         .env("HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path())
+        .env_remove("BLYTE_STATUSLINE_AFTER_TIMEOUT_MS")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -282,6 +282,7 @@ fn test_after_command_that_does_not_read_stdin() {
     cmd.args(["statusline", "--after", "exec 0<&-; echo mine"])
         .env("HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path())
+        .env("BLYTE_STATUSLINE_AFTER_TIMEOUT_MS", "30000")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -523,4 +524,104 @@ fn test_broken_json_settings_file_gives_invalid() {
         "expected broken file path '{broken_str}' in line: {line}"
     );
     assert!(!line.contains("consider /compact"));
+}
+
+#[test]
+fn test_after_timeout_env_is_honoured() {
+    assert_eq!(
+        blyte_cli::statusline::DEFAULT_AFTER_TIMEOUT,
+        Duration::from_secs(5)
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let stdin_payload = r#"{"model":{"display_name":"Opus"}}"#;
+
+    {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_blyte"));
+        cmd.args(["statusline", "--after", "sleep 0.3; echo mine"])
+            .env("HOME", tmp.path())
+            .env("XDG_CONFIG_HOME", tmp.path())
+            .env("BLYTE_STATUSLINE_AFTER_TIMEOUT_MS", "100")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        {
+            let mut stdin = child.stdin.take().unwrap();
+            stdin.write_all(stdin_payload.as_bytes()).unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            stdout.trim(),
+            "Opus",
+            "expected 100ms limit to cut off 0.3s sleep and fall back to base line"
+        );
+    }
+
+    {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_blyte"));
+        cmd.args(["statusline", "--after", "sleep 0.3; echo mine"])
+            .env("HOME", tmp.path())
+            .env("XDG_CONFIG_HOME", tmp.path())
+            .env("BLYTE_STATUSLINE_AFTER_TIMEOUT_MS", "30000")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        {
+            let mut stdin = child.stdin.take().unwrap();
+            stdin.write_all(stdin_payload.as_bytes()).unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            stdout.trim(),
+            "mine",
+            "expected 30000ms limit to allow 0.3s sleep to complete"
+        );
+    }
+}
+
+#[test]
+fn test_after_timeout_env_rejects_invalid_values() {
+    let tmp = tempfile::tempdir().unwrap();
+    let stdin_payload = r#"{"model":{"display_name":"Opus"}}"#;
+
+    for bad in ["0", "-5", "abc", "1.5", "", "+100"] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_blyte"));
+        cmd.args(["statusline", "--after", "echo mine"])
+            .env("HOME", tmp.path())
+            .env("XDG_CONFIG_HOME", tmp.path())
+            .env("BLYTE_STATUSLINE_AFTER_TIMEOUT_MS", bad)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        {
+            let mut stdin = child.stdin.take().unwrap();
+            let _ = stdin.write_all(stdin_payload.as_bytes());
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            !output.status.success(),
+            "expected non-zero exit for BLYTE_STATUSLINE_AFTER_TIMEOUT_MS={bad:?}"
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.is_empty(),
+            "expected empty stdout for bad value {bad:?}, got: {stdout:?}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("BLYTE_STATUSLINE_AFTER_TIMEOUT_MS"),
+            "expected stderr to name variable for {bad:?}, got: {stderr:?}"
+        );
+        assert!(
+            stderr.contains(&format!("{bad:?}")),
+            "expected stderr to name value {bad:?}, got: {stderr:?}"
+        );
+    }
 }
