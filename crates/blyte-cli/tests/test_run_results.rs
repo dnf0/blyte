@@ -503,6 +503,21 @@ fn router_get_api_runs_adds_entry_once_across_two_calls() {
     let resp1 = route(&surface, &get(&surface, "/api/runs"), now + 1);
     assert_eq!(resp1.status, 200);
     surface.requests.wait_all_idle();
+    let queued = wait_for_prompts(&prompts, 1);
+    assert_eq!(queued.len(), 1);
+    assert!(
+        queued[0].contains("passed its check but review flagged it"),
+        "{}",
+        queued[0]
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let info = surface.session.info();
+        if !info.busy && info.queued == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
 
     let resp2 = route(&surface, &get(&surface, "/api/runs"), now + 2);
     assert_eq!(resp2.status, 200);
@@ -525,7 +540,7 @@ fn router_get_api_runs_adds_entry_once_across_two_calls() {
 
     assert_eq!(surface.session.info().queued, 0);
     assert!(!surface.session.info().busy);
-    assert!(prompts.lock().unwrap().is_empty());
+    assert_eq!(prompts.lock().unwrap().len(), 1);
 }
 
 #[test]
@@ -723,4 +738,127 @@ fn research_run_of_another_surface_produces_no_message() {
     assert!(!surface.session.info().busy);
     assert!(prompts.lock().unwrap().is_empty());
     assert!(!root.join(".wt/RES-OTHER.reported.json").exists());
+}
+
+fn write_checks_file(root: &Path, id: &str, flags: &[&str]) {
+    let obj = json!({
+        "flags": flags,
+        "fallbacks": [],
+    });
+    std::fs::write(
+        root.join(".wt").join(format!("{id}.checks.json")),
+        serde_json::to_string_pretty(&obj).unwrap() + "\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn verified_run_with_flagged_checks_queues_flagged_message_once() {
+    let (repo, base) = init_wt_dir();
+    let root = repo.path();
+    let now = now_secs();
+
+    write_start_file(root, "FLG1", Some("req-flagged"), &base, now, false);
+    write_summary(
+        root,
+        "FLG1",
+        &json!({
+            "id": "FLG1",
+            "outcome": "verified",
+            "turns": 6,
+            "cost_usd": 0.30,
+            "seconds": 120,
+            "final_message": "Done.",
+            "gate_failures": []
+        }),
+    );
+    write_checks_file(root, "FLG1", &["touched sensitive path"]);
+
+    let (surface, prompts) = make_surface(root.to_path_buf());
+    report_finished_runs(&surface).unwrap();
+
+    let queued = wait_for_prompts(&prompts, 1);
+    assert_eq!(queued.len(), 1);
+    let msg = &queued[0];
+    assert!(msg.contains("FLG1"), "{msg}");
+    assert!(
+        msg.contains("passed its check but review flagged it"),
+        "{msg}"
+    );
+    assert!(msg.contains("touched sensitive path"), "{msg}");
+    assert!(
+        msg.contains("blyte review FLG1 --verdict accepted, fixed or redone"),
+        "{msg}"
+    );
+
+    assert!(root.join(".wt/FLG1.reported.json").exists());
+
+    let entries_before = surface.session.entries_after(0, Duration::ZERO).len();
+    report_finished_runs(&surface).unwrap();
+    assert_eq!(surface.session.info().queued, 0);
+    assert_eq!(prompts.lock().unwrap().len(), 1);
+    assert_eq!(
+        surface.session.entries_after(0, Duration::ZERO).len(),
+        entries_before
+    );
+}
+
+#[test]
+fn verified_run_with_clean_checks_queues_nothing() {
+    let (repo, base) = init_wt_dir();
+    let root = repo.path();
+    let now = now_secs();
+
+    write_start_file(root, "CLN1", Some("req-clean"), &base, now, false);
+    write_summary(
+        root,
+        "CLN1",
+        &json!({
+            "id": "CLN1",
+            "outcome": "verified",
+            "turns": 4,
+            "cost_usd": 0.12,
+            "seconds": 90,
+            "final_message": "All clean.",
+            "gate_failures": []
+        }),
+    );
+    write_checks_file(root, "CLN1", &[]);
+
+    let (surface, prompts) = make_surface(root.to_path_buf());
+    report_finished_runs(&surface).unwrap();
+
+    assert_eq!(surface.session.info().queued, 0);
+    assert!(!surface.session.info().busy);
+    assert!(prompts.lock().unwrap().is_empty());
+    assert!(root.join(".wt/CLN1.reported.json").exists());
+}
+
+#[test]
+fn verified_run_with_unparseable_checks_returns_error_naming_file() {
+    let (repo, base) = init_wt_dir();
+    let root = repo.path();
+    let now = now_secs();
+
+    write_start_file(root, "BADCHK", Some("req-badchk"), &base, now, false);
+    write_summary(
+        root,
+        "BADCHK",
+        &json!({
+            "id": "BADCHK",
+            "outcome": "verified",
+            "turns": 4,
+            "cost_usd": 0.12,
+            "seconds": 90,
+            "final_message": "Done.",
+            "gate_failures": []
+        }),
+    );
+    std::fs::write(root.join(".wt/BADCHK.checks.json"), "{not json").unwrap();
+
+    let (surface, prompts) = make_surface(root.to_path_buf());
+    let err = report_finished_runs(&surface).unwrap_err();
+    assert!(err.contains("BADCHK.checks.json"), "{err}");
+    assert!(prompts.lock().unwrap().is_empty());
+    assert!(!root.join(".wt/BADCHK.reported.json").exists());
 }

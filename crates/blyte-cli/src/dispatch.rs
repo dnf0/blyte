@@ -1118,10 +1118,76 @@ pub(crate) fn write_summary_to_dir(
     (write_failed, exit)
 }
 
-pub(crate) fn load_task_text(
+fn read_plan_text<'a>(
+    plan_path: &str,
+    root: &Path,
+    base: Option<&'a str>,
+) -> Result<(String, Option<&'a str>), String> {
+    let path = Path::new(plan_path);
+    if path.is_file() {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("error reading plan {plan_path}: {e}"))?;
+        return Ok((content, None));
+    }
+
+    let Some(base_ref) = base else {
+        return Err(format!(
+            "error reading plan {plan_path}: not found in the checkout"
+        ));
+    };
+
+    if path.is_absolute() {
+        return Err(format!(
+            "error reading plan {plan_path}: not found in the checkout"
+        ));
+    }
+
+    let normalized = plan_path.replace('\\', "/");
+    let mut git_path = normalized.as_str();
+    while let Some(rest) = git_path.strip_prefix("./") {
+        git_path = rest;
+    }
+
+    let spec = format!("{base_ref}:{git_path}");
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["show", &spec])
+        .output()
+        .map_err(|e| {
+            format!(
+                "error reading plan {plan_path}: not found in the checkout or on {base_ref}: {e}"
+            )
+        })?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let detail = stderr
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("");
+        if detail.is_empty() {
+            return Err(format!(
+                "error reading plan {plan_path}: not found in the checkout or on {base_ref}"
+            ));
+        }
+        return Err(format!(
+            "error reading plan {plan_path}: not found in the checkout or on {base_ref}: {detail}"
+        ));
+    }
+
+    let content = String::from_utf8(out.stdout)
+        .map_err(|e| format!("error reading plan {plan_path} on {base_ref}: {e}"))?;
+    Ok((content, Some(base_ref)))
+}
+
+pub fn load_task_text(
     task_file: Option<&Path>,
     plan: Option<&str>,
     plan_task: Option<&str>,
+    root: &Path,
+    base: Option<&str>,
 ) -> Result<Option<(String, Option<String>)>, String> {
     if let Some(tf) = task_file {
         let content = std::fs::read_to_string(tf)
@@ -1129,8 +1195,7 @@ pub(crate) fn load_task_text(
         return Ok(Some((content, Some(tf.display().to_string()))));
     }
     if let (Some(plan_path), Some(plan_task)) = (plan, plan_task) {
-        let plan_str = std::fs::read_to_string(plan_path)
-            .map_err(|e| format!("error reading plan {plan_path}: {e}"))?;
+        let (plan_str, from_base) = read_plan_text(plan_path, root, base)?;
         let Some(section) = crate::plan_section::extract(&plan_str, plan_task) else {
             let mut msg = format!("error: no heading \"{plan_task}\" in {plan_path}");
             if let Some(hint) = crate::plan_section::explain_missing(&plan_str, plan_task) {
@@ -1138,7 +1203,11 @@ pub(crate) fn load_task_text(
             }
             return Err(msg);
         };
-        let content = format!("From the plan {plan_path}:\n\n{section}");
+        let header = match from_base {
+            Some(base_ref) => format!("From the plan {plan_path} (on {base_ref}):"),
+            None => format!("From the plan {plan_path}:"),
+        };
+        let content = format!("{header}\n\n{section}");
         return Ok(Some((content, None)));
     }
     Ok(None)
@@ -1519,6 +1588,8 @@ pub fn run_dispatch(args: &DispatchArgs) -> i32 {
         args.task_file.as_deref(),
         args.plan.as_deref(),
         args.plan_task.as_deref(),
+        &start_dir,
+        (!args.research).then_some(args.base.as_str()),
     ) {
         Ok(Some(pair)) => pair,
         Ok(None) if resuming_fix_round => {

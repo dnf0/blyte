@@ -13,10 +13,10 @@ use blyte_cli::http::{Request, Response};
 use blyte_cli::queue_actions::{decide, record_verdict, set_hold, Action};
 use blyte_cli::repl::ReplConfig;
 use blyte_cli::requests::{
-    list_requests, load_attempt_record, load_published_record, maybe_combine,
-    open_request_pull_request, push_request, request_readiness, write_attempt_record,
-    AttemptRecord, AttemptResult, Publisher, Readiness, RealPublisher, RequestActionError,
-    RequestsState,
+    format_combined_message, list_requests, load_attempt_record, load_published_record,
+    maybe_combine, open_request_pull_request, push_request, request_readiness,
+    write_attempt_record, AttemptRecord, AttemptResult, Publisher, Readiness, RealPublisher,
+    RequestActionError, RequestsState,
 };
 use blyte_cli::serve::{generate_token, route, run_with_hooks, Surface, TOKEN_HEADER};
 use blyte_cli::session::{EntryBody, PromptRunner, Session};
@@ -621,6 +621,7 @@ fn trigger_combines_ready_and_skips_waiting_or_unrequested() {
 
     assert!(maybe_combine(&surface, "req-a").unwrap());
     surface.requests.wait_for_idle("req-a");
+    wait_for_idle_entries(&surface.session, 1);
 
     let rec_path = root.join(".wt/combined/req-a.json");
     let rec: CombineRecord =
@@ -629,6 +630,19 @@ fn trigger_combines_ready_and_skips_waiting_or_unrequested() {
     assert_eq!(rec.branch, "blyte/req-a");
     let tip = git(root, &["rev-parse", "--verify", "refs/heads/blyte/req-a"]);
     assert!(!tip.is_empty());
+    let attempt_a = load_attempt_record(root, "req-a").unwrap().unwrap();
+    assert_eq!(attempt_a.result, AttemptResult::Combined);
+    assert!(attempt_a.reported);
+    {
+        let recorded = prompts.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert!(
+            recorded[0].contains("is combined on branch"),
+            "{}",
+            recorded[0]
+        );
+        assert!(recorded[0].contains("blyte/req-a"), "{}", recorded[0]);
+    }
 
     assert!(!maybe_combine(&surface, "req-a").unwrap());
     assert!(!maybe_combine(&surface, "req-b").unwrap());
@@ -637,6 +651,7 @@ fn trigger_combines_ready_and_skips_waiting_or_unrequested() {
     let runs_resp = route(&surface, &get(&surface, "/api/runs"), now + 6);
     assert_eq!(runs_resp.status, 200);
     surface.requests.wait_all_idle();
+    wait_for_idle_entries(&surface.session, 2);
     assert!(!root.join(".wt/combined/req-b.json").exists());
     assert!(root.join(".wt/combined/req-poll.json").exists());
     let poll_rec: CombineRecord = serde_json::from_str(
@@ -655,11 +670,20 @@ fn trigger_combines_ready_and_skips_waiting_or_unrequested() {
     assert_eq!(ids[0], "req-poll");
 
     assert_session_idle(&surface.session);
-    assert!(prompts.lock().unwrap().is_empty());
+    {
+        let recorded = prompts.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        assert!(
+            recorded[1].contains("is combined on branch"),
+            "{}",
+            recorded[1]
+        );
+        assert!(recorded[1].contains("blyte/req-poll"), "{}", recorded[1]);
+    }
 }
 
 #[test]
-fn conflict_queues_once_and_success_queues_none() {
+fn conflict_and_success_each_queue_once() {
     let (repo, base) = init_repo_with_gate("true");
     let root = repo.path();
 
@@ -707,12 +731,27 @@ fn conflict_queues_once_and_success_queues_none() {
 
     assert!(maybe_combine(&surface, "req-ok").unwrap());
     surface.requests.wait_for_idle("req-ok");
+    wait_for_idle_entries(&surface.session, 2);
     assert_session_idle(&surface.session);
-    assert_eq!(prompts.lock().unwrap().len(), 1);
+    {
+        let recorded = prompts.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        assert!(recorded[1].contains("req-ok"), "{}", recorded[1]);
+        assert!(
+            recorded[1].contains("is combined on branch"),
+            "{}",
+            recorded[1]
+        );
+    }
+    let ok_attempt = load_attempt_record(root, "req-ok").unwrap().unwrap();
+    assert_eq!(ok_attempt.result, AttemptResult::Combined);
+    assert!(ok_attempt.reported);
+    assert!(!maybe_combine(&surface, "req-ok").unwrap());
+    assert_eq!(prompts.lock().unwrap().len(), 2);
 }
 
 #[test]
-fn accept_triggers_combine_and_does_not_queue_combine_message() {
+fn accept_triggers_combine_and_queues_combine_message() {
     let (repo, base) = init_repo_with_gate("true");
     let root = repo.path();
     let now = now_secs();
@@ -738,15 +777,28 @@ fn accept_triggers_combine_and_does_not_queue_combine_message() {
     assert!(body["decision"]["conversation_message"].is_null());
 
     surface.requests.wait_for_idle("req-accept");
+    wait_for_idle_entries(&surface.session, 1);
 
     let rec_path = root.join(".wt/combined/req-accept.json");
     let rec: CombineRecord =
         serde_json::from_str(&std::fs::read_to_string(&rec_path).unwrap()).unwrap();
     assert_eq!(rec.state, CombineState::Combined);
     assert_eq!(rec.branch, "blyte/req-accept");
+    let attempt = load_attempt_record(root, "req-accept").unwrap().unwrap();
+    assert_eq!(attempt.result, AttemptResult::Combined);
+    assert!(attempt.reported);
 
     assert_session_idle(&surface.session);
-    assert!(prompts.lock().unwrap().is_empty());
+    {
+        let recorded = prompts.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert!(
+            recorded[0].contains("is combined on branch"),
+            "{}",
+            recorded[0]
+        );
+        assert!(recorded[0].contains("blyte/req-accept"), "{}", recorded[0]);
+    }
 }
 
 #[test]
@@ -1295,6 +1347,7 @@ fn push_then_rebuild_invalidates_pushed_and_blocks_pr_until_repushed() {
 
     assert!(maybe_combine(&surface, "req-repush").unwrap());
     surface.requests.wait_for_idle("req-repush");
+    wait_for_idle_entries(&surface.session, 1);
 
     let push1 = route(
         &surface,
@@ -1652,6 +1705,7 @@ fn recording_redone_on_combined_run_triggers_recombine() {
     let (surface, _prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
     assert!(maybe_combine(&surface, "req-recombine").unwrap());
     surface.requests.wait_for_idle("req-recombine");
+    wait_for_idle_entries(&surface.session, 1);
 
     let reqs1 = parse_json(&route(&surface, &get(&surface, "/api/requests"), now + 2));
     let item1 = &reqs1.as_array().unwrap()[0];
@@ -2966,4 +3020,82 @@ fn a_start_record_with_a_bad_started_by_is_an_error() {
             )
         );
     }
+}
+
+#[test]
+fn format_combined_message_formats_branch_count_and_short_hashes() {
+    let rec = CombineRecord {
+        request: "r1".to_string(),
+        state: CombineState::Combined,
+        branch: "combined/r1".to_string(),
+        base: "0000000000000000".to_string(),
+        runs: Vec::new(),
+        commits: vec![
+            "0123456789abcdef".to_string(),
+            "fedcba9876543210".to_string(),
+        ],
+        check: CombineCheck::Ran,
+        conflicting_run: None,
+        conflicting_files: Vec::new(),
+        failing_step: None,
+        output_tail: None,
+    };
+    let msg = format_combined_message(&rec);
+    assert!(msg.contains("combined/r1"), "{msg}");
+    assert!(msg.contains("2 commit(s)"), "{msg}");
+    assert!(msg.contains("01234567"), "{msg}");
+    assert!(msg.contains("fedcba98"), "{msg}");
+    assert!(!msg.contains("0123456789"), "{msg}");
+    assert!(msg.contains("is combined on branch"), "{msg}");
+}
+
+#[test]
+fn unreported_combined_attempt_retries_notification_without_recombining() {
+    let (repo, base) = init_repo_with_gate("true");
+    let root = repo.path();
+    let now = now_secs();
+
+    create_run_branch(root, "RCU1", &base, "rcu.txt", "ok\n", "feat: rcu");
+    write_start_file(root, "RCU1", Some("req-retry-comb"), &base, now, false);
+    write_summary(root, "RCU1", "verified", Some("wip/RCU1"));
+    write_checks(root, "RCU1", &[]);
+
+    let (surface, prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
+    assert!(maybe_combine(&surface, "req-retry-comb").unwrap());
+    surface.requests.wait_for_idle("req-retry-comb");
+    wait_for_idle_entries(&surface.session, 1);
+    assert_eq!(prompts.lock().unwrap().len(), 1);
+
+    let mut attempt = load_attempt_record(root, "req-retry-comb")
+        .unwrap()
+        .unwrap();
+    assert_eq!(attempt.result, AttemptResult::Combined);
+    assert!(attempt.reported);
+
+    attempt.reported = false;
+    write_attempt_record(root, "req-retry-comb", &attempt).unwrap();
+
+    let (restarted, restarted_prompts) = make_surface(root.to_path_buf(), Arc::new(RealPublisher));
+    assert!(!maybe_combine(&restarted, "req-retry-comb").unwrap());
+    wait_for_idle_entries(&restarted.session, 1);
+    {
+        let recorded = restarted_prompts.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert!(
+            recorded[0].contains("is combined on branch"),
+            "{}",
+            recorded[0]
+        );
+        assert!(
+            recorded[0].contains("blyte/req-retry-comb"),
+            "{}",
+            recorded[0]
+        );
+    }
+    assert!(
+        load_attempt_record(root, "req-retry-comb")
+            .unwrap()
+            .unwrap()
+            .reported
+    );
 }

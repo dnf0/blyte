@@ -1306,7 +1306,13 @@ pub fn execute_with_timeout(
     } else {
         bound_output_lines(&outcome.content, OUTPUT_LINE_BUDGET)
     };
-    outcome
+    match crate::redact::Redactor::for_root(root) {
+        Ok(redactor) => {
+            outcome.content = redactor.apply(&outcome.content);
+            outcome
+        }
+        Err(e) => ToolOutcome::err(e),
+    }
 }
 
 /// The tools themselves; `execute` bounds whatever they return.

@@ -954,6 +954,22 @@ fn format_record_failure(record: &CombineRecord, record_path: &Path) -> Result<S
     }
 }
 
+pub fn format_combined_message(rec: &CombineRecord) -> String {
+    let short_hashes = rec
+        .commits
+        .iter()
+        .map(|c| c.chars().take(8).collect::<String>())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Request {} is combined on branch {} ({} commit(s): {}).\nIts check passed. Tell the user what changed, and ask to publish it if they want a pull request.",
+        rec.request,
+        rec.branch,
+        rec.commits.len(),
+        short_hashes
+    )
+}
+
 fn format_error_failure(request: &str, err_text: &str) -> String {
     format!("Combine failed for request {request} (state: error).\nError: {err_text}")
 }
@@ -971,7 +987,7 @@ impl Drop for RunningGuard {
     }
 }
 
-fn retry_failure_message(
+fn retry_attempt_message(
     root: &Path,
     request: &str,
     attempt: &AttemptRecord,
@@ -1004,10 +1020,14 @@ fn retry_failure_message(
             })?;
             Ok(format_error_failure(request, err_text))
         }
-        AttemptResult::Combined => Err(format!(
-            "cannot format failure message for combined attempt {}",
-            path.display()
-        )),
+        AttemptResult::Combined => match load_combine_record(root, request)? {
+            Some(rec) if rec.state == CombineState::Combined => Ok(format_combined_message(&rec)),
+            _ => Err(format!(
+                "attempt file {} has result {:?} without a matching combine record",
+                path.display(),
+                attempt.result
+            )),
+        },
     }
 }
 
@@ -1095,8 +1115,8 @@ pub fn maybe_combine(surface: &Surface, request: &str) -> Result<bool, String> {
         }
         if let Some(mut attempt) = load_attempt_record(&surface.root, request)? {
             if attempt.runs == current_runs {
-                if attempt.result != AttemptResult::Combined && !attempt.reported {
-                    match retry_failure_message(&surface.root, request, &attempt) {
+                if !attempt.reported {
+                    match retry_attempt_message(&surface.root, request, &attempt) {
                         Ok(msg) => match surface.session.queue_for_request(request, &msg) {
                             Ok(_) => {
                                 attempt.reported = true;
@@ -1104,7 +1124,7 @@ pub fn maybe_combine(surface: &Surface, request: &str) -> Result<bool, String> {
                             }
                             Err(e) => {
                                 surface.session.record_error(&format!(
-                                    "failed to queue combine failure for {request}: {e}"
+                                    "failed to queue combine result for {request}: {e}"
                                 ));
                             }
                         },
@@ -1144,17 +1164,24 @@ pub fn maybe_combine(surface: &Surface, request: &str) -> Result<bool, String> {
 
         match code {
             0 => {
-                let runs = match load_combine_record(&root, &request_owned) {
-                    Ok(Some(rec)) => sorted_runs(rec.runs),
-                    Ok(None) => current_runs,
+                let rec_path = combine_record_path(&root, &request_owned);
+                let (runs, rec) = match load_combine_record(&root, &request_owned) {
+                    Ok(Some(rec)) => (sorted_runs(rec.runs.clone()), Some(rec)),
+                    Ok(None) => {
+                        session.record_error(&format!(
+                            "combine record {} is missing after combine for {request_owned}",
+                            rec_path.display()
+                        ));
+                        (current_runs, None)
+                    }
                     Err(e) => {
                         session.record_error(&format!(
                             "failed to read combine record after combine for {request_owned}: {e}"
                         ));
-                        current_runs
+                        (current_runs, None)
                     }
                 };
-                let attempt = AttemptRecord {
+                let mut attempt = AttemptRecord {
                     runs,
                     result: AttemptResult::Combined,
                     error: None,
@@ -1164,6 +1191,24 @@ pub fn maybe_combine(surface: &Surface, request: &str) -> Result<bool, String> {
                     session.record_error(&format!(
                         "failed to write attempt record for {request_owned}: {e}"
                     ));
+                }
+                if let Some(rec) = rec {
+                    let msg = format_combined_message(&rec);
+                    match session.queue_for_request(&request_owned, &msg) {
+                        Ok(_) => {
+                            attempt.reported = true;
+                            if let Err(e) = write_attempt_record(&root, &request_owned, &attempt) {
+                                session.record_error(&format!(
+                                    "failed to write attempt record for {request_owned}: {e}"
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            session.record_error(&format!(
+                                "failed to queue combine result for {request_owned}: {e}"
+                            ));
+                        }
+                    }
                 }
             }
             1 => match load_combine_record(&root, &request_owned) {

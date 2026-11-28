@@ -8,9 +8,12 @@
 //! --rollback` swaps them back), and every installed copy of the skill is refreshed when unedited,
 //! for every harness (2026-10-01).
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
+
+use sha2::{Digest, Sha256};
 
 /// The repository whose releases are installed. The repository is the `repository` field
 /// of the workspace Cargo.toml.
@@ -243,6 +246,34 @@ fn latest_tag() -> Result<String, String> {
     Ok(tag)
 }
 
+/// Parse the first whitespace-separated token from a checksum file as a 64-character lower-case
+/// SHA-256 hexadecimal digest.
+pub fn parse_checksum(text: &str) -> Result<String, String> {
+    let token = text.split_whitespace().next().unwrap_or("");
+    if token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(token.to_ascii_lowercase())
+    } else {
+        Err(format!(
+            "expected a 64-character SHA-256 hex digest, found {token:?}"
+        ))
+    }
+}
+
+/// Compute the lower-case SHA-256 hexadecimal digest of the file at `path`.
+pub fn sha256_hex(path: &Path) -> Result<String, String> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("could not open {} for checksum: {e}", path.display()))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)
+        .map_err(|e| format!("could not read {} for checksum: {e}", path.display()))?;
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    Ok(hex)
+}
+
 fn download_release(repo: &str, tag: &str, asset: &str, tmp: &Path) -> Result<(), String> {
     let url = format!("{}/{repo}/releases/download/{tag}/{asset}", download_base());
     let agent = ureq::AgentBuilder::new()
@@ -268,6 +299,53 @@ fn download_release(repo: &str, tag: &str, asset: &str, tmp: &Path) -> Result<()
         drop(file);
         let _ = std::fs::remove_file(tmp);
         return Err(format!("download failed: {e}"));
+    }
+    Ok(())
+}
+
+fn fetch_checksum(repo: &str, tag: &str, asset: &str) -> Result<String, String> {
+    let checksum_asset = format!("{asset}.sha256");
+    let url = format!(
+        "{}/{repo}/releases/download/{tag}/{checksum_asset}",
+        download_base()
+    );
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(30))
+        .timeout_read(Duration::from_secs(600))
+        .build();
+    let resp = agent
+        .get(&url)
+        .set("User-Agent", "blyte")
+        .call()
+        .map_err(|e| format!("could not download {checksum_asset}: {e}"))?;
+    let body = resp
+        .into_string()
+        .map_err(|e| format!("could not read {checksum_asset}: {e}"))?;
+    parse_checksum(&body).map_err(|e| format!("invalid checksum in {checksum_asset}: {e}"))
+}
+
+fn verify_checksum(repo: &str, tag: &str, asset: &str, tmp: &Path) -> Result<(), String> {
+    let expected = match fetch_checksum(repo, tag, asset) {
+        Ok(digest) => digest,
+        Err(e) => {
+            let _ = std::fs::remove_file(tmp);
+            return Err(format!("{e}; the installed blyte is unchanged"));
+        }
+    };
+    let actual = match sha256_hex(tmp) {
+        Ok(digest) => digest,
+        Err(e) => {
+            let _ = std::fs::remove_file(tmp);
+            return Err(format!(
+                "could not checksum {asset}: {e}; the installed blyte is unchanged"
+            ));
+        }
+    };
+    if actual != expected {
+        let _ = std::fs::remove_file(tmp);
+        return Err(format!(
+            "checksum mismatch for {asset}: expected {expected}, got {actual}; the installed blyte is unchanged"
+        ));
     }
     Ok(())
 }
@@ -488,6 +566,7 @@ fn update(check: bool) -> Result<(), String> {
             })?;
             let tmp = exe.with_file_name(format!(".blyte-update-{}", std::process::id()));
             download_release(repo, &tag, asset, &tmp)?;
+            verify_checksum(repo, &tag, asset, &tmp)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -698,5 +777,31 @@ mod tests {
         std::fs::write(&crates2, r#"{"other":{}}"#).unwrap();
         let err = install_method(&exe, Some(dir.path())).unwrap_err();
         assert!(err.contains(&crates2.display().to_string()), "{err}");
+    }
+
+    #[test]
+    fn parse_checksum_lowercases_valid_digest_and_rejects_invalid() {
+        let upper = "ABCDEF0123456789".repeat(4);
+        assert_eq!(
+            parse_checksum(&format!("{upper}  blyte-x\n")),
+            Ok(upper.to_ascii_lowercase())
+        );
+
+        let err = parse_checksum("abc  x").unwrap_err();
+        assert!(err.contains("abc"), "{err}");
+
+        let err = parse_checksum("").unwrap_err();
+        assert!(err.contains("\"\""), "{err}");
+    }
+
+    #[test]
+    fn sha256_hex_matches_known_vector() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("abc.txt");
+        std::fs::write(&file, b"abc").unwrap();
+        assert_eq!(
+            sha256_hex(&file).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 }

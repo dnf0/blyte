@@ -42,6 +42,8 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
       - name: Name binary for release
         run: cp target/${{ matrix.target }}/release/blyte blyte-${{ matrix.target }}
+      - name: Compute binary SHA-256
+        run: shasum -a 256 blyte-${{ matrix.target }} > blyte-${{ matrix.target }}.sha256
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -51,4 +53,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
-          files: blyte-${{ matrix.target }}
+          files: |
+            blyte-${{ matrix.target }}
+            blyte-${{ matrix.target }}.sha256

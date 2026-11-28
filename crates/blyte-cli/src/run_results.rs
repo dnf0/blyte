@@ -273,6 +273,13 @@ fn last_gate_failure_lines(gate_failures: &[String]) -> Option<String> {
     Some(lines[start..].join("\n"))
 }
 
+fn format_flagged_queue_message(run_id: &str, flags: &[String]) -> String {
+    format!(
+        "Run {run_id} passed its check but review flagged it: {}.\nCombining waits for a verdict. Read blyte review {run_id}, then record blyte review {run_id} --verdict accepted, fixed or redone.",
+        flags.join("; ")
+    )
+}
+
 fn format_failure_queue_message(run_id: &str, summary: &ParsedSummary) -> String {
     let header = format!("Run {run_id} did not pass: {}.", summary.outcome);
     let footer = format!("Read blyte review {run_id} and tell the user, or dispatch it again.");
@@ -379,16 +386,6 @@ fn report_single_run(
     let summary = parse_summary_file(run_id, &summary_path, &raw)?;
     let notice = format_notice_text(run_id, &summary);
 
-    surface
-        .session
-        .record_decision(run_id, "finished", Some(&notice), None)
-        .map_err(|e| {
-            format!(
-                "run {run_id}: failed to record session entry for {}: {e}",
-                summary_path.display()
-            )
-        })?;
-
     let passed = if in_place {
         matches!(summary.outcome.as_str(), "verified" | "finished")
     } else {
@@ -401,9 +398,30 @@ fn report_single_run(
         ))
     } else if !passed {
         Some(format_failure_queue_message(run_id, &summary))
+    } else if summary.outcome == "verified" {
+        let checks_path = wt_dir.join(format!("{run_id}.checks.json"));
+        let (checks_recorded, flags) = crate::replay::read_checks(&checks_path)
+            .map_err(|e| format!("run {run_id}: {}: {e}", checks_path.display()))?;
+        if checks_recorded
+            && crate::replay::card_for_run(false, "verified", checks_recorded, &flags) != "clean"
+        {
+            Some(format_flagged_queue_message(run_id, &flags))
+        } else {
+            None
+        }
     } else {
         None
     };
+
+    surface
+        .session
+        .record_decision(run_id, "finished", Some(&notice), None)
+        .map_err(|e| {
+            format!(
+                "run {run_id}: failed to record session entry for {}: {e}",
+                summary_path.display()
+            )
+        })?;
 
     if let Some(msg) = queued_message {
         surface

@@ -103,6 +103,23 @@ start, and `--pass-env NAME` keeps one. Passing `--pass-env SSH_AUTH_SOCK` also 
 sandbox's deny on that socket, which lets a run push over ssh (on Linux Landlock cannot block unix
 sockets by path, so only environment scrubbing applies).
 
+## Output redaction
+
+Before a tool result or a gate step's output is shown to the model or written to the log, blyte
+replaces every exact occurrence of a known secret value with `[redacted NAME]` (longest value
+first). Values shorter than 8 bytes are skipped so ordinary text is not rewritten. The known
+values are read fresh for each result from three sources:
+
+- blyte's own harness environment variables (`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, …);
+- the credential-looking process environment variables withheld by the environment filter;
+- entries in the workspace's `.env` that match the same credential-looking test (if `.env` exists
+  and cannot be read, the tool result or gate step fails with an error naming the path).
+
+Redaction applies to every tool result and every gate step. It does not cover direct edits, setup
+steps or the second-model review. It also does not catch secrets blyte does not know (such as a
+token fetched by a command at runtime) or encoded forms of a known value (base64, hex, or split
+across lines).
+
 ## Network (`--network=off`)
 
 For code that must not leave the machine. blyte's own model calls are unaffected; only the

@@ -4,6 +4,7 @@
 //! contradicting the bundled `blyte-implementer` skill. `blyte skill install` and
 //! `blyte update` warn the user to remove it, without removing it automatically.
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
@@ -14,6 +15,7 @@ use std::time::Duration;
 
 use blyte_cli::skill::{superseded_skills, superseded_warning, SKILL_MD};
 use blyte_cli::update::{asset_name, repo};
+use sha2::{Digest, Sha256};
 
 fn blyte(cwd: &Path, home: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_blyte"))
@@ -188,6 +190,13 @@ fn update_warns_about_superseded_skill_after_refresh() {
     let asset = asset_name().expect("test platform has a release asset");
     let latest_path = format!("/repos/{repo_name}/releases/latest");
     let download_path = format!("/{repo_name}/releases/download/v9.9.9/{asset}");
+    let checksum_path = format!("/{repo_name}/releases/download/v9.9.9/{asset}.sha256");
+    let digest = Sha256::digest(&release_bytes);
+    let mut digest_hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(&mut digest_hex, "{byte:02x}");
+    }
+    let checksum_body = format!("{digest_hex}  {asset}\n");
     let handle = std::thread::spawn(move || {
         while let Ok((mut stream, _)) = listener.accept() {
             if stop_flag.load(Ordering::SeqCst) {
@@ -228,6 +237,13 @@ fn update_warns_about_superseded_skill_after_refresh() {
                 );
                 let _ = stream.write_all(header.as_bytes());
                 let _ = stream.write_all(&release_bytes);
+            } else if method == "GET" && path == checksum_path {
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    checksum_body.len(),
+                    checksum_body
+                );
+                let _ = stream.write_all(response.as_bytes());
             } else {
                 let _ = stream.write_all(
                     b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",

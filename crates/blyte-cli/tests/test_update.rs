@@ -3,6 +3,7 @@
 //! release metadata and asset, and the tests run a copy of blyte, so the real binary is never
 //! replaced.
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
@@ -14,8 +15,18 @@ use std::time::Duration;
 
 use blyte_cli::skill::SKILL_MD;
 use blyte_cli::update::{asset_name, parse_version, repo};
+use sha2::{Digest, Sha256};
 
 static EXEC_LOCK: RwLock<()> = RwLock::new(());
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    hex
+}
 
 struct MockServer {
     addr: SocketAddr,
@@ -26,6 +37,12 @@ struct MockServer {
 
 impl MockServer {
     fn start(tag: &str, asset_bytes: Vec<u8>) -> Self {
+        let asset = asset_name().expect("test platform has a release asset");
+        let checksum = format!("{}  {asset}\n", sha256_bytes(&asset_bytes));
+        Self::start_with_checksum(tag, asset_bytes, Some(checksum))
+    }
+
+    fn start_with_checksum(tag: &str, asset_bytes: Vec<u8>, checksum: Option<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
@@ -35,6 +52,7 @@ impl MockServer {
         let asset = asset_name().expect("test platform has a release asset");
         let latest_path = format!("/repos/{repo_name}/releases/latest");
         let download_path = format!("/{repo_name}/releases/download/{tag}/{asset}");
+        let checksum_path = format!("/{repo_name}/releases/download/{tag}/{asset}.sha256");
         let tag_owned = tag.to_string();
         let stop_flag = Arc::clone(&stop);
         let dl_count = Arc::clone(&download_requests);
@@ -80,6 +98,23 @@ impl MockServer {
                     );
                     let _ = stream.write_all(header.as_bytes());
                     let _ = stream.write_all(&asset_bytes);
+                } else if method == "GET" && path == checksum_path {
+                    if let Some(ref body) = checksum {
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                    } else {
+                        let body = b"not found";
+                        let header = format!(
+                            "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes());
+                        let _ = stream.write_all(body);
+                    }
                 } else {
                     let body = b"not found";
                     let header = format!(
@@ -145,9 +180,7 @@ fn spawn_output(cmd: &mut Command) -> Output {
     child.wait_with_output().unwrap()
 }
 
-/// A copy of blyte in a temp dir, a stand-in HTTP server serving `tag` and a release binary that
-/// prints `new_version` (or fails when `broken`), an empty CARGO_HOME, and an empty HOME.
-fn setup(tag: &str, broken: bool) -> Env {
+fn setup_with_checksum(tag: &str, broken: bool, checksum: Option<Option<String>>) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin/blyte");
     std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
@@ -164,7 +197,10 @@ fn setup(tag: &str, broken: bool) -> Env {
         let _guard = EXEC_LOCK.write().unwrap_or_else(|e| e.into_inner());
         std::fs::copy(env!("CARGO_BIN_EXE_blyte"), &bin).unwrap();
     }
-    let server = MockServer::start(tag, release_body.into_bytes());
+    let server = match checksum {
+        None => MockServer::start(tag, release_body.into_bytes()),
+        Some(c) => MockServer::start_with_checksum(tag, release_body.into_bytes(), c),
+    };
     let cargo_home = dir.path().join("cargo-home");
     std::fs::create_dir_all(&cargo_home).unwrap();
     let home = dir.path().join("home");
@@ -177,6 +213,12 @@ fn setup(tag: &str, broken: bool) -> Env {
         home,
         log,
     }
+}
+
+/// A copy of blyte in a temp dir, a stand-in HTTP server serving `tag` and a release binary that
+/// prints `new_version` (or fails when `broken`), an empty CARGO_HOME, and an empty HOME.
+fn setup(tag: &str, broken: bool) -> Env {
+    setup_with_checksum(tag, broken, None)
 }
 
 fn run(e: &Env, args: &[&str]) -> (i32, String) {
@@ -431,4 +473,84 @@ fn an_unreachable_release_api_is_an_error() {
         String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
     assert_ne!(out.status.code(), Some(0), "{text}");
     assert!(text.contains("could not read the latest release"), "{text}");
+}
+
+#[test]
+fn a_mismatched_checksum_refuses_the_download_without_running_it() {
+    let wrong_digest = "0".repeat(64);
+    let asset = asset_name().expect("test platform has a release asset");
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin/blyte");
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    let ran_marker = dir.path().join("ran");
+    let release_body = format!(
+        "#!/bin/sh\ntouch \"{}\"\necho 'blyte 9.9.9'\n",
+        ran_marker.display()
+    );
+    {
+        let _guard = EXEC_LOCK.write().unwrap_or_else(|e| e.into_inner());
+        std::fs::copy(env!("CARGO_BIN_EXE_blyte"), &bin).unwrap();
+    }
+    let actual_digest = sha256_bytes(release_body.as_bytes());
+    let server = MockServer::start_with_checksum(
+        "v9.9.9",
+        release_body.into_bytes(),
+        Some(format!("{wrong_digest}  {asset}\n")),
+    );
+    let cargo_home = dir.path().join("cargo-home");
+    std::fs::create_dir_all(&cargo_home).unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let env = Env {
+        _dir: dir,
+        bin,
+        server,
+        cargo_home,
+        home,
+        log: PathBuf::new(),
+    };
+
+    let before = std::fs::read(&env.bin).unwrap();
+    let (code, text) = run(&env, &[]);
+    assert_ne!(code, 0, "{text}");
+    assert!(text.contains("unchanged"), "{text}");
+    assert!(text.contains(asset), "{text}");
+    assert!(text.contains(&wrong_digest), "{text}");
+    assert!(text.contains(&actual_digest), "{text}");
+    assert_eq!(std::fs::read(&env.bin).unwrap(), before);
+    assert!(!env.bin.with_file_name("blyte.prev").exists());
+    assert!(!ran_marker.exists());
+    let leftovers: Vec<_> = std::fs::read_dir(env.bin.parent().unwrap())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(".blyte-update-")
+        })
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+fn a_missing_checksum_file_refuses_the_download() {
+    let asset = asset_name().expect("test platform has a release asset");
+    let env = setup_with_checksum("v9.9.9", false, Some(None));
+    let before = std::fs::read(&env.bin).unwrap();
+    let (code, text) = run(&env, &[]);
+    assert_ne!(code, 0, "{text}");
+    assert!(text.contains("unchanged"), "{text}");
+    assert!(text.contains(&format!("{asset}.sha256")), "{text}");
+    assert_eq!(std::fs::read(&env.bin).unwrap(), before);
+    assert!(!env.bin.with_file_name("blyte.prev").exists());
+    let leftovers: Vec<_> = std::fs::read_dir(env.bin.parent().unwrap())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(".blyte-update-")
+        })
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
 }

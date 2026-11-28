@@ -380,6 +380,8 @@ pub fn run(args: &DispatchArgs) -> i32 {
         args.task_file.as_deref(),
         args.plan.as_deref(),
         args.plan_task.as_deref(),
+        &root,
+        None,
     ) {
         Ok(Some(pair)) => pair,
         Ok(None) => {
