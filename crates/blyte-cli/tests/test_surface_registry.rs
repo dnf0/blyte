@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use blyte_cli::surface_registry::{
     entry_path, find_by_name, first_line, live_entries, read_entries, remove_entry, write_entry,
-    RegistryEntry,
+    RegistryEntry, SurfaceState,
 };
 
 struct MockHealthServer {
@@ -83,6 +83,7 @@ fn sample_entry(id: &str, name: &str, port: u16, started_at: u64) -> RegistryEnt
         port,
         started_at,
         doing: "idle".to_string(),
+        state: SurfaceState::Idle,
     }
 }
 
@@ -245,4 +246,68 @@ fn first_line_trims_skips_blanks_and_truncates_by_chars() {
     assert_eq!(cut.chars().count(), 120);
     assert_eq!(cut, "é".repeat(120));
     assert_eq!(first_line("  \n"), "");
+}
+
+#[test]
+fn read_and_live_entries_reject_missing_or_unknown_state_like_malformed_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let missing_path = entry_path(dir, "s00000000000000aa");
+    std::fs::write(
+        &missing_path,
+        r#"{"id":"s00000000000000aa","name":"alpha","root":"/tmp/a","branch":"main","pid":1,"port":18080,"started_at":100,"doing":"idle"}"#,
+    )
+    .unwrap();
+    let err = read_entries(dir).unwrap_err();
+    assert!(err.contains(&missing_path.display().to_string()), "{err}");
+    let live_err = live_entries(dir).unwrap_err();
+    assert!(
+        live_err.contains(&missing_path.display().to_string()),
+        "{live_err}"
+    );
+    std::fs::remove_file(&missing_path).unwrap();
+
+    let bad_state_path = entry_path(dir, "s00000000000000bb");
+    std::fs::write(
+        &bad_state_path,
+        r#"{"id":"s00000000000000bb","name":"beta","root":"/tmp/b","branch":"main","pid":1,"port":18081,"started_at":100,"doing":"idle","state":"x"}"#,
+    )
+    .unwrap();
+    let err = read_entries(dir).unwrap_err();
+    assert!(err.contains(&bad_state_path.display().to_string()), "{err}");
+    let live_err = live_entries(dir).unwrap_err();
+    assert!(
+        live_err.contains(&bad_state_path.display().to_string()),
+        "{live_err}"
+    );
+}
+
+#[test]
+fn surface_state_serializes_as_lowercase_words() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    for (idx, (state, word)) in [
+        (SurfaceState::Idle, "idle"),
+        (SurfaceState::Working, "working"),
+        (SurfaceState::Approval, "approval"),
+        (SurfaceState::Replied, "replied"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("s00000000000000a{idx}");
+        let mut entry = sample_entry(
+            &id,
+            &format!("s{idx}"),
+            18080 + idx as u16,
+            100 + idx as u64,
+        );
+        entry.state = state;
+        write_entry(dir, &entry).unwrap();
+        let raw = std::fs::read_to_string(entry_path(dir, &id)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["state"], word);
+    }
+    let entries = read_entries(dir).unwrap();
+    assert_eq!(entries.len(), 4);
 }

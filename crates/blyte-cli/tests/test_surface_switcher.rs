@@ -12,7 +12,7 @@ use blyte_agent::sandbox::surface_token_path_for_id;
 use blyte_cli::http::Request;
 use blyte_cli::serve::{generate_token, route, Surface, TOKEN_HEADER};
 use blyte_cli::session::{EntryBody, PromptRunner, Session};
-use blyte_cli::surface_registry::{registry_dir, write_entry, RegistryEntry};
+use blyte_cli::surface_registry::{registry_dir, write_entry, RegistryEntry, SurfaceState};
 use blyte_cli::surfaces_cmd::{surface_url, surfaces_payload};
 
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
@@ -139,6 +139,7 @@ fn make_entry(
         port,
         started_at,
         doing: doing.to_string(),
+        state: SurfaceState::Idle,
     }
 }
 
@@ -161,6 +162,7 @@ fn make_surface(id: &str, name: &str, root: PathBuf) -> Surface {
         days: 14,
         token: generate_token().unwrap(),
         message_credential: generate_token().unwrap(),
+        open_codes: blyte_cli::serve::OpenCodes::new(),
         requests: Arc::new(blyte_cli::requests::RequestsState::new()),
         publisher: Arc::new(blyte_cli::requests::RealPublisher),
         reconcile_lock: Mutex::new(()),
@@ -194,7 +196,7 @@ fn surfaces_payload_lists_two_live_entries_sorted_by_name_with_urls_and_current(
     let srv_z = MockHealthServer::start("s00000000000000bb");
     let srv_a = MockHealthServer::start("s00000000000000aa");
 
-    let entry_z = make_entry(
+    let mut entry_z = make_entry(
         "s00000000000000bb",
         "zeta",
         &root_z,
@@ -203,6 +205,7 @@ fn surfaces_payload_lists_two_live_entries_sorted_by_name_with_urls_and_current(
         100,
         "fix billing retries",
     );
+    entry_z.state = SurfaceState::Working;
     let entry_a = make_entry(
         "s00000000000000aa",
         "alpha",
@@ -222,7 +225,7 @@ fn surfaces_payload_lists_two_live_entries_sorted_by_name_with_urls_and_current(
         format!("http://127.0.0.1:{}/#token=tok-alpha-111", srv_a.port)
     );
 
-    let payload = surfaces_payload(reg.path(), &entry_z.id, &[]).unwrap();
+    let payload = surfaces_payload(reg.path(), state.path(), &entry_z.id, &[]).unwrap();
     let list = payload["surfaces"].as_array().unwrap();
     assert_eq!(list.len(), 2);
 
@@ -231,6 +234,7 @@ fn surfaces_payload_lists_two_live_entries_sorted_by_name_with_urls_and_current(
     assert_eq!(list[0]["root"], root_a.to_string_lossy().as_ref());
     assert_eq!(list[0]["branch"], "main");
     assert_eq!(list[0]["doing"], "idle");
+    assert_eq!(list[0]["state"], "idle");
     assert_eq!(list[0]["current"], false);
     assert_eq!(
         list[0]["url"],
@@ -243,6 +247,7 @@ fn surfaces_payload_lists_two_live_entries_sorted_by_name_with_urls_and_current(
     assert_eq!(list[1]["root"], root_z.to_string_lossy().as_ref());
     assert!(list[1]["branch"].is_null());
     assert_eq!(list[1]["doing"], "fix billing retries");
+    assert_eq!(list[1]["state"], "working");
     assert_eq!(list[1]["current"], true);
     assert_eq!(
         list[1]["url"],
@@ -284,7 +289,7 @@ fn surfaces_payload_breaks_name_ties_by_started_at() {
     write_token(&older.id, "tok-old");
     write_token(&newer.id, "tok-new");
 
-    let payload = surfaces_payload(reg.path(), &older.id, &[]).unwrap();
+    let payload = surfaces_payload(reg.path(), state.path(), &older.id, &[]).unwrap();
     let list = payload["surfaces"].as_array().unwrap();
     assert_eq!(list.len(), 2);
     assert_eq!(list[0]["id"], "s0000000000000011");
@@ -323,7 +328,7 @@ fn surfaces_payload_lists_missing_token_entry_with_null_url_and_error() {
     write_entry(reg.path(), &missing_token_entry).unwrap();
     write_token(&ok_entry.id, "tok-ok");
 
-    let payload = surfaces_payload(reg.path(), &ok_entry.id, &[]).unwrap();
+    let payload = surfaces_payload(reg.path(), state.path(), &ok_entry.id, &[]).unwrap();
     let list = payload["surfaces"].as_array().unwrap();
     assert_eq!(list.len(), 2);
 
@@ -374,7 +379,7 @@ fn surfaces_payload_omits_dead_process_entries() {
     write_token(&live_entry.id, "tok-live");
     write_token(&dead_entry.id, "tok-dead");
 
-    let payload = surfaces_payload(reg.path(), &live_entry.id, &[]).unwrap();
+    let payload = surfaces_payload(reg.path(), state.path(), &live_entry.id, &[]).unwrap();
     let list = payload["surfaces"].as_array().unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0]["id"], "s00000000000000aa");
@@ -401,7 +406,7 @@ fn surfaces_payload_errors_when_current_id_is_absent() {
     write_token(&entry.id, "tok-alpha");
 
     let missing_id = "s00000000000000ff";
-    let err = surfaces_payload(reg.path(), missing_id, &[]).unwrap_err();
+    let err = surfaces_payload(reg.path(), state.path(), missing_id, &[]).unwrap_err();
     assert!(err.contains(missing_id), "{err}");
 }
 
@@ -500,4 +505,139 @@ fn api_surfaces_route_checks_token_returns_payload_and_errors_on_missing_current
         list[1]["url"],
         format!("http://127.0.0.1:{}/#token=tok-beta-secret", srv_b.port)
     );
+}
+
+#[test]
+fn surfaces_payload_carries_all_four_states() {
+    let state = tempfile::tempdir().unwrap();
+    let _guard = EnvGuard::set_state_root(state.path());
+    let reg = tempfile::tempdir().unwrap();
+    let roots = tempfile::tempdir().unwrap();
+
+    let s1 = MockHealthServer::start("s00000000000000a1");
+    let s2 = MockHealthServer::start("s00000000000000a2");
+    let s3 = MockHealthServer::start("s00000000000000a3");
+    let s4 = MockHealthServer::start("s00000000000000a4");
+
+    let mut e1 = make_entry(
+        "s00000000000000a1",
+        "a-idle",
+        &roots.path().join("r1"),
+        Some("main"),
+        s1.port,
+        100,
+        "idle",
+    );
+    e1.state = SurfaceState::Idle;
+    let mut e2 = make_entry(
+        "s00000000000000a2",
+        "b-working",
+        &roots.path().join("r2"),
+        Some("main"),
+        s2.port,
+        200,
+        "work",
+    );
+    e2.state = SurfaceState::Working;
+    let mut e3 = make_entry(
+        "s00000000000000a3",
+        "c-approval",
+        &roots.path().join("r3"),
+        Some("main"),
+        s3.port,
+        300,
+        "deploy",
+    );
+    e3.state = SurfaceState::Approval;
+    let mut e4 = make_entry(
+        "s00000000000000a4",
+        "d-replied",
+        &roots.path().join("r4"),
+        Some("main"),
+        s4.port,
+        400,
+        "idle",
+    );
+    e4.state = SurfaceState::Replied;
+
+    for e in [&e1, &e2, &e3, &e4] {
+        write_entry(reg.path(), e).unwrap();
+        write_token(&e.id, &format!("tok-{}", e.name));
+    }
+
+    let payload = surfaces_payload(reg.path(), state.path(), &e1.id, &[]).unwrap();
+    let list = payload["surfaces"].as_array().unwrap();
+    assert_eq!(list.len(), 4);
+    assert_eq!(list[0]["state"], "idle");
+    assert_eq!(list[1]["state"], "working");
+    assert_eq!(list[2]["state"], "approval");
+    assert_eq!(list[3]["state"], "replied");
+}
+
+#[test]
+fn surfaces_payload_folders_lists_known_repos_and_running_roots_deduped_sorted_and_omits_missing() {
+    let state = tempfile::tempdir().unwrap();
+    let _guard = EnvGuard::set_state_root(state.path());
+    let state_dir = state.path().join("blyte");
+    let reg = tempfile::tempdir().unwrap();
+    let roots_tmp = tempfile::tempdir().unwrap();
+    let roots_dir = roots_tmp.path().canonicalize().unwrap();
+
+    let known_only = roots_dir.join("known-beta");
+    let shared_repo = roots_dir.join("shared-alpha");
+    let running_only = roots_dir.join("running-gamma");
+    let vanished_repo = roots_dir.join("vanished-delta");
+    std::fs::create_dir_all(&known_only).unwrap();
+    std::fs::create_dir_all(&shared_repo).unwrap();
+    std::fs::create_dir_all(&running_only).unwrap();
+    std::fs::create_dir_all(&vanished_repo).unwrap();
+
+    blyte_cli::registry::register(&known_only);
+    blyte_cli::registry::register(&shared_repo);
+    blyte_cli::registry::register(&vanished_repo);
+    std::fs::remove_dir_all(&vanished_repo).unwrap();
+
+    let srv_shared = MockHealthServer::start("s00000000000000f1");
+    let srv_running = MockHealthServer::start("s00000000000000f2");
+
+    let e1 = make_entry(
+        "s00000000000000f1",
+        "shared",
+        &shared_repo,
+        Some("main"),
+        srv_shared.port,
+        100,
+        "idle",
+    );
+    let e2 = make_entry(
+        "s00000000000000f2",
+        "running",
+        &running_only,
+        None,
+        srv_running.port,
+        200,
+        "idle",
+    );
+    write_entry(reg.path(), &e1).unwrap();
+    write_entry(reg.path(), &e2).unwrap();
+    write_token(&e1.id, "tok-f1");
+    write_token(&e2.id, "tok-f2");
+
+    let payload = surfaces_payload(reg.path(), &state_dir, &e1.id, &[]).unwrap();
+    let folders: Vec<&str> = payload["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+
+    let mut expected = [
+        known_only.to_string_lossy().into_owned(),
+        running_only.to_string_lossy().into_owned(),
+        shared_repo.to_string_lossy().into_owned(),
+    ];
+    expected.sort();
+    let expected_refs: Vec<&str> = expected.iter().map(String::as_str).collect();
+    assert_eq!(folders, expected_refs);
+    assert!(!folders.iter().any(|f| f.contains("vanished-delta")));
 }

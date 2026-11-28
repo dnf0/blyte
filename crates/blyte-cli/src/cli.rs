@@ -67,7 +67,12 @@ pub enum Command {
         stopped: bool,
     },
     /// Open a running surface's page by name
-    Open { name: String },
+    Open {
+        name: String,
+        /// Open the surface in an app window (`app`, default) or the default browser (`browser`)
+        #[arg(long = "open-in", value_name = "app|browser")]
+        open_in: Option<String>,
+    },
     /// Send a message to a running surface
     Tell {
         name: String,
@@ -145,6 +150,7 @@ pub struct DashboardArgs {
 pub struct SurfaceArgs {
     pub port: u16,
     pub no_open: bool,
+    pub open_in: crate::open_window::OpenIn,
     pub days: u64,
     pub name: Option<String>,
     pub resume: Option<String>,
@@ -155,6 +161,7 @@ impl Default for SurfaceArgs {
         Self {
             port: 0,
             no_open: false,
+            open_in: crate::open_window::OpenIn::App,
             days: 14,
             name: None,
             resume: None,
@@ -669,6 +676,13 @@ pub struct Cli {
 
     #[arg(long = "no-open", help = "Do not open the live surface in the browser")]
     pub no_open: bool,
+
+    #[arg(
+        long = "open-in",
+        value_name = "app|browser",
+        help = "Open the live surface in an app window (`app`, default) or the default browser (`browser`)"
+    )]
+    pub open_in: Option<String>,
 
     #[arg(
         long,

@@ -1269,9 +1269,12 @@ const assert = require("node:assert");
 
   const runsTimers = intervalCalls.filter(c => c.fn === fetchRuns);
   const requestsTimers = intervalCalls.filter(c => c.fn === fetchRequests);
+  const surfacesTimers = intervalCalls.filter(c => c.fn === refreshSurfacesInBackground);
   assert.strictEqual(runsTimers.length, 1);
   assert.strictEqual(requestsTimers.length, 1);
-  assert.strictEqual(intervalCalls.length, 2);
+  assert.strictEqual(surfacesTimers.length, 1);
+  assert.strictEqual(surfacesTimers[0].ms, 15000);
+  assert.strictEqual(intervalCalls.length, 3);
   assert.strictEqual(eventFetches, 1);
 
   eventResolvers.shift()({
@@ -2270,7 +2273,7 @@ applySessionState({
   queued: 0,
   last_seq: 0,
 }, true);
-assert.strictEqual(elements["repo-name"].textContent, "notes");
+assert.strictEqual(elements["surface-switcher"].textContent, "notes");
 assert.strictEqual(
   elements["no-repo-badge"].innerHTML,
   "not a git repository: runs edit this folder in place; combining and publishing are off"
@@ -3351,8 +3354,9 @@ renderSurfaceList(multiContainer, [
   },
 ], []);
 
-assert.strictEqual(multiContainer.children.length, 3);
-const [row1, row2, row3] = multiContainer.children;
+const runningRows = multiContainer.children.filter(c => c.className.includes("surface-switcher-row"));
+assert.strictEqual(runningRows.length, 3);
+const [row1, row2, row3] = runningRows;
 assert.ok(row1.className.includes("surface-switcher-current"));
 assert.strictEqual(row1.getAttribute("aria-current"), "true");
 assert.strictEqual(row1.getAttribute("data-surface-url"), null);
@@ -3386,7 +3390,7 @@ renderSurfaceList(singleContainer, [
 ], []);
 const singleNodes = collectNodes(singleContainer);
 assert.ok(
-  singleNodes.some(n => n.textContent === "No other surfaces are running. Start one by running blyte in another folder.")
+  singleNodes.some(n => n.textContent === "No other surfaces are running.")
 );
 assert.ok(singleContainer.children[0].className.includes("surface-switcher-current"));
 "#;
@@ -3808,6 +3812,7 @@ const runningSurface = {
   root: "/tmp/repo",
   branch: "main",
   doing: "idle",
+  state: "idle",
   current: true,
   url: "http://127.0.0.1:4100/#token=t1",
   error: null,
@@ -3830,6 +3835,7 @@ assert.strictEqual(
         last_message: null,
       },
     ],
+    folders: ["/tmp/a"],
   }),
   null
 );
@@ -3838,6 +3844,7 @@ assert.strictEqual(
   validateSurfaces({
     surfaces: [runningSurface],
     stopped: [],
+    folders: [],
   }),
   null
 );
@@ -3851,12 +3858,14 @@ const missingNameErr = validateSurfaces({
       last_message: "fix login bug",
     },
   ],
+  folders: [],
 });
 assert.strictEqual(typeof missingNameErr, "string");
 assert.ok(missingNameErr.includes("name"), missingNameErr);
 
 const missingStoppedErr = validateSurfaces({
   surfaces: [runningSurface],
+  folders: [],
 });
 assert.strictEqual(typeof missingStoppedErr, "string");
 assert.ok(missingStoppedErr.includes("stopped"), missingStoppedErr);
@@ -3871,6 +3880,7 @@ const badLastUsedErr = validateSurfaces({
       last_message: null,
     },
   ],
+  folders: [],
 });
 assert.strictEqual(typeof badLastUsedErr, "string");
 assert.ok(badLastUsedErr.includes("last_used"), badLastUsedErr);
@@ -3885,6 +3895,7 @@ const badLastMessageErr = validateSurfaces({
       last_message: 42,
     },
   ],
+  folders: [],
 });
 assert.strictEqual(typeof badLastMessageErr, "string");
 assert.ok(badLastMessageErr.includes("last_message"), badLastMessageErr);
@@ -3990,5 +4001,853 @@ assert.ok(
   "heading must not render when there are no stopped surfaces"
 );
 "#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn surface_waiting_title_badges_sort_dot_seen_and_validation() {
+    let html = load_surface_html();
+    assert!(
+        html.contains(r#"id="surface-switcher-dot""#)
+            && html.contains(r#"aria-label="another surface is waiting on you""#),
+        "expected #surface-switcher-dot with waiting aria-label"
+    );
+
+    let harness = format!(
+        "{}\n{}",
+        review_queue_test_prelude(),
+        r#"
+(async () => {
+  assert.strictEqual(formatSurfaceTitle("demo", false, false), "demo - blyte");
+  assert.strictEqual(formatSurfaceTitle("demo", true, false), "demo: working - blyte");
+  assert.strictEqual(formatSurfaceTitle("demo", true, true), "demo: waiting on you - blyte");
+  assert.strictEqual(formatSurfaceTitle("demo", false, true), "demo: waiting on you - blyte");
+
+  for (const st of ["idle", "working", "approval", "replied"]) {
+    assert.strictEqual(
+      validateSurfaces({
+        surfaces: [{
+          id: "s1",
+          name: "alpha",
+          root: "/tmp/a",
+          branch: "main",
+          doing: "idle",
+          state: st,
+          current: true,
+          url: "http://127.0.0.1:4100/#token=t1",
+          error: null,
+        }],
+        stopped: [],
+        folders: [],
+      }),
+      null
+    );
+  }
+
+  const missingStateErr = validateSurfaces({
+    surfaces: [{
+      id: "s1",
+      name: "alpha",
+      root: "/tmp/a",
+      branch: "main",
+      doing: "idle",
+      current: true,
+      url: "http://127.0.0.1:4100/#token=t1",
+      error: null,
+    }],
+    stopped: [],
+    folders: [],
+  });
+  assert.strictEqual(typeof missingStateErr, "string");
+  assert.ok(missingStateErr.includes("state"), missingStateErr);
+
+  const badStateErr = validateSurfaces({
+    surfaces: [{
+      id: "s1",
+      name: "alpha",
+      root: "/tmp/a",
+      branch: "main",
+      doing: "idle",
+      state: "x",
+      current: true,
+      url: "http://127.0.0.1:4100/#token=t1",
+      error: null,
+    }],
+    stopped: [],
+    folders: [],
+  });
+  assert.strictEqual(typeof badStateErr, "string");
+  assert.ok(badStateErr.includes("state"), badStateErr);
+
+  function makeDomEl(tag) {
+    const attrs = new Map();
+    const listeners = new Map();
+    return {
+      tagName: tag.toUpperCase(),
+      className: "",
+      type: "",
+      disabled: false,
+      dataset: {},
+      children: [],
+      _text: "",
+      get textContent() { return this._text; },
+      set textContent(v) {
+        this._text = String(v);
+        if (this._text === "") this.children = [];
+      },
+      setAttribute(k, v) { attrs.set(k, String(v)); },
+      getAttribute(k) { return attrs.has(k) ? attrs.get(k) : null; },
+      appendChild(child) { this.children.push(child); return child; },
+      addEventListener(ev, fn) {
+        if (!listeners.has(ev)) listeners.set(ev, []);
+        listeners.get(ev).push(fn);
+      },
+      listeners,
+    };
+  }
+
+  function collectNodes(root, out = []) {
+    for (const child of root.children) {
+      out.push(child);
+      collectNodes(child, out);
+    }
+    return out;
+  }
+
+  document.createElement = (tag) => {
+    if (tag === "template") {
+      return {
+        content: { firstElementChild: null },
+        set innerHTML(h) {
+          this.content.firstElementChild = {
+            html: h,
+            querySelector() { return null; },
+            querySelectorAll() { return []; },
+          };
+        },
+      };
+    }
+    return makeDomEl(tag);
+  };
+
+  const listEl = makeDomEl("div");
+  renderSurfaceList(listEl, [
+    {
+      id: "s-idle",
+      name: "alpha",
+      root: "/tmp/a",
+      branch: "main",
+      doing: "idle",
+      state: "idle",
+      current: false,
+      url: "http://127.0.0.1:4101/#token=t1",
+      error: null,
+    },
+    {
+      id: "s-replied",
+      name: "beta",
+      root: "/tmp/b",
+      branch: "main",
+      doing: "idle",
+      state: "replied",
+      current: false,
+      url: "http://127.0.0.1:4102/#token=t2",
+      error: null,
+    },
+    {
+      id: "s-working",
+      name: "gamma",
+      root: "/tmp/c",
+      branch: "main",
+      doing: "running tests",
+      state: "working",
+      current: true,
+      url: "http://127.0.0.1:4103/#token=t3",
+      error: null,
+    },
+    {
+      id: "s-approval",
+      name: "delta",
+      root: "/tmp/d",
+      branch: "main",
+      doing: "deploy",
+      state: "approval",
+      current: false,
+      url: "http://127.0.0.1:4104/#token=t4",
+      error: null,
+    },
+  ], []);
+
+  const orderedIds = listEl.children
+    .map(r => r.getAttribute("data-surface-id"))
+    .filter(Boolean);
+  assert.deepStrictEqual(orderedIds, ["s-replied", "s-approval", "s-idle", "s-working"]);
+
+  const repliedTexts = collectNodes(listEl.children[0]).map(n => n.textContent);
+  assert.ok(repliedTexts.includes("waiting on you"), repliedTexts.join("|"));
+  assert.ok(repliedTexts.includes("replied"), repliedTexts.join("|"));
+
+  const approvalTexts = collectNodes(listEl.children[1]).map(n => n.textContent);
+  assert.ok(approvalTexts.includes("waiting on you"), approvalTexts.join("|"));
+  assert.ok(approvalTexts.includes("needs your approval"), approvalTexts.join("|"));
+
+  const idleTexts = collectNodes(listEl.children[2]).filter(
+    n => n.className && n.className.includes("surface-switcher-state")
+  );
+  assert.strictEqual(idleTexts.length, 0);
+
+  const workingTexts = collectNodes(listEl.children[3]).filter(
+    n => n.className && n.className.includes("surface-switcher-state")
+  ).map(n => n.textContent);
+  assert.deepStrictEqual(workingTexts, ["working"]);
+
+  updateSwitcherWaitingDot([
+    { id: "s1", current: true, state: "approval" },
+    { id: "s2", current: false, state: "idle" },
+    { id: "s3", current: false, state: "working" },
+  ]);
+  assert.strictEqual(elements["surface-switcher-dot"].hidden, true);
+  assert.strictEqual(
+    elements["surface-switcher-dot"].getAttribute("aria-label"),
+    "another surface is waiting on you"
+  );
+
+  updateSwitcherWaitingDot([
+    { id: "s1", current: true, state: "idle" },
+    { id: "s2", current: false, state: "replied" },
+  ]);
+  assert.strictEqual(elements["surface-switcher-dot"].hidden, false);
+
+  updateSwitcherWaitingDot([
+    { id: "s1", current: true, state: "idle" },
+    { id: "s2", current: false, state: "approval" },
+  ]);
+  assert.strictEqual(elements["surface-switcher-dot"].hidden, false);
+
+  updateSwitcherWaitingDot([
+    { id: "s1", current: true, state: "replied" },
+    { id: "s2", current: false, state: "working" },
+  ]);
+  assert.strictEqual(elements["surface-switcher-dot"].hidden, true);
+
+  surfaceToken = "tok-seen-test";
+  const seenCalls = [];
+  let sessionPayload = {
+    session_id: "sess-1",
+    surface_name: "demo",
+    repo: "demo",
+    repository: true,
+    started_at: 1700000000,
+    model: "gemini-4-neon",
+    effort: null,
+    effort_supported: false,
+    busy: false,
+    queued: 0,
+    last_seq: 0,
+    state: "replied",
+  };
+  global.fetch = async (url, opts) => {
+    if (url === "/api/session/seen") {
+      seenCalls.push({ url, method: opts && opts.method, headers: opts && opts.headers });
+      return { ok: true, status: 204 };
+    }
+    if (url === "/api/session") {
+      return { ok: true, status: 200, async json() { return sessionPayload; } };
+    }
+    if (url === "/api/surfaces") {
+      return { ok: true, status: 200, async json() { return { surfaces: [], stopped: [], folders: [] }; } };
+    }
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+
+  document.visibilityState = "hidden";
+  await loadInitialSession();
+  assert.strictEqual(seenCalls.length, 0);
+  assert.strictEqual(document.title, "demo: waiting on you - blyte");
+
+  document.visibilityState = "visible";
+  handleVisibilityChange();
+  assert.strictEqual(seenCalls.length, 1);
+  assert.strictEqual(seenCalls[0].method, "POST");
+  assert.strictEqual(seenCalls[0].headers["X-Blyte-Token"], "tok-seen-test");
+  assert.strictEqual(document.title, "demo - blyte");
+
+  await loadInitialSession();
+  assert.strictEqual(seenCalls.length, 2);
+
+  sessionPayload = Object.assign({}, sessionPayload, { busy: true, state: "working" });
+  await loadInitialSession();
+  assert.strictEqual(seenCalls.length, 2);
+  assert.strictEqual(document.title, "demo: working - blyte");
+
+  handleVisibilityChange();
+  assert.strictEqual(seenCalls.length, 2);
+
+  const thread = document.getElementById("conversation-thread");
+  thread.insertAdjacentHTML = () => {};
+  thread.appendChild = () => {};
+  const activity = document.getElementById("activity-list");
+  activity.appendChild = () => {};
+  const ts = 1700000100;
+  applyLogEntries([
+    { seq: 1, ts, kind: "approval_requested", id: "approval-1", command: "deploy", reason: "prod" },
+  ]);
+  assert.strictEqual(document.title, "demo: waiting on you - blyte");
+
+  applyLogEntries([
+    { seq: 2, ts, kind: "approval_answered", id: "approval-1", command: "deploy", answer: "yes" },
+  ]);
+  assert.strictEqual(document.title, "demo: working - blyte");
+
+  document.visibilityState = "hidden";
+  applyLogEntries([
+    { seq: 3, ts, kind: "idle", turns: 1, cost_usd: 0.0, seconds: 0.5 },
+  ]);
+  assert.strictEqual(seenCalls.length, 2);
+  assert.strictEqual(document.title, "demo: waiting on you - blyte");
+
+  document.visibilityState = "visible";
+  handleVisibilityChange();
+  assert.strictEqual(seenCalls.length, 3);
+  assert.strictEqual(document.title, "demo - blyte");
+
+  applyLogEntries([
+    { seq: 4, ts, kind: "user_message", text: "second", reports: [], queued: false, attachments: [], pastes: [] },
+  ]);
+  assert.strictEqual(document.title, "demo: working - blyte");
+
+  applyLogEntries([
+    { seq: 5, ts, kind: "idle", turns: 1, cost_usd: 0.0, seconds: 0.5 },
+  ]);
+  assert.strictEqual(seenCalls.length, 4);
+  assert.strictEqual(document.title, "demo - blyte");
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"#
+    );
+    run_surface_script(&harness);
+}
+
+#[test]
+fn surface_switcher_start_folder_and_two_click_stop() {
+    let harness = r#"
+const assert = require("assert");
+(async () => {
+  const runningSurface = {
+    id: "s1",
+    name: "alpha-demo",
+    root: "/tmp/alpha",
+    branch: "main",
+    doing: "idle",
+    state: "idle",
+    current: true,
+    url: "http://127.0.0.1:4100/#open=c1",
+    error: null,
+  };
+
+  const missingFoldersErr = validateSurfaces({
+    surfaces: [runningSurface],
+    stopped: [],
+  });
+  assert.strictEqual(typeof missingFoldersErr, "string");
+  assert.ok(missingFoldersErr.includes("folders"), missingFoldersErr);
+
+  const badFoldersErr = validateSurfaces({
+    surfaces: [runningSurface],
+    stopped: [],
+    folders: ["/tmp/ok", 42],
+  });
+  assert.strictEqual(typeof badFoldersErr, "string");
+  assert.ok(badFoldersErr.includes("folders"), badFoldersErr);
+
+  assert.strictEqual(
+    validateSurfaces({
+      surfaces: [runningSurface],
+      stopped: [],
+      folders: ["/tmp/alpha", "/tmp/beta"],
+    }),
+    null
+  );
+
+  function makeDomEl(tag) {
+    const attrs = new Map();
+    const listeners = new Map();
+    let htmlSet = false;
+    return {
+      tagName: tag.toUpperCase(),
+      id: "",
+      className: "",
+      type: "",
+      value: "",
+      hidden: false,
+      disabled: false,
+      dataset: {},
+      children: [],
+      _text: "",
+      get textContent() { return this._text; },
+      set textContent(v) {
+        this._text = String(v);
+        if (this._text === "") this.children = [];
+      },
+      get innerHTML() { return ""; },
+      set innerHTML(_) { htmlSet = true; },
+      get _htmlSet() { return htmlSet; },
+      setAttribute(k, v) { attrs.set(k, String(v)); },
+      getAttribute(k) { return attrs.has(k) ? attrs.get(k) : null; },
+      appendChild(child) { this.children.push(child); return child; },
+      addEventListener(ev, fn) {
+        if (!listeners.has(ev)) listeners.set(ev, []);
+        listeners.get(ev).push(fn);
+      },
+      listeners,
+    };
+  }
+
+  function collectNodes(root, out = []) {
+    for (const child of root.children) {
+      out.push(child);
+      collectNodes(child, out);
+    }
+    return out;
+  }
+
+  const pageElements = {
+    "surface-switcher": makeDomEl("button"),
+    "surface-switcher-list": makeDomEl("div"),
+    "lost-server": makeDomEl("div"),
+    "surface-stopped": makeDomEl("div"),
+  };
+  pageElements["surface-stopped"].hidden = true;
+  pageElements["lost-server"].hidden = true;
+
+  global.document = {
+    createElement(tag) { return makeDomEl(tag); },
+    getElementById(id) { return pageElements[id] || null; },
+  };
+  let confirmCalls = 0;
+  global.window = {
+    location: {
+      origin: "http://127.0.0.1:4100",
+      href: "http://127.0.0.1:4100/",
+      reload() {},
+    },
+    confirm() { confirmCalls += 1; return true; },
+    alert() { confirmCalls += 1; },
+  };
+
+  surfaceToken = "tok-page-test";
+  surfaceSwitcherOpen = true;
+  const container = pageElements["surface-switcher-list"];
+  renderSurfaceList(container, [runningSurface], [], ["/tmp/alpha", "/tmp/beta"]);
+  const nodes = collectNodes(container);
+
+  const datalist = nodes.find(n => n.tagName === "DATALIST");
+  assert.ok(datalist, "expected <datalist>");
+  assert.deepStrictEqual(
+    datalist.children.map(o => o.value),
+    ["/tmp/alpha", "/tmp/beta"]
+  );
+
+  const folderInput = nodes.find(n => n.id === "surface-start-folder");
+  const startBtn = nodes.find(n => n.className.includes("surface-switcher-start-btn"));
+  const startErr = nodes.find(n => n.className.includes("surface-switcher-start-error"));
+  assert.ok(folderInput && startBtn && startErr);
+  assert.strictEqual(folderInput.getAttribute("list"), datalist.id);
+
+  let resolveStart;
+  const startFetchCalls = [];
+  global.fetch = (url, opts) => {
+    startFetchCalls.push({ url, opts });
+    return new Promise(resolve => { resolveStart = resolve; });
+  };
+
+  folderInput.value = "/tmp/beta";
+  const clickStart = startBtn.listeners.get("click")[0];
+  clickStart({ stopPropagation() {} });
+  assert.strictEqual(startBtn.disabled, true);
+  assert.strictEqual(startBtn.textContent, "Starting\u2026");
+  assert.strictEqual(startFetchCalls.length, 1);
+  assert.strictEqual(startFetchCalls[0].url, "/api/surfaces/start");
+  assert.strictEqual(startFetchCalls[0].opts.method, "POST");
+  assert.strictEqual(startFetchCalls[0].opts.headers["X-Blyte-Token"], "tok-page-test");
+  assert.deepStrictEqual(JSON.parse(startFetchCalls[0].opts.body), { folder: "/tmp/beta" });
+
+  resolveStart({
+    ok: true,
+    status: 200,
+    async json() {
+      return { name: "beta", url: "http://127.0.0.1:4222/#open=code123" };
+    },
+  });
+  await new Promise(r => setImmediate(r));
+  assert.strictEqual(window.location.href, "http://127.0.0.1:4222/#open=code123");
+
+  renderSurfaceList(container, [runningSurface], [], ["/tmp/alpha", "/tmp/beta"]);
+  const failNodes = collectNodes(container);
+  const failInput = failNodes.find(n => n.id === "surface-start-folder");
+  const failBtn = failNodes.find(n => n.className.includes("surface-switcher-start-btn"));
+  const failErr = failNodes.find(n => n.className.includes("surface-switcher-start-error"));
+
+  const xssMsg = '<img src=x onerror="alert(1)"> not a directory';
+  global.fetch = async () => ({
+    ok: false,
+    status: 400,
+    async text() { return JSON.stringify({ error: xssMsg }); },
+    async json() { return { error: xssMsg }; },
+  });
+  failInput.value = "/tmp/not-a-dir";
+  failBtn.listeners.get("click")[0]({ stopPropagation() {} });
+  await new Promise(r => setImmediate(r));
+  assert.strictEqual(failBtn.disabled, false);
+  assert.strictEqual(failBtn.textContent, "Start");
+  assert.strictEqual(failErr.hidden, false);
+  assert.strictEqual(failErr.textContent, xssMsg);
+  assert.strictEqual(failErr._htmlSet, false);
+
+  let resolveReopenFail;
+  global.fetch = (url) => {
+    if (url === "/api/surfaces/start") {
+      return new Promise(resolve => { resolveReopenFail = resolve; });
+    }
+    if (url === "/api/surfaces") {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            surfaces: [runningSurface],
+            stopped: [],
+            folders: ["/tmp/alpha", "/tmp/beta"],
+          };
+        },
+      });
+    }
+    throw new Error("unexpected fetch: " + url);
+  };
+
+  renderSurfaceList(container, [runningSurface], [], ["/tmp/alpha", "/tmp/beta"]);
+  const beforeReopenNodes = collectNodes(container);
+  const beforeInput = beforeReopenNodes.find(n => n.id === "surface-start-folder");
+  const beforeBtn = beforeReopenNodes.find(n => n.className.includes("surface-switcher-start-btn"));
+  beforeInput.value = "/tmp/reopen-fail";
+  beforeBtn.listeners.get("click")[0]({ stopPropagation() {} });
+  assert.strictEqual(surfaceStarting, true);
+  assert.strictEqual(beforeBtn.disabled, true);
+  assert.strictEqual(beforeBtn.textContent, "Starting\u2026");
+
+  closeSurfaceSwitcher();
+  await openSurfaceSwitcher();
+  const afterReopenNodes = collectNodes(container);
+  const afterInput = afterReopenNodes.find(n => n.id === "surface-start-folder");
+  const afterBtn = afterReopenNodes.find(n => n.className.includes("surface-switcher-start-btn"));
+  const afterErr = afterReopenNodes.find(n => n.className.includes("surface-switcher-start-error"));
+  assert.notStrictEqual(afterBtn, beforeBtn);
+  assert.strictEqual(afterInput.value, "/tmp/reopen-fail");
+  assert.strictEqual(afterInput.disabled, true);
+  assert.strictEqual(afterBtn.disabled, true);
+  assert.strictEqual(afterBtn.textContent, "Starting\u2026");
+
+  resolveReopenFail({
+    ok: false,
+    status: 500,
+    async text() { return JSON.stringify({ error: "child exited early" }); },
+    async json() { return { error: "child exited early" }; },
+  });
+  await new Promise(r => setImmediate(r));
+  assert.strictEqual(surfaceStarting, false);
+  assert.strictEqual(afterInput.disabled, false);
+  assert.strictEqual(afterBtn.disabled, false);
+  assert.strictEqual(afterBtn.textContent, "Start");
+  assert.strictEqual(afterErr.hidden, false);
+  assert.strictEqual(afterErr.textContent, "child exited early");
+  assert.strictEqual(afterErr._htmlSet, false);
+
+  const stopCalls = [];
+  global.fetch = async (url, opts) => {
+    stopCalls.push({ url, opts });
+    return { ok: true, status: 202, async json() { return { stopping: true }; } };
+  };
+  const stopBtn = afterReopenNodes.find(n => n.className.includes("surface-switcher-stop-btn"));
+  assert.ok(stopBtn, "expected stop button on current surface row");
+  assert.strictEqual(stopBtn.textContent, "Stop");
+  const clickStop = stopBtn.listeners.get("click")[0];
+
+  clickStop({ stopPropagation() {} });
+  assert.strictEqual(stopCalls.length, 0);
+  assert.strictEqual(confirmCalls, 0);
+  assert.strictEqual(stopBtn.textContent, "Stop this surface?");
+
+  clickStop({ stopPropagation() {} });
+  await new Promise(r => setImmediate(r));
+  assert.strictEqual(stopCalls.length, 1);
+  assert.strictEqual(stopCalls[0].url, "/api/session/stop");
+  assert.strictEqual(stopCalls[0].opts.method, "POST");
+  assert.strictEqual(stopCalls[0].opts.headers["X-Blyte-Token"], "tok-page-test");
+  assert.strictEqual(confirmCalls, 0);
+  assert.strictEqual(pageElements["surface-stopped"].hidden, false);
+  assert.strictEqual(
+    pageElements["surface-stopped"].textContent,
+    "This surface has stopped. Resume it with: blyte --resume alpha-demo"
+  );
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"#;
+    run_surface_script(harness);
+}
+
+#[test]
+fn page_exchanges_open_code_on_load_and_handles_refusal_without_retrying() {
+    let harness = r##"
+const assert = require("node:assert");
+
+(async () => {
+  function makeStub(id) {
+    const attrs = new Map();
+    const classes = new Set();
+    const listeners = new Map();
+    const metricVal = { textContent: "" };
+    return {
+      id,
+      value: "",
+      textContent: "",
+      innerHTML: "",
+      hidden: true,
+      disabled: false,
+      placeholder: "",
+      style: {},
+      scrollHeight: 60,
+      dataset: {},
+      children: [],
+      classList: {
+        add(c) { classes.add(c); },
+        remove(c) { classes.delete(c); },
+        toggle(c, f) {
+          if (f === undefined) {
+            if (classes.has(c)) classes.delete(c);
+            else classes.add(c);
+          } else if (f) classes.add(c);
+          else classes.delete(c);
+        },
+        contains(c) { return classes.has(c); },
+      },
+      setAttribute(k, v) { attrs.set(k, String(v)); },
+      getAttribute(k) { return attrs.has(k) ? attrs.get(k) : null; },
+      removeAttribute(k) { attrs.delete(k); },
+      addEventListener(ev, fn) {
+        if (!listeners.has(ev)) listeners.set(ev, []);
+        listeners.get(ev).push(fn);
+      },
+      querySelector(sel) { return sel === ".metric-val" ? metricVal : null; },
+      querySelectorAll() { return []; },
+      appendChild(c) { this.children.push(c); return c; },
+      replaceChildren(...nodes) { this.children = nodes; },
+    };
+  }
+
+  function setupEnv(hash) {
+    const elements = {};
+    const storage = new Map();
+    const replacedUrls = [];
+    global.window = {
+      innerHeight: 800,
+      location: {
+        pathname: "/",
+        search: "",
+        hash,
+      },
+      history: {
+        replaceState(_state, _title, url) {
+          replacedUrls.push(url);
+          const idx = url.indexOf("#");
+          global.window.location.hash = idx === -1 ? "" : url.slice(idx);
+        },
+      },
+      sessionStorage: {
+        getItem(k) { return storage.has(k) ? storage.get(k) : null; },
+        setItem(k, v) { storage.set(k, String(v)); },
+        removeItem(k) { storage.delete(k); },
+      },
+      addEventListener() {},
+    };
+    global.document = {
+      title: "",
+      getElementById(id) {
+        if (!elements[id]) elements[id] = makeStub(id);
+        return elements[id];
+      },
+      querySelector() { return null; },
+      querySelectorAll() { return []; },
+      addEventListener() {},
+      createElement(tag) { return makeStub(tag); },
+    };
+    return { elements, storage, replacedUrls };
+  }
+
+  const origStartPolling = startPolling;
+  let startPollingCalls = 0;
+  startPolling = () => { startPollingCalls += 1; };
+
+  try {
+    {
+      const { elements, storage, replacedUrls } = setupEnv("#open=abc");
+      const calls = [];
+      global.fetch = async (url, opts) => {
+        calls.push({ url, opts });
+        if (url === "/api/open") {
+          return {
+            ok: true,
+            status: 200,
+            async json() { return { token: "tok-from-open-code" }; },
+          };
+        }
+        if (url === "/api/session") {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                session_id: "s1",
+                surface_name: "demo",
+                repo: "demo",
+                repository: true,
+                started_at: 1700000000,
+                model: "m1",
+                effort: null,
+                effort_supported: false,
+                busy: false,
+                queued: 0,
+                last_seq: 0,
+              };
+            },
+          };
+        }
+        if (url === "/api/models") {
+          return {
+            ok: true,
+            status: 200,
+            async json() { return { models: [] }; },
+          };
+        }
+        throw new Error("unexpected fetch: " + url);
+      };
+
+      surfaceToken = null;
+      openCodeRefused = false;
+      pollingStopped = false;
+      startPollingCalls = 0;
+
+      await init();
+
+      assert.strictEqual(calls[0].url, "/api/open");
+      assert.strictEqual(calls[0].opts.method, "POST");
+      assert.deepStrictEqual(JSON.parse(calls[0].opts.body), { code: "abc" });
+      assert.strictEqual(surfaceToken, "tok-from-open-code");
+      assert.strictEqual(storage.get(TOKEN_STORAGE_KEY), "tok-from-open-code");
+      assert.deepStrictEqual(replacedUrls, ["/"]);
+      assert.strictEqual(global.window.location.hash, "");
+      assert.strictEqual(elements["missing-token"].hidden, true);
+      assert.strictEqual(elements["conversation-input"].disabled, false);
+
+      const sessionCall = calls.find(c => c.url === "/api/session");
+      assert.ok(sessionCall, "expected /api/session call after open-code exchange");
+      assert.strictEqual(sessionCall.opts.headers["X-Blyte-Token"], "tok-from-open-code");
+      assert.strictEqual(startPollingCalls, 1);
+    }
+
+    {
+      const { elements, storage, replacedUrls } = setupEnv("#open=badcode");
+      const calls = [];
+      global.fetch = async (url, opts) => {
+        calls.push({ url, opts });
+        return {
+          ok: false,
+          status: 403,
+          async json() { return {}; },
+          async text() { return ""; },
+        };
+      };
+
+      surfaceToken = null;
+      openCodeRefused = false;
+      pollingStopped = false;
+      startPollingCalls = 0;
+
+      await init();
+
+      assert.strictEqual(calls.length, 1, "refused open code must make exactly one request");
+      assert.strictEqual(calls[0].url, "/api/open");
+      assert.strictEqual(calls[0].opts.method, "POST");
+      assert.deepStrictEqual(JSON.parse(calls[0].opts.body), { code: "badcode" });
+      assert.strictEqual(surfaceToken, null);
+      assert.strictEqual(storage.has(TOKEN_STORAGE_KEY), false);
+      assert.deepStrictEqual(replacedUrls, ["/"]);
+      assert.strictEqual(elements["missing-token"].hidden, false);
+      assert.strictEqual(
+        elements["missing-token"].textContent,
+        "This link has been used or has expired. Run blyte open <name> to open this surface."
+      );
+      assert.strictEqual(elements["conversation-input"].disabled, true);
+      assert.strictEqual(startPollingCalls, 0);
+    }
+
+    {
+      const { elements, storage, replacedUrls } = setupEnv("#token=direct-tok");
+      const calls = [];
+      global.fetch = async (url, opts) => {
+        calls.push({ url, opts });
+        if (url === "/api/session") {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                session_id: "s1",
+                surface_name: "demo",
+                repo: "demo",
+                repository: true,
+                started_at: 1700000000,
+                model: "m1",
+                effort: null,
+                effort_supported: false,
+                busy: false,
+                queued: 0,
+                last_seq: 0,
+              };
+            },
+          };
+        }
+        if (url === "/api/models") {
+          return { ok: true, status: 200, async json() { return { models: [] }; } };
+        }
+        throw new Error("unexpected fetch: " + url);
+      };
+
+      surfaceToken = null;
+      openCodeRefused = false;
+      pollingStopped = false;
+      startPollingCalls = 0;
+
+      await init();
+
+      assert.strictEqual(surfaceToken, "direct-tok");
+      assert.strictEqual(storage.get(TOKEN_STORAGE_KEY), "direct-tok");
+      assert.deepStrictEqual(replacedUrls, ["/"]);
+      assert.strictEqual(calls[0].url, "/api/session");
+      assert.strictEqual(calls[0].opts.headers["X-Blyte-Token"], "direct-tok");
+      assert.strictEqual(elements["missing-token"].hidden, true);
+      assert.strictEqual(startPollingCalls, 1);
+    }
+  } finally {
+    startPolling = origStartPolling;
+  }
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"##;
     run_surface_script(harness);
 }

@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 #[cfg(unix)]
@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::cli::SurfaceArgs;
 use crate::http::{Request, Response};
+use crate::open_window::OpenIn;
 use crate::queue_actions::{Action, Hold};
 use crate::repl::ReplConfig;
 use crate::requests::{Publisher, RealPublisher, RequestActionError, RequestsState};
@@ -24,6 +25,8 @@ use crate::surface_dir::SurfaceRecord;
 pub const TOKEN_HEADER: &str = "X-Blyte-Token";
 pub const MESSAGE_HEADER: &str = "X-Blyte-Message-Credential";
 pub const RECONCILE_SAFETY_NET_INTERVAL: Duration = Duration::from_secs(30);
+pub const OPEN_CODE_TTL_SECS: u64 = 60;
+pub const MAX_OPEN_CODES: usize = 16;
 
 const INDEX_HTML: &str = include_str!("../assets/surface/index.html");
 const MAX_WAIT_MS: u64 = 25_000;
@@ -33,6 +36,63 @@ const MAX_PEER_TEXT_BYTES: usize = 16_384;
 const MAX_PEER_REPO_CHARS: usize = 200;
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+struct OpenCodeEntry {
+    code: String,
+    created_at: u64,
+}
+
+#[derive(Default)]
+pub struct OpenCodes {
+    entries: Mutex<VecDeque<OpenCodeEntry>>,
+}
+
+impl OpenCodes {
+    pub fn new() -> Self {
+        Self {
+            entries: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    pub fn issue(&self, now: u64) -> Result<String, String> {
+        let code = generate_token()?;
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|e| format!("open codes lock poisoned: {e}"))?;
+        while entries.len() >= MAX_OPEN_CODES {
+            entries.pop_front();
+        }
+        entries.push_back(OpenCodeEntry {
+            code: code.clone(),
+            created_at: now,
+        });
+        Ok(code)
+    }
+
+    pub fn redeem(&self, provided: &str, now: u64) -> Result<bool, String> {
+        if provided.is_empty() {
+            return Ok(false);
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|e| format!("open codes lock poisoned: {e}"))?;
+        let mut matched_idx = None;
+        for (idx, entry) in entries.iter().enumerate() {
+            if constant_time_eq(provided.as_bytes(), entry.code.as_bytes()) {
+                matched_idx = Some(idx);
+            }
+        }
+        let Some(idx) = matched_idx else {
+            entries.retain(|e| now.saturating_sub(e.created_at) <= OPEN_CODE_TTL_SECS);
+            return Ok(false);
+        };
+        let entry = entries.remove(idx).unwrap();
+        entries.retain(|e| now.saturating_sub(e.created_at) <= OPEN_CODE_TTL_SECS);
+        Ok(now.saturating_sub(entry.created_at) <= OPEN_CODE_TTL_SECS)
+    }
+}
 
 pub struct Surface {
     pub surface_id: String,
@@ -45,6 +105,7 @@ pub struct Surface {
     pub days: u64,
     pub token: String,
     pub message_credential: String,
+    pub open_codes: OpenCodes,
     pub requests: Arc<RequestsState>,
     pub publisher: Arc<dyn Publisher>,
     pub reconcile_lock: Mutex<()>,
@@ -162,10 +223,53 @@ fn handle_surfaces(surface: &Surface) -> Response {
         Ok(stopped) => stopped,
         Err(e) => return json_error(500, e),
     };
-    match crate::surfaces_cmd::surfaces_payload(&registry_dir, &surface.surface_id, &stopped) {
+    match crate::surfaces_cmd::surfaces_payload(
+        &registry_dir,
+        &state_dir,
+        &surface.surface_id,
+        &stopped,
+    ) {
         Ok(payload) => Response::json(200, &payload),
         Err(e) => json_error(500, e),
     }
+}
+
+fn handle_post_start_surface(req: &Request) -> Response {
+    let obj = match parse_json_object(&req.body) {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
+    let Some(folder) = obj.get("folder").and_then(|v| v.as_str()) else {
+        return json_error(400, "missing or invalid field folder");
+    };
+    let state_dir = match crate::surface_registry::state_dir() {
+        Ok(dir) => dir,
+        Err(e) => return json_error(500, e),
+    };
+    match crate::surface_start::start_surface_in(folder, &state_dir) {
+        Ok(started) => Response::json(
+            200,
+            &serde_json::json!({
+                "name": started.name,
+                "url": started.url,
+            }),
+        ),
+        Err(crate::surface_start::StartError::BadRequest(msg)) => json_error(400, msg),
+        Err(crate::surface_start::StartError::Internal(msg)) => json_error(500, msg),
+    }
+}
+
+type StopTrigger = Arc<dyn Fn() + Send + Sync>;
+
+fn handle_post_stop(stop_trigger: Option<&StopTrigger>) -> Response {
+    if let Some(trigger) = stop_trigger {
+        let trigger = Arc::clone(trigger);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            trigger();
+        });
+    }
+    Response::json(202, &serde_json::json!({ "stopping": true }))
 }
 
 fn health_response(surface: &Surface) -> Response {
@@ -199,6 +303,7 @@ fn session_response(surface: &Surface) -> Response {
             "busy": info.busy,
             "queued": info.queued,
             "last_seq": info.last_seq,
+            "state": info.state,
         }),
     )
 }
@@ -545,6 +650,11 @@ fn handle_post_effort(surface: &Surface, req: &Request) -> Response {
         return json_error(400, e);
     }
     session_response(surface)
+}
+
+fn handle_post_seen(surface: &Surface) -> Response {
+    surface.session.mark_seen();
+    Response::text(204, "")
 }
 
 fn handle_post_approval(surface: &Surface, id: &str, req: &Request) -> Response {
@@ -1067,7 +1177,42 @@ fn match_api_get_route<'a>(pattern: &str, path: &'a str) -> Option<Option<&'a st
     }
 }
 
+fn handle_post_open_code(surface: &Surface, now: u64) -> Response {
+    match surface.open_codes.issue(now) {
+        Ok(code) => Response::json(200, &serde_json::json!({ "code": code })),
+        Err(e) => json_error(500, e),
+    }
+}
+
+fn handle_post_open(surface: &Surface, req: &Request, now: u64) -> Response {
+    let forbidden = Response {
+        status: 403,
+        content_type: "application/json",
+        body: b"{}".to_vec(),
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&req.body) else {
+        return forbidden;
+    };
+    let Some(code) = value.get("code").and_then(|v| v.as_str()) else {
+        return forbidden;
+    };
+    match surface.open_codes.redeem(code, now) {
+        Ok(true) => Response::json(200, &serde_json::json!({ "token": surface.token })),
+        Ok(false) => forbidden,
+        Err(e) => json_error(500, e),
+    }
+}
+
 pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
+    route_inner(surface, req, now, None)
+}
+
+fn route_inner(
+    surface: &Surface,
+    req: &Request,
+    now: u64,
+    stop_trigger: Option<&StopTrigger>,
+) -> Response {
     if req.path == "/api/peer/messages" && req.method == "POST" {
         if !has_valid_message_credential(surface, req) {
             return json_error(403, "missing or invalid message credential");
@@ -1076,8 +1221,10 @@ pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
     }
 
     let is_health_get = req.path == "/api/health" && req.method == "GET";
+    let is_open_post = req.path == "/api/open" && req.method == "POST";
     if (req.path.starts_with("/api/") || req.method == "POST")
         && !is_health_get
+        && !is_open_post
         && !has_valid_token(surface, req)
     {
         return json_error(
@@ -1129,11 +1276,35 @@ pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
     }
 
     match req.path.as_str() {
+        "/api/open" => {
+            if req.method != "POST" {
+                return method_not_allowed(req);
+            }
+            handle_post_open(surface, req, now)
+        }
         "/api/surfaces" => {
             if req.method != "GET" {
                 return method_not_allowed(req);
             }
             handle_surfaces(surface)
+        }
+        "/api/surfaces/start" => {
+            if req.method != "POST" {
+                return method_not_allowed(req);
+            }
+            handle_post_start_surface(req)
+        }
+        "/api/session/stop" => {
+            if req.method != "POST" {
+                return method_not_allowed(req);
+            }
+            handle_post_stop(stop_trigger)
+        }
+        "/api/session/open-codes" => {
+            if req.method != "POST" {
+                return method_not_allowed(req);
+            }
+            handle_post_open_code(surface, now)
         }
         "/api/session/messages" => {
             if req.method != "POST" {
@@ -1158,6 +1329,12 @@ pub fn route(surface: &Surface, req: &Request, now: u64) -> Response {
                 return method_not_allowed(req);
             }
             handle_post_effort(surface, req)
+        }
+        "/api/session/seen" => {
+            if req.method != "POST" {
+                return method_not_allowed(req);
+            }
+            handle_post_seen(surface)
         }
         "/api/runs/changed" => {
             if req.method != "POST" {
@@ -1448,14 +1625,12 @@ fn new_session_id(nanos: u128) -> String {
     format!("surface-{}-{nanos}-{seq}", std::process::id())
 }
 
+pub fn open_browser_in(open_in: OpenIn, url: &str) {
+    crate::open_window::open_url(open_in, url);
+}
+
 pub fn open_browser(url: &str) {
-    #[cfg(target_os = "macos")]
-    let cmd = "open";
-    #[cfg(not(target_os = "macos"))]
-    let cmd = "xdg-open";
-    if let Err(e) = Command::new(cmd).arg(url).spawn() {
-        eprintln!("blyte: could not open a browser with {cmd}: {e}; open {url} yourself");
-    }
+    open_browser_in(OpenIn::App, url);
 }
 
 fn resolve_initial_model(config: &ReplConfig) -> String {
@@ -1473,7 +1648,6 @@ fn resolve_initial_model(config: &ReplConfig) -> String {
     "gemini-3.8-flash-high".to_string()
 }
 
-#[cfg(unix)]
 static SIGNAL_STOP: AtomicBool = AtomicBool::new(false);
 
 #[cfg(unix)]
@@ -1583,37 +1757,45 @@ impl Drop for PublishToolGuard {
     }
 }
 
-pub fn run(args: &SurfaceArgs, config: ReplConfig) -> i32 {
-    #[cfg(unix)]
-    {
-        SIGNAL_STOP.store(false, Ordering::Relaxed);
-        unsafe {
-            libc::signal(
-                libc::SIGINT,
-                handle_shutdown_signal as *const () as libc::sighandler_t,
-            );
-            libc::signal(
-                libc::SIGTERM,
-                handle_shutdown_signal as *const () as libc::sighandler_t,
-            );
-        }
+struct StopControl<S> {
+    should_stop: S,
+    trigger: StopTrigger,
+}
+
+fn atomic_stop_control(stop: Arc<AtomicBool>) -> StopControl<impl Fn() -> bool> {
+    let stop_trigger_flag = Arc::clone(&stop);
+    StopControl {
+        should_stop: move || stop.load(Ordering::Acquire),
+        trigger: Arc::new(move || stop_trigger_flag.store(true, Ordering::Release)),
     }
+}
+
+pub fn run(args: &SurfaceArgs, config: ReplConfig) -> i32 {
+    SIGNAL_STOP.store(false, Ordering::Relaxed);
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            handle_shutdown_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            handle_shutdown_signal as *const () as libc::sighandler_t,
+        );
+    }
+    let open_in = args.open_in;
+    let mut opener = |url: &str| open_browser_in(open_in, url);
+    let stop_control = StopControl {
+        should_stop: || SIGNAL_STOP.load(Ordering::Acquire),
+        trigger: Arc::new(|| SIGNAL_STOP.store(true, Ordering::Release)),
+    };
     run_inner(
         args,
         config,
         &mut std::io::stdout(),
         &mut std::io::stderr(),
-        &mut open_browser,
-        || {
-            #[cfg(unix)]
-            {
-                SIGNAL_STOP.load(Ordering::Relaxed)
-            }
-            #[cfg(not(unix))]
-            {
-                false
-            }
-        },
+        &mut opener,
+        stop_control,
         None,
     )
 }
@@ -1624,7 +1806,18 @@ pub fn run_with_io(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
-    run_inner(args, config, out, err, &mut open_browser, || false, None)
+    let open_in = args.open_in;
+    let mut opener = |url: &str| open_browser_in(open_in, url);
+    let stop = Arc::new(AtomicBool::new(false));
+    run_inner(
+        args,
+        config,
+        out,
+        err,
+        &mut opener,
+        atomic_stop_control(stop),
+        None,
+    )
 }
 
 pub fn run_with_hooks(
@@ -1641,7 +1834,7 @@ pub fn run_with_hooks(
         out,
         err,
         opener,
-        move || stop.load(Ordering::Relaxed),
+        atomic_stop_control(stop),
         None,
     )
 }
@@ -1668,7 +1861,7 @@ pub fn run_with_runner(
         out,
         err,
         opener,
-        move || stop.load(Ordering::Relaxed),
+        atomic_stop_control(stop),
         Some(Box::new(|_, _| Ok((runner, None)))),
     )
 }
@@ -1688,7 +1881,7 @@ pub fn run_with_runner_factory(
         out,
         err,
         opener,
-        move || stop.load(Ordering::Relaxed),
+        atomic_stop_control(stop),
         Some(factory),
     )
 }
@@ -1766,12 +1959,16 @@ fn run_inner<S>(
     out: &mut dyn Write,
     err: &mut dyn Write,
     opener: &mut dyn FnMut(&str),
-    should_stop: S,
+    stop_control: StopControl<S>,
     custom_runner: Option<RunnerFactory>,
 ) -> i32
 where
     S: Fn() -> bool,
 {
+    let StopControl {
+        should_stop,
+        trigger: stop_trigger,
+    } = stop_control;
     let (main_checkout, is_repo) = match find_git_toplevel(&config.repo_root) {
         Ok(GitToplevel::Repository(worktree_root)) => {
             let main = match resolve_main_checkout(&worktree_root) {
@@ -2203,6 +2400,7 @@ where
         port: actual_port,
         started_at,
         doing: "idle".to_string(),
+        state: crate::surface_registry::SurfaceState::Idle,
     };
     if let Err(e) = crate::surface_registry::write_entry(&registry_dir, &registry_entry) {
         let _ = writeln!(err, "blyte: {e}");
@@ -2214,7 +2412,7 @@ where
     };
     let hook_dir = registry_dir.clone();
     let hook_entry = registry_entry.clone();
-    session.set_activity_hook(Box::new(move |prompt| {
+    session.set_activity_hook(Box::new(move |prompt, state| {
         let doing = match prompt {
             Some(text) => {
                 let line = crate::surface_registry::first_line(text);
@@ -2238,6 +2436,7 @@ where
         let entry = crate::surface_registry::RegistryEntry {
             branch,
             doing,
+            state,
             ..hook_entry.clone()
         };
         if let Err(e) = crate::surface_registry::write_entry(&hook_dir, &entry) {
@@ -2254,11 +2453,21 @@ where
         let _ = err.flush();
     }
 
+    let open_codes = OpenCodes::new();
     let url = format!("http://127.0.0.1:{actual_port}/#token={token}");
     let _ = writeln!(out, "blyte: surface {surface_name} at {url}");
     let _ = out.flush();
     if !args.no_open {
-        opener(&url);
+        match issue_initial_open_code(&open_codes, now_duration()) {
+            Ok(code) => {
+                let open_url = format!("http://127.0.0.1:{actual_port}/#open={code}");
+                opener(&open_url);
+            }
+            Err(e) => {
+                let _ = writeln!(err, "blyte: failed to create open code: {e}");
+                let _ = err.flush();
+            }
+        }
     }
 
     let stop_surface_name = surface_name.clone();
@@ -2274,6 +2483,7 @@ where
         days: args.days,
         token,
         message_credential,
+        open_codes,
         requests: Arc::new(RequestsState::new()),
         publisher: Arc::new(RealPublisher),
         reconcile_lock: Mutex::new(()),
@@ -2285,7 +2495,7 @@ where
 
     let serve_result =
         crate::http::serve_until(listener, should_stop, move |req| match now_duration() {
-            Ok(d) => route(&surface, req, d.as_secs()),
+            Ok(d) => route_inner(&surface, req, d.as_secs(), Some(&stop_trigger)),
             Err(e) => json_error(500, e),
         });
 
@@ -2306,6 +2516,14 @@ where
             1
         }
     }
+}
+
+fn issue_initial_open_code(
+    open_codes: &OpenCodes,
+    now: Result<Duration, String>,
+) -> Result<String, String> {
+    let now_secs = now?.as_secs();
+    open_codes.issue(now_secs)
 }
 
 fn canonicalize_attachments_dir(attachments_dir: &Path) -> Result<PathBuf, String> {
@@ -2382,5 +2600,45 @@ mod tests {
             err.contains(&blocker.display().to_string()),
             "expected error to name path, got: {err}"
         );
+    }
+
+    fn poisoned_open_codes() -> OpenCodes {
+        let codes = OpenCodes::new();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = codes.entries.lock().unwrap();
+            panic!("poison");
+        }));
+        codes
+    }
+
+    #[test]
+    fn open_codes_issue_errors_when_lock_poisoned() {
+        let codes = poisoned_open_codes();
+        let err = codes.issue(100).unwrap_err();
+        assert!(err.contains("open codes"), "unexpected error: {err}");
+        assert!(err.contains("poison"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn open_codes_redeem_errors_when_lock_poisoned() {
+        let codes = poisoned_open_codes();
+        let err = codes.redeem("some-code", 100).unwrap_err();
+        assert!(err.contains("open codes"), "unexpected error: {err}");
+        assert!(err.contains("poison"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn issue_initial_open_code_errors_when_clock_fails() {
+        let codes = OpenCodes::new();
+        let err = issue_initial_open_code(
+            &codes,
+            Err("system clock is before Unix epoch: test".to_string()),
+        )
+        .unwrap_err();
+        assert!(err.contains("system clock"), "unexpected error: {err}");
+        assert!(codes.entries.lock().unwrap().is_empty());
+
+        let code = issue_initial_open_code(&codes, Ok(Duration::from_secs(500))).unwrap();
+        assert!(codes.redeem(&code, 500).unwrap());
     }
 }

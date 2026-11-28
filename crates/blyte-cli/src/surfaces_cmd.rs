@@ -1,10 +1,17 @@
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
-use std::io::Write;
-use std::path::Path;
+use std::io::{ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
+use crate::serve::TOKEN_HEADER;
 use crate::session::{Entry, EntryBody};
 use crate::surface_dir::{is_running, list_records_for_root};
 use crate::surface_registry::{find_by_name, first_line, live_entries, RegistryEntry};
+
+const OPEN_CODE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_OPEN_CODE_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// A stopped surface belonging to a folder.
 ///
@@ -226,7 +233,7 @@ pub fn format_surfaces_table(entries: &[RegistryEntry], current_id: Option<&str>
         return "no surfaces are running\n".to_string();
     }
 
-    let rows: Vec<(String, String, &str, &str)> = entries
+    let rows: Vec<(String, String, &str, &str, &str)> = entries
         .iter()
         .map(|entry| {
             let name = if current_id == Some(entry.id.as_str()) {
@@ -238,6 +245,7 @@ pub fn format_surfaces_table(entries: &[RegistryEntry], current_id: Option<&str>
                 name,
                 repository_name(&entry.root),
                 entry.branch.as_deref().unwrap_or("-"),
+                entry.state.display_label(),
                 entry.doing.as_str(),
             )
         })
@@ -261,17 +269,23 @@ pub fn format_surfaces_table(entries: &[RegistryEntry], current_id: Option<&str>
         .max()
         .unwrap_or(0)
         .max("BRANCH".len());
+    let state_w = rows
+        .iter()
+        .map(|row| row.3.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("STATE".len());
 
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "{:<name_w$}  {:<repo_w$}  {:<branch_w$}  DOING",
-        "NAME", "REPOSITORY", "BRANCH"
+        "{:<name_w$}  {:<repo_w$}  {:<branch_w$}  {:<state_w$}  DOING",
+        "NAME", "REPOSITORY", "BRANCH", "STATE"
     );
-    for (name, repo, branch, doing) in rows {
+    for (name, repo, branch, state, doing) in rows {
         let _ = writeln!(
             out,
-            "{name:<name_w$}  {repo:<repo_w$}  {branch:<branch_w$}  {doing}"
+            "{name:<name_w$}  {repo:<repo_w$}  {branch:<branch_w$}  {state:<state_w$}  {doing}"
         );
     }
     out
@@ -303,7 +317,7 @@ pub fn run_surfaces(dir: &Path, json: bool, out: &mut dyn Write, err: &mut dyn W
     0
 }
 
-pub fn surface_url(entry: &RegistryEntry) -> Result<String, String> {
+fn read_surface_token(entry: &RegistryEntry) -> Result<String, String> {
     let token_path = blyte_agent::sandbox::surface_token_path_for_id(&entry.id)?;
     let raw_token = std::fs::read_to_string(&token_path).map_err(|_| {
         format!(
@@ -320,11 +334,139 @@ pub fn surface_url(entry: &RegistryEntry) -> Result<String, String> {
             token_path.display()
         ));
     }
+    Ok(token.to_string())
+}
+
+pub fn surface_url(entry: &RegistryEntry) -> Result<String, String> {
+    let token = read_surface_token(entry)?;
     Ok(format!("http://127.0.0.1:{}/#token={token}", entry.port))
+}
+
+fn parse_http_status(head: &str) -> Result<u16, String> {
+    let status_line = head.lines().next().unwrap_or("").trim_end_matches('\r');
+    let mut parts = status_line.split_whitespace();
+    let version = parts
+        .next()
+        .ok_or_else(|| "empty HTTP response".to_string())?;
+    if !version.starts_with("HTTP/") {
+        return Err("invalid HTTP response".to_string());
+    }
+    let code_str = parts
+        .next()
+        .ok_or_else(|| "missing HTTP status code".to_string())?;
+    code_str
+        .parse::<u16>()
+        .map_err(|_| "invalid HTTP status code".to_string())
+}
+
+pub fn request_open_code(entry: &RegistryEntry, token: &str) -> Result<String, String> {
+    request_open_code_at(&entry.name, entry.port, token)
+}
+
+pub fn request_open_code_at(name: &str, port: u16, token: &str) -> Result<String, String> {
+    let deadline = Instant::now() + OPEN_CODE_TIMEOUT;
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&addr, OPEN_CODE_TIMEOUT).map_err(|e| {
+        if e.kind() == ErrorKind::ConnectionRefused {
+            format!("surface {name} refused the connection on port {port}")
+        } else {
+            format!("cannot connect to surface {name} on port {port}: {e}")
+        }
+    })?;
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(format!("surface {name} timed out on port {port}"));
+    }
+    let _ = stream.set_write_timeout(Some(remaining));
+
+    let req = format!(
+        "POST /api/session/open-codes HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{TOKEN_HEADER}: {token}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+    );
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| format!("failed to request an open code from surface {name}: {e}"))?;
+
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        if raw.len() >= MAX_OPEN_CODE_RESPONSE_BYTES {
+            return Err(format!(
+                "surface {name} gave an answer blyte does not understand"
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("surface {name} timed out on port {port}"));
+        }
+        let _ = stream.set_read_timeout(Some(remaining));
+        let max_read = (MAX_OPEN_CODE_RESPONSE_BYTES - raw.len()).min(chunk.len());
+        match stream.read(&mut chunk[..max_read]) {
+            Ok(0) => break,
+            Ok(n) => raw.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == ErrorKind::TimedOut || e.kind() == ErrorKind::WouldBlock => {
+                return Err(format!("surface {name} timed out on port {port}"));
+            }
+            Err(e) => {
+                return Err(format!("failed to read answer from surface {name}: {e}"));
+            }
+        }
+    }
+
+    let text = std::str::from_utf8(&raw)
+        .map_err(|_| format!("surface {name} gave an answer blyte does not understand"))?;
+    let (head, resp_body) = text
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| format!("surface {name} gave an answer blyte does not understand"))?;
+    let status = parse_http_status(head)
+        .map_err(|_| format!("surface {name} gave an answer blyte does not understand"))?;
+    if status != 200 {
+        return Err(format!(
+            "surface {name} could not create an open code (HTTP {status})"
+        ));
+    }
+    let parsed: serde_json::Value = serde_json::from_str(resp_body)
+        .map_err(|_| format!("surface {name} gave an answer blyte does not understand"))?;
+    let code = parsed
+        .get("code")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("surface {name} gave an answer blyte does not understand"))?;
+    Ok(code.to_string())
+}
+
+fn known_folders(state_dir: &Path, entries: &[RegistryEntry]) -> Result<Vec<String>, String> {
+    let mut folders = BTreeSet::new();
+    let repos_path = state_dir.join("repos");
+    match std::fs::read_to_string(&repos_path) {
+        Ok(content) => {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let path = PathBuf::from(trimmed);
+                if path.is_dir() {
+                    folders.insert(trimmed.to_string());
+                }
+            }
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!("failed to read {}: {e}", repos_path.display()));
+        }
+    }
+    for entry in entries {
+        folders.insert(entry.root.to_string_lossy().into_owned());
+    }
+    Ok(folders.into_iter().collect())
 }
 
 pub fn surfaces_payload(
     registry_dir: &Path,
+    state_dir: &Path,
     current_id: &str,
     stopped: &[StoppedSurface],
 ) -> Result<serde_json::Value, String> {
@@ -339,6 +481,7 @@ pub fn surfaces_payload(
             "current surface {current_id} is not in the surface registry"
         ));
     }
+    let folders = known_folders(state_dir, &entries)?;
     let surfaces: Vec<serde_json::Value> = entries
         .iter()
         .map(|entry| {
@@ -352,13 +495,14 @@ pub fn surfaces_payload(
                 "root": entry.root.to_string_lossy(),
                 "branch": entry.branch,
                 "doing": entry.doing,
+                "state": entry.state,
                 "current": entry.id == current_id,
                 "url": url,
                 "error": error,
             })
         })
         .collect();
-    Ok(serde_json::json!({ "surfaces": surfaces, "stopped": stopped }))
+    Ok(serde_json::json!({ "surfaces": surfaces, "stopped": stopped, "folders": folders }))
 }
 
 pub fn run_open(
@@ -376,14 +520,23 @@ pub fn run_open(
         }
     };
 
-    let url = match surface_url(&entry) {
-        Ok(url) => url,
+    let token = match read_surface_token(&entry) {
+        Ok(token) => token,
         Err(e) => {
             let _ = writeln!(err, "blyte: {e}");
             return 1;
         }
     };
 
+    let code = match request_open_code(&entry, &token) {
+        Ok(code) => code,
+        Err(e) => {
+            let _ = writeln!(err, "blyte: {e}");
+            return 1;
+        }
+    };
+
+    let url = format!("http://127.0.0.1:{}/#open={code}", entry.port);
     opener(&url);
     let _ = writeln!(out, "blyte: opened surface {}", entry.name);
     0

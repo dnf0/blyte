@@ -263,6 +263,21 @@
       display: none;
     }
 
+    .surface-stopped {
+      background: var(--color-strong);
+      color: #FFFFFF;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 8px 14px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+
+    .surface-stopped[hidden] {
+      display: none;
+    }
+
     .repo-name {
       font-family: var(--font-mono);
       font-size: 12px;
@@ -297,6 +312,19 @@
     button.repo-name[aria-expanded="true"] {
       color: var(--color-strong);
       border-color: var(--brand-rust);
+    }
+
+    .surface-switcher-dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--brand-rust);
+      flex-shrink: 0;
+    }
+
+    .surface-switcher-dot[hidden] {
+      display: none;
     }
 
     .surface-switcher-list {
@@ -389,6 +417,35 @@
       background: var(--brand-rust-soft);
       border: 1px solid var(--brand-rust);
       color: var(--brand-rust);
+    }
+
+    .surface-switcher-state-badge {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+
+    .surface-switcher-state-waiting {
+      background: var(--brand-rust);
+      border: 1px solid var(--brand-rust);
+      color: #fff;
+    }
+
+    .surface-switcher-state-detail {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--brand-rust);
+    }
+
+    .surface-switcher-state-working {
+      background: var(--color-page);
+      border: 1px solid var(--color-line-dark);
+      color: var(--color-muted);
+      font-weight: 500;
     }
 
     .surface-switcher-root {
@@ -490,6 +547,104 @@
     .surface-switcher-copy-btn:focus-visible {
       border-color: var(--brand-rust);
       color: var(--color-strong);
+    }
+
+    .surface-switcher-stop-btn {
+      margin-left: auto;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 2px 7px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-card);
+      color: var(--color-muted);
+      cursor: pointer;
+    }
+
+    .surface-switcher-stop-btn:hover,
+    .surface-switcher-stop-btn:focus-visible {
+      border-color: var(--status-red);
+      color: var(--status-red);
+    }
+
+    .surface-switcher-stop-btn.surface-switcher-stop-confirm {
+      border-color: var(--status-red);
+      background: var(--status-red);
+      color: #FFFFFF;
+    }
+
+    .surface-switcher-stop-btn:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+
+    .surface-switcher-start {
+      margin-top: 4px;
+      padding: 8px 9px;
+      border-top: 1px solid var(--color-line);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .surface-switcher-start-label {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--color-muted);
+    }
+
+    .surface-switcher-start-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .surface-switcher-start-input {
+      flex: 1 1 auto;
+      min-width: 0;
+      font-size: 12px;
+      padding: 4px 7px;
+      border-radius: 4px;
+      border: 1px solid var(--color-line-dark);
+      background: var(--color-page);
+      color: var(--color-strong);
+    }
+
+    .surface-switcher-start-input:focus {
+      outline: none;
+      border-color: var(--brand-rust);
+    }
+
+    .surface-switcher-start-btn {
+      flex: 0 0 auto;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 4px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--brand-rust);
+      background: var(--brand-rust);
+      color: #FFFFFF;
+      cursor: pointer;
+    }
+
+    .surface-switcher-start-btn:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+
+    .surface-switcher-start-error {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--status-red);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .surface-switcher-start-error[hidden] {
+      display: none;
     }
 
     .surface-switcher-error {
@@ -2920,6 +3075,7 @@
   <div id="app" class="shell">
     <div id="lost-server" class="lost-server" role="status" hidden>No answer from blyte. Trying again.</div>
     <div id="missing-token" class="missing-token" role="status" hidden>Cannot send until this page is opened from the URL blyte printed.</div>
+    <div id="surface-stopped" class="surface-stopped" role="status" hidden></div>
     <header id="bar">
       <div class="bar-row">
         <div class="bar-group">
@@ -2938,7 +3094,7 @@
             <span class="brand-word">blyte</span>
           </span>
           <div id="surface-switcher-wrap" class="surface-switcher-wrap">
-            <button id="surface-switcher" class="repo-name" type="button" aria-haspopup="listbox" aria-expanded="false"></button>
+            <button id="surface-switcher" class="repo-name" type="button" aria-haspopup="listbox" aria-expanded="false"><span class="surface-switcher-label"></span><span id="surface-switcher-dot" class="surface-switcher-dot" role="img" aria-label="another surface is waiting on you" hidden></span></button>
             <div id="surface-switcher-list" class="surface-switcher-list" role="listbox" aria-label="Running surfaces" hidden></div>
           </div>
           <span id="no-repo-badge" class="no-repo-badge" hidden></span>
@@ -3031,14 +3187,24 @@
     const IN_PROGRESS_GROUP = "in progress";
     const RETRY_DELAYS_MS = [1000, 2000, 4000, 8000];
     const RUNS_POLL_MS = 5000;
+    const SURFACES_POLL_MS = 15000;
+    const VALID_SURFACE_STATES = new Set(["idle", "working", "approval", "replied"]);
 
     let sessionState = null;
     let modelsList = [];
     let sessionBusy = false;
+    let waitingReplyUnseen = false;
+    let pendingApprovalFromSession = false;
     let lastSeqSeen = 0;
     let initialEventsLoaded = false;
     let surfaceSwitcherOpen = false;
     let surfaceSwitcherReqId = 0;
+    let surfacesPollTimer = null;
+    let surfaceStarting = false;
+    let surfaceStartFolderValue = "";
+    let surfaceStartError = "";
+    let surfaceStartControls = null;
+    let surfaceStopConfirming = false;
 
     const seenSeqs = new Set();
     const logEntries = [];
@@ -3205,35 +3371,50 @@
     const TOKEN_HEADER = "X-Blyte-Token";
     const TOKEN_STORAGE_KEY = "blyte.surface.token";
     const MISSING_TOKEN_MSG = "Cannot send until this page is opened from the URL blyte printed.";
+    const OPEN_CODE_REFUSED_MSG = "This link has been used or has expired. Run blyte open <name> to open this surface.";
     let surfaceToken = null;
+    let openCodeRefused = false;
 
-    function readSurfaceToken() {
+    function storeSurfaceToken(token) {
+      if (typeof window === "undefined") return;
+      try {
+        window.sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
+      } catch (_) {}
+    }
+
+    function consumeHashParam(name) {
       if (typeof window === "undefined") return null;
-      let token = null;
       try {
         const rawHash = window.location && window.location.hash
           ? window.location.hash.replace(/^#/, "")
           : "";
-        if (rawHash) {
-          const params = new URLSearchParams(rawHash);
-          const fromHash = params.get("token");
-          if (fromHash) {
-            token = fromHash;
-            try {
-              window.sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
-            } catch (_) {}
-            params.delete("token");
-            const nextHash = params.toString();
-            const nextUrl =
-              window.location.pathname +
-              window.location.search +
-              (nextHash ? "#" + nextHash : "");
-            if (window.history && typeof window.history.replaceState === "function") {
-              window.history.replaceState(null, "", nextUrl);
-            }
-          }
+        if (!rawHash) return null;
+        const params = new URLSearchParams(rawHash);
+        if (!params.has(name)) return null;
+        const value = params.get(name);
+        params.delete(name);
+        const nextHash = params.toString();
+        const nextUrl =
+          window.location.pathname +
+          window.location.search +
+          (nextHash ? "#" + nextHash : "");
+        if (window.history && typeof window.history.replaceState === "function") {
+          window.history.replaceState(null, "", nextUrl);
         }
-      } catch (_) {}
+        return value;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function readSurfaceToken() {
+      if (typeof window === "undefined") return null;
+      let token = null;
+      const fromHash = consumeHashParam("token");
+      if (fromHash) {
+        token = fromHash;
+        storeSurfaceToken(token);
+      }
       if (!token) {
         try {
           const stored = window.sessionStorage.getItem(TOKEN_STORAGE_KEY);
@@ -3241,6 +3422,42 @@
         } catch (_) {}
       }
       return token;
+    }
+
+    function readOpenCode() {
+      return consumeHashParam("open");
+    }
+
+    async function exchangeOpenCode(code) {
+      let res;
+      try {
+        res = await fetch("/api/open", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code }),
+        });
+      } catch (_) {
+        openCodeRefused = true;
+        return null;
+      }
+      if (!res || !res.ok) {
+        openCodeRefused = true;
+        return null;
+      }
+      let data;
+      try {
+        data = await res.json();
+      } catch (_) {
+        openCodeRefused = true;
+        return null;
+      }
+      if (!data || typeof data.token !== "string" || !data.token) {
+        openCodeRefused = true;
+        return null;
+      }
+      openCodeRefused = false;
+      storeSurfaceToken(data.token);
+      return data.token;
     }
 
     function clearSurfaceToken() {
@@ -3257,7 +3474,10 @@
       if (typeof document === "undefined") return;
       const missing = !surfaceToken;
       const bar = document.getElementById("missing-token");
-      if (bar) bar.hidden = !missing;
+      if (bar) {
+        bar.textContent = openCodeRefused ? OPEN_CODE_REFUSED_MSG : MISSING_TOKEN_MSG;
+        bar.hidden = !missing;
+      }
       const input = document.getElementById("conversation-input");
       if (input) {
         input.disabled = missing;
@@ -3303,6 +3523,10 @@
       if (requestsPollTimer !== null) {
         clearInterval(requestsPollTimer);
         requestsPollTimer = null;
+      }
+      if (surfacesPollTimer !== null) {
+        clearInterval(surfacesPollTimer);
+        surfacesPollTimer = null;
       }
     }
 
@@ -3626,7 +3850,23 @@
       updateReviewTabCounter(state.undecidedArrived.length);
     }
 
-    function formatSurfaceTitle(surfaceName, busy) {
+    function isPageVisible() {
+      return typeof document !== "undefined" && document.visibilityState === "visible";
+    }
+
+    function hasPendingApproval() {
+      for (const rec of approvalsById.values()) {
+        if (rec && rec.answer === null) return true;
+      }
+      return pendingApprovalFromSession;
+    }
+
+    function isCurrentSurfaceWaiting() {
+      return hasPendingApproval() || waitingReplyUnseen;
+    }
+
+    function formatSurfaceTitle(surfaceName, busy, waiting) {
+      if (waiting) return surfaceName + ": waiting on you - blyte";
       return busy ? surfaceName + ": working - blyte" : surfaceName + " - blyte";
     }
 
@@ -3636,7 +3876,38 @@
         ? surfaceName
         : (sessionState && typeof sessionState.surface_name === "string" ? sessionState.surface_name : "");
       if (name) {
-        document.title = formatSurfaceTitle(name, sessionBusy);
+        document.title = formatSurfaceTitle(name, sessionBusy, isCurrentSurfaceWaiting());
+      }
+    }
+
+    function reportSessionSeen() {
+      if (pollingStopped || !isPageVisible() || sessionBusy || typeof fetch !== "function") {
+        return;
+      }
+      const headers = {};
+      if (surfaceToken) {
+        headers[TOKEN_HEADER] = surfaceToken;
+      }
+      Promise.resolve(fetch("/api/session/seen", { method: "POST", headers })).then((res) => {
+        if (res && res.status === 403) {
+          clearSurfaceToken();
+        }
+      }).catch(() => {});
+    }
+
+    function handleVisibilityChange() {
+      if (!isPageVisible()) {
+        return;
+      }
+      if (!sessionBusy) {
+        if (waitingReplyUnseen) {
+          waitingReplyUnseen = false;
+          updateDocumentTitle();
+        }
+        reportSessionSeen();
+      }
+      if (!pollingStopped) {
+        refreshSurfacesInBackground();
       }
     }
 
@@ -3647,6 +3918,20 @@
       const sendBtn = document.getElementById("conversation-send");
       if (sendBtn) sendBtn.textContent = sessionBusy ? "Queue" : "Send";
       updateDocumentTitle();
+    }
+
+    function isSurfaceWaiting(s) {
+      return Boolean(s && (s.state === "approval" || s.state === "replied"));
+    }
+
+    function updateSwitcherWaitingDot(surfaces) {
+      if (typeof document === "undefined") return;
+      const dotEl = document.getElementById("surface-switcher-dot");
+      if (!dotEl) return;
+      const list = Array.isArray(surfaces) ? surfaces : [];
+      const otherWaiting = list.some(s => s && !s.current && isSurfaceWaiting(s));
+      dotEl.setAttribute("aria-label", "another surface is waiting on you");
+      dotEl.hidden = !otherWaiting;
     }
 
     function validateSurfaces(data) {
@@ -3662,6 +3947,9 @@
           if (typeof s[f] !== "string") {
             return "/api/surfaces: surfaces[" + i + "] missing or invalid field " + f;
           }
+        }
+        if (typeof s.state !== "string" || !VALID_SURFACE_STATES.has(s.state)) {
+          return "/api/surfaces: surfaces[" + i + "] missing or invalid field state";
         }
         if (typeof s.current !== "boolean") {
           return "/api/surfaces: surfaces[" + i + "] missing or invalid field current";
@@ -3692,7 +3980,158 @@
           return "/api/surfaces: stopped[" + i + "] missing or invalid field last_message";
         }
       }
+      if (!Array.isArray(data.folders)) {
+        return "/api/surfaces: missing folders array";
+      }
+      for (let i = 0; i < data.folders.length; i++) {
+        if (typeof data.folders[i] !== "string") {
+          return "/api/surfaces: folders[" + i + "] must be a string";
+        }
+      }
       return null;
+    }
+
+    function showSurfaceStopped(name) {
+      if (typeof document === "undefined") return;
+      const msg = "This surface has stopped. Resume it with: blyte --resume " + name;
+      const lostEl = document.getElementById("lost-server");
+      if (lostEl) lostEl.hidden = true;
+      const stoppedEl = document.getElementById("surface-stopped");
+      if (stoppedEl) {
+        stoppedEl.textContent = msg;
+        stoppedEl.hidden = false;
+      }
+    }
+
+    async function stopCurrentSurface(name, stopBtn, errorEl) {
+      const headers = { "Content-Type": "application/json" };
+      if (surfaceToken) {
+        headers[TOKEN_HEADER] = surfaceToken;
+      }
+      let res;
+      try {
+        res = await fetch("/api/session/stop", {
+          method: "POST",
+          headers,
+          body: "{}",
+        });
+      } catch (err) {
+        surfaceStopConfirming = false;
+        if (stopBtn) {
+          stopBtn.disabled = false;
+          stopBtn.textContent = "Stop";
+          stopBtn.className = "surface-switcher-stop-btn";
+          stopBtn.setAttribute("data-stop-state", "idle");
+        }
+        if (errorEl) {
+          errorEl.textContent = err && err.message ? err.message : String(err);
+          errorEl.hidden = false;
+        }
+        return;
+      }
+      if (res.status === 403) {
+        stopAllPolling();
+        clearSurfaceToken();
+      }
+      if (!res.ok) {
+        const errMsg = await parseErrorPayload(res, "/api/session/stop");
+        surfaceStopConfirming = false;
+        if (stopBtn) {
+          stopBtn.disabled = false;
+          stopBtn.textContent = "Stop";
+          stopBtn.className = "surface-switcher-stop-btn";
+          stopBtn.setAttribute("data-stop-state", "idle");
+        }
+        if (errorEl) {
+          errorEl.textContent = errMsg;
+          errorEl.hidden = false;
+        }
+        return;
+      }
+      surfaceStopConfirming = false;
+      stopAllPolling();
+      closeSurfaceSwitcher();
+      showSurfaceStopped(name);
+    }
+
+    function syncSurfaceStartControls() {
+      if (!surfaceStartControls) return;
+      const { inputEl, startBtn, errEl } = surfaceStartControls;
+      if (startBtn) {
+        startBtn.disabled = surfaceStarting;
+        startBtn.textContent = surfaceStarting ? "Starting\u2026" : "Start";
+      }
+      if (inputEl) {
+        inputEl.disabled = surfaceStarting;
+      }
+      if (errEl) {
+        errEl.textContent = surfaceStartError;
+        errEl.hidden = !surfaceStartError;
+      }
+    }
+
+    async function startSurfaceInFolder(inputEl) {
+      const folder = String(inputEl ? inputEl.value : "").trim();
+      surfaceStartFolderValue = folder;
+      if (!folder) {
+        surfaceStartError = "Enter a folder path.";
+        syncSurfaceStartControls();
+        return;
+      }
+      surfaceStarting = true;
+      surfaceStartError = "";
+      syncSurfaceStartControls();
+      const headers = { "Content-Type": "application/json" };
+      if (surfaceToken) {
+        headers[TOKEN_HEADER] = surfaceToken;
+      }
+      let res;
+      try {
+        res = await fetch("/api/surfaces/start", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ folder }),
+        });
+      } catch (err) {
+        const errMsg = err && err.message ? err.message : String(err);
+        surfaceStarting = false;
+        surfaceStartError = errMsg;
+        syncSurfaceStartControls();
+        return;
+      }
+      if (res.status === 403) {
+        stopAllPolling();
+        clearSurfaceToken();
+      }
+      if (!res.ok) {
+        const errMsg = await parseErrorPayload(res, "/api/surfaces/start");
+        surfaceStarting = false;
+        surfaceStartError = errMsg;
+        syncSurfaceStartControls();
+        return;
+      }
+      let data;
+      try {
+        data = await res.json();
+      } catch (err) {
+        const errMsg = "/api/surfaces/start returned invalid JSON: " + (err && err.message ? err.message : String(err));
+        surfaceStarting = false;
+        surfaceStartError = errMsg;
+        syncSurfaceStartControls();
+        return;
+      }
+      if (!isPlainObject(data) || typeof data.url !== "string" || !data.url) {
+        const errMsg = "/api/surfaces/start returned no surface address";
+        surfaceStarting = false;
+        surfaceStartError = errMsg;
+        syncSurfaceStartControls();
+        return;
+      }
+      surfaceStarting = false;
+      surfaceStartError = "";
+      surfaceStartFolderValue = "";
+      syncSurfaceStartControls();
+      navigateToSurface(data.url);
     }
 
     function formatStoppedLastUsed(ts) {
@@ -3712,9 +4151,12 @@
       }
     }
 
-    function renderSurfaceList(container, surfaces, stopped) {
-      const list = Array.isArray(surfaces) ? surfaces : [];
+    function renderSurfaceList(container, surfaces, stopped, folders) {
+      const list = Array.isArray(surfaces)
+        ? surfaces.slice().sort((a, b) => (isSurfaceWaiting(b) ? 1 : 0) - (isSurfaceWaiting(a) ? 1 : 0))
+        : [];
       const stoppedList = Array.isArray(stopped) ? stopped : [];
+      const folderList = Array.isArray(folders) ? folders : [];
       container.textContent = "";
 
       for (const s of list) {
@@ -3724,6 +4166,7 @@
         const nameStr = s && s.name != null ? String(s.name) : "";
         const rootStr = s && s.root != null ? String(s.root) : "";
         const doingStr = s && s.doing != null ? String(s.doing) : "";
+        const stateStr = s && typeof s.state === "string" ? s.state : "idle";
 
         let row;
         if (isCurrent) {
@@ -3777,6 +4220,60 @@
           head.appendChild(badgeEl);
         }
 
+        if (stateStr === "approval" || stateStr === "replied") {
+          const stateBadge = document.createElement("span");
+          stateBadge.className = "surface-switcher-state-badge surface-switcher-state-waiting";
+          stateBadge.textContent = "waiting on you";
+          head.appendChild(stateBadge);
+
+          const detailEl = document.createElement("span");
+          detailEl.className = "surface-switcher-state-detail";
+          detailEl.textContent = stateStr === "approval" ? "needs your approval" : "replied";
+          head.appendChild(detailEl);
+        } else if (stateStr === "working") {
+          const stateBadge = document.createElement("span");
+          stateBadge.className = "surface-switcher-state-badge surface-switcher-state-working";
+          stateBadge.textContent = "working";
+          head.appendChild(stateBadge);
+        }
+
+        let stopErrorEl = null;
+        if (isCurrent) {
+          stopErrorEl = document.createElement("div");
+          stopErrorEl.className = "surface-switcher-row-error";
+          stopErrorEl.setAttribute("role", "alert");
+          stopErrorEl.hidden = true;
+
+          const stopBtn = document.createElement("button");
+          stopBtn.type = "button";
+          stopBtn.className = surfaceStopConfirming
+            ? "surface-switcher-stop-btn surface-switcher-stop-confirm"
+            : "surface-switcher-stop-btn";
+          stopBtn.setAttribute("data-stop-state", surfaceStopConfirming ? "confirm" : "idle");
+          stopBtn.textContent = surfaceStopConfirming ? "Stop this surface?" : "Stop";
+          stopBtn.addEventListener("click", (e) => {
+            if (e && typeof e.stopPropagation === "function") {
+              e.stopPropagation();
+            }
+            if (stopBtn.disabled) return;
+            if (!surfaceStopConfirming) {
+              surfaceStopConfirming = true;
+              stopBtn.textContent = "Stop this surface?";
+              stopBtn.className = "surface-switcher-stop-btn surface-switcher-stop-confirm";
+              stopBtn.setAttribute("data-stop-state", "confirm");
+              if (stopErrorEl) {
+                stopErrorEl.textContent = "";
+                stopErrorEl.hidden = true;
+              }
+              return;
+            }
+            stopBtn.disabled = true;
+            stopBtn.textContent = "Stopping\u2026";
+            stopCurrentSurface(nameStr, stopBtn, stopErrorEl);
+          });
+          head.appendChild(stopBtn);
+        }
+
         row.appendChild(head);
 
         const rootEl = document.createElement("div");
@@ -3797,15 +4294,90 @@
           row.appendChild(errorEl);
         }
 
+        if (stopErrorEl) {
+          row.appendChild(stopErrorEl);
+        }
+
         container.appendChild(row);
       }
 
       if (!list.some(s => !s || !s.current)) {
         const emptyEl = document.createElement("div");
         emptyEl.className = "surface-switcher-empty";
-        emptyEl.textContent = "No other surfaces are running. Start one by running blyte in another folder.";
+        emptyEl.textContent = "No other surfaces are running.";
         container.appendChild(emptyEl);
       }
+
+      const startRow = document.createElement("div");
+      startRow.className = "surface-switcher-start";
+
+      const startLabel = document.createElement("label");
+      startLabel.className = "surface-switcher-start-label";
+      startLabel.setAttribute("for", "surface-start-folder");
+      startLabel.textContent = "Start a surface in another folder";
+      startRow.appendChild(startLabel);
+
+      const startControls = document.createElement("div");
+      startControls.className = "surface-switcher-start-controls";
+
+      const folderInput = document.createElement("input");
+      folderInput.id = "surface-start-folder";
+      folderInput.type = "text";
+      folderInput.className = "surface-switcher-start-input mono";
+      folderInput.setAttribute("list", "surface-start-folders-list");
+      folderInput.setAttribute("placeholder", "/path/to/folder");
+      folderInput.setAttribute("autocomplete", "off");
+      folderInput.value = surfaceStartFolderValue;
+      folderInput.disabled = surfaceStarting;
+
+      const dataList = document.createElement("datalist");
+      dataList.id = "surface-start-folders-list";
+      for (const folder of folderList) {
+        const opt = document.createElement("option");
+        opt.value = folder;
+        opt.setAttribute("value", folder);
+        dataList.appendChild(opt);
+      }
+
+      const startBtn = document.createElement("button");
+      startBtn.type = "button";
+      startBtn.className = "surface-switcher-start-btn";
+      startBtn.disabled = surfaceStarting;
+      startBtn.textContent = surfaceStarting ? "Starting\u2026" : "Start";
+
+      const startErrEl = document.createElement("div");
+      startErrEl.className = "surface-switcher-start-error";
+      startErrEl.setAttribute("role", "alert");
+      startErrEl.textContent = surfaceStartError;
+      startErrEl.hidden = !surfaceStartError;
+
+      folderInput.addEventListener("input", () => {
+        surfaceStartFolderValue = folderInput.value;
+      });
+      folderInput.addEventListener("keydown", (e) => {
+        if (e && e.key === "Enter" && !startBtn.disabled) {
+          if (typeof e.preventDefault === "function") {
+            e.preventDefault();
+          }
+          startSurfaceInFolder(folderInput);
+        }
+      });
+      startBtn.addEventListener("click", (e) => {
+        if (e && typeof e.stopPropagation === "function") {
+          e.stopPropagation();
+        }
+        if (startBtn.disabled) return;
+        startSurfaceInFolder(folderInput);
+      });
+
+      surfaceStartControls = { inputEl: folderInput, startBtn, errEl: startErrEl };
+
+      startControls.appendChild(folderInput);
+      startControls.appendChild(dataList);
+      startControls.appendChild(startBtn);
+      startRow.appendChild(startControls);
+      startRow.appendChild(startErrEl);
+      container.appendChild(startRow);
 
       if (stoppedList.length > 0) {
         const heading = document.createElement("div");
@@ -3874,6 +4446,10 @@
     function closeSurfaceSwitcher() {
       surfaceSwitcherOpen = false;
       surfaceSwitcherReqId += 1;
+      surfaceStopConfirming = false;
+      if (!surfaceStarting) {
+        surfaceStartError = "";
+      }
       if (typeof document === "undefined") return;
       const btn = document.getElementById("surface-switcher");
       if (btn) btn.setAttribute("aria-expanded", "false");
@@ -3906,6 +4482,7 @@
       surfaceSwitcherOpen = true;
       const reqId = ++surfaceSwitcherReqId;
       btn.setAttribute("aria-expanded", "true");
+      surfaceStartControls = null;
       list.innerHTML = '<div class="surface-switcher-loading">Loading surfaces...</div>';
       list.hidden = false;
       const headers = {};
@@ -3949,7 +4526,53 @@
         list.innerHTML = renderSurfaceListError(err);
         return;
       }
-      renderSurfaceList(list, data.surfaces, data.stopped);
+      updateSwitcherWaitingDot(data.surfaces);
+      renderSurfaceList(list, data.surfaces, data.stopped, data.folders);
+    }
+
+    async function refreshSurfacesInBackground() {
+      if (pollingStopped || !isPageVisible() || typeof fetch !== "function") {
+        return;
+      }
+      const headers = {};
+      if (surfaceToken) {
+        headers[TOKEN_HEADER] = surfaceToken;
+      }
+      let res;
+      try {
+        res = await fetch("/api/surfaces", { headers });
+      } catch (_) {
+        return;
+      }
+      if (pollingStopped) return;
+      if (res.status === 403) {
+        stopAllPolling();
+        clearSurfaceToken();
+        return;
+      }
+      if (!res.ok) {
+        return;
+      }
+      let data;
+      try {
+        data = await res.json();
+      } catch (_) {
+        return;
+      }
+      if (validateSurfaces(data)) {
+        return;
+      }
+      updateSwitcherWaitingDot(data.surfaces);
+      if (surfaceSwitcherOpen && !surfaceStarting && !surfaceStopConfirming && typeof document !== "undefined") {
+        const active = document.activeElement;
+        if (active && active.id === "surface-start-folder") {
+          return;
+        }
+        const list = document.getElementById("surface-switcher-list");
+        if (list) {
+          renderSurfaceList(list, data.surfaces, data.stopped, data.folders);
+        }
+      }
     }
 
     function renderModelsSelect() {
@@ -3979,12 +4602,24 @@
       sessionState = data;
       if (syncBusy) {
         sessionBusy = data.busy;
+        pendingApprovalFromSession = data.state === "approval";
+        waitingReplyUnseen = data.state === "replied";
+        if (isPageVisible() && !sessionBusy) {
+          waitingReplyUnseen = false;
+        }
       }
       if (typeof document === "undefined") return;
       const switcherEl = document.getElementById("surface-switcher");
-      if (switcherEl) switcherEl.textContent = data.repo;
-      const repoEl = document.getElementById("repo-name");
-      if (repoEl) repoEl.textContent = data.repo;
+      if (switcherEl) {
+        const labelEl = typeof switcherEl.querySelector === "function"
+          ? switcherEl.querySelector(".surface-switcher-label")
+          : null;
+        if (labelEl) {
+          labelEl.textContent = data.repo;
+        } else {
+          switcherEl.textContent = data.repo;
+        }
+      }
       const noRepoEl = document.getElementById("no-repo-badge");
       if (noRepoEl) {
         const notice = renderNoRepoNotice(data.repository);
@@ -4580,6 +5215,7 @@
         errEl.textContent = "";
         errEl.hidden = true;
       }
+      updateDocumentTitle();
     }
 
     function appendConversationError(msg) {
@@ -4817,7 +5453,9 @@
       return node;
     }
 
-    function applyLogEntries(entries) {
+    function applyLogEntries(entries, options) {
+      const isReplay = Boolean(options && options.isReplay);
+      const wasBusyBeforeReplay = isReplay && sessionBusy;
       const threadEl = document.getElementById("conversation-thread");
       const activityEl = document.getElementById("activity");
       const atBottom = threadEl
@@ -4930,6 +5568,7 @@
         }
 
         if (isPlainObject(entry) && entry.kind === "approval_requested" && typeof entry.id === "string" && entry.id && typeof entry.command === "string" && typeof entry.reason === "string" && (!hasOwn(entry, "publish") || entry.publish === undefined || entry.publish === null || isValidPublishDetails(entry.publish)) && hasValidSeq && isTimestamp(entry.ts)) {
+          pendingApprovalFromSession = false;
           approvalsById.set(entry.id, {
             seq: entry.seq,
             command: entry.command,
@@ -4940,15 +5579,19 @@
           });
           insertEntryHtml(threadEl, entry.seq, renderEntry(entry));
           sawPendingApproval = true;
+          updateDocumentTitle();
           continue;
         }
 
         if (isPlainObject(entry) && entry.kind === "approval_answered" && typeof entry.id === "string" && entry.id && typeof entry.command === "string" && (entry.answer === "yes" || entry.answer === "no") && hasValidSeq && isTimestamp(entry.ts)) {
+          pendingApprovalFromSession = false;
           if (approvalsById.has(entry.id)) {
             markApprovalCardAnswered(threadEl, entry.id, entry.answer);
             insertEntryHtml(threadEl, entry.seq, renderEntry(entry, { matched: true }));
+            updateDocumentTitle();
             continue;
           }
+          updateDocumentTitle();
         }
 
         insertEntryHtml(threadEl, hasValidSeq ? entry.seq : null, renderEntry(entry));
@@ -4971,6 +5614,9 @@
             finalizeReply(threadEl, activeReply);
             activeReply = nextReply;
           }
+          if (!isReplay) {
+            waitingReplyUnseen = false;
+          }
           sessionBusy = true;
           updateWorkingState();
         } else if (
@@ -4991,12 +5637,16 @@
               finalizeReply(threadEl, activeReply);
               activeReply = nextReply;
             }
+            if (!isReplay) {
+              waitingReplyUnseen = false;
+            }
             sessionBusy = true;
             updateWorkingState();
           }
         } else if (entry.kind === "error" && typeof entry.message === "string") {
           finalizeReply(threadEl, activeReply);
         } else if (entry.kind === "idle" && typeof entry.turns === "number") {
+          pendingApprovalFromSession = false;
           finalizeReply(threadEl, activeReply);
           activeReply = queuedReplies.length > 0 ? queuedReplies.shift() : null;
           if (queuedUserSeqs.length > 0) {
@@ -5009,11 +5659,34 @@
               }
             }
             sessionBusy = true;
+            if (!isReplay) {
+              waitingReplyUnseen = false;
+            }
           } else {
             sessionBusy = false;
+            if (!isReplay) {
+              if (isPageVisible()) {
+                waitingReplyUnseen = false;
+                reportSessionSeen();
+              } else {
+                waitingReplyUnseen = true;
+              }
+            }
           }
           updateWorkingState();
         }
+      }
+      if (isReplay) {
+        pendingApprovalFromSession = false;
+        if (wasBusyBeforeReplay && !sessionBusy) {
+          if (isPageVisible()) {
+            waitingReplyUnseen = false;
+            reportSessionSeen();
+          } else {
+            waitingReplyUnseen = true;
+          }
+        }
+        updateDocumentTitle();
       }
       if (threadEl) {
         if (threadEl.children.length === 0) {
@@ -8040,6 +8713,8 @@
         });
       }
 
+      document.addEventListener("visibilitychange", handleVisibilityChange);
+
       document.addEventListener("click", (e) => {
         if (!surfaceSwitcherOpen) return;
         const wrap = document.getElementById("surface-switcher-wrap");
@@ -8442,7 +9117,7 @@
             await new Promise(resolve => setTimeout(resolve, 2000));
             continue;
           }
-          applyLogEntries(data.entries);
+          applyLogEntries(data.entries, { isReplay: !initialEventsLoaded });
           if (data.last_seq > lastSeqSeen) {
             lastSeqSeen = data.last_seq;
           }
@@ -8475,6 +9150,9 @@
         return;
       }
       applySessionState(data, true);
+      if (isPageVisible() && !sessionBusy) {
+        reportSessionSeen();
+      }
     }
 
     async function loadModels() {
@@ -8512,15 +9190,46 @@
         fetchRequests();
         requestsPollTimer = setInterval(fetchRequests, RUNS_POLL_MS);
       }
+      if (surfacesPollTimer === null) {
+        refreshSurfacesInBackground();
+        surfacesPollTimer = setInterval(refreshSurfacesInBackground, SURFACES_POLL_MS);
+      }
       pollEvents();
     }
 
     async function init() {
-      surfaceToken = readSurfaceToken();
+      const openCode = readOpenCode();
+      if (openCode !== null) {
+        surfaceToken = await exchangeOpenCode(openCode);
+      } else {
+        openCodeRefused = false;
+        surfaceToken = readSurfaceToken();
+      }
       if (typeof window !== "undefined") {
-        window.addEventListener("hashchange", () => {
+        window.addEventListener("hashchange", async () => {
+          const nextOpen = readOpenCode();
+          if (nextOpen !== null) {
+            const exchanged = await exchangeOpenCode(nextOpen);
+            if (exchanged) {
+              surfaceToken = exchanged;
+              updateMissingTokenUI();
+              if (pollingStopped) {
+                await loadInitialSession();
+                if (!pollingStopped) {
+                  loadModels();
+                  startPolling();
+                }
+              }
+            } else {
+              surfaceToken = null;
+              stopAllPolling();
+              updateMissingTokenUI();
+            }
+            return;
+          }
           const next = readSurfaceToken();
           if (next) {
+            openCodeRefused = false;
             surfaceToken = next;
             updateMissingTokenUI();
             if (pollingStopped) {
@@ -8532,6 +9241,10 @@
       bindEvents();
       updateMissingTokenUI();
       renderAll(true);
+      if (openCodeRefused) {
+        stopAllPolling();
+        return;
+      }
       await loadInitialSession();
       if (pollingStopped) {
         return;

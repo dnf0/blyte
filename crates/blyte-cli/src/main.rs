@@ -76,12 +76,13 @@ fn main() {
     }
     let has_surface_flags = cli.port.is_some()
         || cli.no_open
+        || cli.open_in.is_some()
         || cli.days.is_some()
         || cli.name.is_some()
         || cli.resume.is_some();
     if has_surface_flags && (cli.terminal || cli.prompt.is_some() || cli.command.is_some()) {
         eprintln!(
-            "error: --port, --no-open, --days, --name, and --resume cannot be used with --terminal, a prompt, or a subcommand"
+            "error: --port, --no-open, --open-in, --days, --name, and --resume cannot be used with --terminal, a prompt, or a subcommand"
         );
         std::process::exit(2);
     }
@@ -169,7 +170,15 @@ fn main() {
                     &dir, json, &mut out, &mut err,
                 ));
             }
-            blyte_cli::cli::Command::Open { name } => {
+            blyte_cli::cli::Command::Open { name, open_in } => {
+                let open_in =
+                    match blyte_cli::open_window::resolve_open_in_from_env(open_in.as_deref()) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            std::process::exit(2);
+                        }
+                    };
                 let dir = match blyte_cli::surface_registry::registry_dir() {
                     Ok(dir) => dir,
                     Err(e) => {
@@ -179,12 +188,9 @@ fn main() {
                 };
                 let mut out = std::io::stdout();
                 let mut err = std::io::stderr();
+                let opener = |url: &str| blyte_cli::serve::open_browser_in(open_in, url);
                 std::process::exit(blyte_cli::surfaces_cmd::run_open(
-                    &dir,
-                    &name,
-                    &blyte_cli::serve::open_browser,
-                    &mut out,
-                    &mut err,
+                    &dir, &name, &opener, &mut out, &mut err,
                 ));
             }
             blyte_cli::cli::Command::Tell {
@@ -439,11 +445,20 @@ fn main() {
 
     let use_terminal = cli.terminal;
     if !use_terminal {
+        let open_in = match blyte_cli::open_window::resolve_open_in_from_env(cli.open_in.as_deref())
+        {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }
+        };
         cli.converse = true;
         apply_converse_defaults(&mut cli, &matches);
         let surface_args = SurfaceArgs {
             port: cli.port.unwrap_or(0),
             no_open: cli.no_open,
+            open_in,
             days: cli.days.unwrap_or(14),
             name: cli.name,
             resume: cli.resume,

@@ -82,6 +82,8 @@ Options:
           Port for the live surface (0 picks a free port)
       --no-open
           Do not open the live surface in the browser
+      --open-in <app|browser>
+          Open the live surface in an app window (`app`, default) or the default browser (`browser`)
       --days <N>
           How many days back to include finished runs in the live surface (1 to 31, default 14)
   -h, --help
@@ -383,11 +385,27 @@ Options:
   -h, --help  Print help
 ```
 
+## blyte open
+
+```text
+Open a running surface's page by name
+
+Usage: blyte open [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  
+
+Options:
+      --open-in <app|browser>  Open the surface in an app window (`app`, default) or the default browser (`browser`)
+  -h, --help                   Print help
+```
+
 ## Environment
 
 | variable | meaning |
 |---|---|
 | `BLYTE_MODEL` | default for `--model` |
+| `BLYTE_OPEN_IN` | default for `--open-in` on `blyte` and `blyte open`: `app` (default) opens a Chrome, Chromium, Edge or Brave app window (falling back to the default browser with a notice on stderr if none is installed); `browser` opens the default browser without the notice |
 | `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENROUTER_API_KEY`, `OLLAMA_HOST`, `OLLAMA_API_KEY` | provider credentials and endpoints; never passed to commands |
 | `GOOGLE_CLOUD_PROJECT`, `CLOUDSDK_CORE_PROJECT`, `GOOGLE_CLOUD_LOCATION` | project and location for Vertex AI models (`vertex/<model>`); never passed to commands |
 | `CODEX_HOME` | where the ChatGPT provider looks for `auth.json` (default `~/.codex`) |
